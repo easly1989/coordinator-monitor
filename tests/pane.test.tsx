@@ -186,7 +186,9 @@ describe('the app asking for a permission', () => {
     on('fs.exists', () => ({ value: false }))
     on('fs.list', (_, e) => ({ value: coordinator && e.path.replace(/\\/g, '/').endsWith('/sessions') ? [{ kind: 'file', name: file, mtimeMs: Date.now() } as never] : [] }))
     on('fs.read', (_, e) => {
-      if (coordinator && e.path.replace(/\\/g, '/').endsWith(`/sessions/${file}`)) return { value: COORD }
+      const p = e.path.replace(/\\/g, '/')
+      if (coordinator && p.endsWith(`/sessions/${file}`)) return { value: COORD }
+      if (written[p] !== undefined) return { value: written[p] }
       throw new Error('ENOENT')
     })
     on('fs.write', (_, e) => {
@@ -194,30 +196,50 @@ describe('the app asking for a permission', () => {
       return { value: undefined }
     })
     on('clock.every', () => ({ value: undefined }))
-    return () => JSON.parse(Object.entries(written).find(([k]) => k.endsWith('/sessions/me.json'))?.[1] ?? '{}') as SessionStatus
+    const mine = () => JSON.parse(Object.entries(written).find(([k]) => k.endsWith('/sessions/me.json'))?.[1] ?? '{}') as SessionStatus
+    // The pane, while the session waits: what it saw on the card, and the answer it gives (none: no answer in time).
+    const pane = { reply: undefined as string | undefined, seen: [] as string[] }
+    on('process.run', (_, e) => {
+      const ask = mine().requests.at(-1)
+      pane.seen.push(ask?.command ?? '')
+      // The engine resolves the mod's paths: the answers file sits beside the status file it wrote.
+      const file = Object.keys(written).find(k => k.endsWith('/sessions/me.json'))?.replace('/sessions/', '/answers/')
+      expect(file?.endsWith(String(e.init?.env?.CM_FILE).slice(1))).toBe(true)
+      if (ask && file && pane.reply) written[file] = JSON.stringify([{ requestId: ask.id, at: Date.now(), kind: pane.reply }])
+      return { value: { exitCode: 0, stdout: '', stderr: '' } as never }
+    })
+    return { mine, pane }
   }
 
-  test('goes to the pane while a coordinator is there, and the session stops to wait', async ($, on) => {
-    const mine = setup(on, true)
+  test('goes to the pane while a coordinator is there, and the session waits for the answer', async ($, on) => {
+    const { mine, pane } = setup(on, true)
     let dialog = false
     on('classic.PermissionRequest', () => {
       dialog = true
       return { decision: { behavior: 'allow' } } as never
     })
     await $.session.start({ cwd: '/repos/project', surface: 'desktop', isInteractive: true })
-    const r = (await $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: { command: 'npm test' } } as never)) as { decision?: { behavior: string; interrupt?: boolean } }
+    type R = { decision?: { behavior: string } }
+    pane.reply = 'approve-once'
+    const r = (await $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: { command: 'npm test' } } as never)) as R
+    expect(r.decision?.behavior).toBe('allow')
     expect(dialog).toBe(false)
-    expect(r.decision?.behavior).toBe('deny')
-    expect(r.decision?.interrupt).toBe(true)
-    expect(mine().requests.map(q => `${q.kind}:${q.tool}:${q.command}`)).toEqual(['ask:Bash:npm test'])
-    // Any field beyond the command is part of what is asked: it shows, and it gets its own grant.
-    await $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: { command: 'npm test', description: 'run tests', dangerouslyDisableSandbox: true } } as never)
-    expect(mine().requests[1]?.command).toContain('"dangerouslyDisableSandbox": true')
-    expect(mine().requests[1]?.command).not.toContain('run tests')
-    // Too long to show whole: the app's own dialog asks.
-    await $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: { command: 'x'.repeat(9000) } } as never)
+    expect(pane.seen).toEqual(['npm test'])
+    expect(mine().requests).toEqual([])
+    // Any field beyond the command is part of what is asked: it shows, and the answer covers it alone.
+    pane.reply = 'deny'
+    const d = (await $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: { command: 'npm test', description: 'run tests', dangerouslyDisableSandbox: true } } as never)) as R
+    expect(d.decision?.behavior).toBe('deny')
+    expect(pane.seen[1]).toContain('"dangerouslyDisableSandbox": true')
+    expect(pane.seen[1]).not.toContain('run tests')
+    // No answer in time: the app's own dialog asks.
+    pane.reply = undefined
+    await $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: { command: 'npm run build' } } as never)
     expect(dialog).toBe(true)
-    expect(mine().requests.length).toBe(2)
+    expect(mine().requests).toEqual([])
+    // Too long to show whole: the dialog, without asking the pane.
+    await $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: { command: 'x'.repeat(9000) } } as never)
+    expect(pane.seen.length).toBe(3)
   })
 
   test('a status file posing as another session does not count', async ($, on) => {
