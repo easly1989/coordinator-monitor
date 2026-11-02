@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.1 — 2026-11-03
+
+- **The coordinator is left out of "Sessions and subagents"**: its chat is beside the pane. Its protected commands still reach the inbox.
+- **The coordinator's own permission prompts stay in its chat**, as the app's dialog: the person is already there.
+- **A session counts as active while any of its subagents runs**, even when the session itself sits idle waiting for them.
+
 ## 0.3.0 — 2026-11-03
 
 - **A session running an older copy of the mod is flagged** on its card, with the hint to run `/reload-plugins` there: mods do not hot-reload, and an older copy can behave differently (a 0.2.0 build from before the release stopped subagents at their first permission prompt).

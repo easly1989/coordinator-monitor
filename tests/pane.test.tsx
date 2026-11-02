@@ -49,12 +49,21 @@ const FILES: Record<string, SessionStatus> = {
       },
     ],
   }),
+  // Idle itself while its worker runs: it counts as running.
   'b.json': status({
     sessionId: 'b',
     title: 'Recipes',
-    state: 'running',
+    state: 'idle',
     costUsd: 1.5,
     agents: [{ id: 'w1', type: 'savvy-medium', description: 'Migrate schema', status: 'running', stepDone: 2, stepTotal: 4, stepNote: 'events' }],
+  }),
+  // The coordinator: its request reaches the inbox, its own card stays out of the list.
+  'c.json': status({
+    sessionId: 'c',
+    title: 'Lead',
+    state: 'waiting',
+    isCoordinator: true,
+    requests: [{ id: 'p2', kind: 'permission', createdAt: now + 2, tool: 'Bash', command: 'gh pr merge 7', rule: 'merge' }],
   }),
 }
 
@@ -115,7 +124,7 @@ test('the pane draws sessions, workers and every kind of request, on every surfa
   expect(mine.title).toBe('Coordinatore')
   expect(mine.folder).toBe('coordinator')
   expect(mine.effort).toBe('high')
-  expect(mine.version).toBe('0.3.0')
+  expect(mine.version).toBe('0.3.1')
 
   for (const surface of ['terminal', 'desktop', 'vscode', 'mobile'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface })
@@ -128,6 +137,10 @@ test('the pane draws sessions, workers and every kind of request, on every surfa
     expect(await ui.find({ type: 'Text', text: /waiting for a permission: git push origin main/ })).toBeTruthy()
     // The fixtures publish no version, as copies before 0.3 did: each is flagged.
     expect(await ui.find({ type: 'Text', text: /runs mod < 0\.3: \/reload-plugins there/ })).toBeTruthy()
+    expect(await ui.find({ type: 'Text', text: /^\s*Running\s*$/ })).toBeTruthy()
+    expect(await ui.find({ type: 'Text', text: /Lead · Bash/ })).toBeTruthy()
+    expect(await ui.find({ type: 'Text', text: /^Lead$/ })).toBeFalsy()
+    expect(await ui.find({ type: 'Text', text: /2 active \/ 2/ })).toBeTruthy()
     await ui.unmount()
   }
 })
