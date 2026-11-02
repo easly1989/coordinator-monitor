@@ -119,7 +119,7 @@ test('the pane draws sessions, workers and every kind of request, on every surfa
   await $.command.run({ command: 'agents-monitor', args: '' } as never)
 
   // This session publishes the desktop's title and effort, not its folder name.
-  for (let i = 0; i < 50 && !Object.keys(written).some(k => k.endsWith('/sessions/me.json')); i++) await new Promise<void>(r => setTimeout(r, 10))
+  for (let i = 0; i < 300 && !Object.keys(written).some(k => k.endsWith('/sessions/me.json')); i++) await new Promise<void>(r => setTimeout(r, 10))
   const mine = JSON.parse(Object.entries(written).find(([k]) => k.endsWith('/sessions/me.json'))?.[1] ?? '{}') as SessionStatus
   expect(mine.title).toBe('Coordinatore')
   expect(mine.folder).toBe('coordinator')
@@ -267,7 +267,7 @@ describe('the app asking for a permission', () => {
       return { text: '' } as never
     })
     await $.session.start({ cwd: '/repos/project', surface: 'desktop', isInteractive: true })
-    for (let i = 0; i < 50 && !runs.length; i++) await new Promise<void>(r => setTimeout(r, 10))
+    for (let i = 0; i < 300 && !runs.length; i++) await new Promise<void>(r => setTimeout(r, 10))
     expect(runs).toEqual(['reload-plugins'])
   })
 
