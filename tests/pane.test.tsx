@@ -83,11 +83,14 @@ test('the pane draws sessions, workers and every kind of request, on every surfa
     [`${DESK}/acct/org`]: [
       { kind: 'file', name: 'local_other.json', mtimeMs: now } as never,
       { kind: 'file', name: 'local_me.json', mtimeMs: now - 1 } as never,
+      { kind: 'file', name: 'local_a.json', mtimeMs: now - 2 } as never,
     ],
   }
   const DOCS: Record<string, unknown> = {
     [`${DESK}/acct/org/local_other.json`]: { cliSessionId: 'other', title: 'Not me' },
     [`${DESK}/acct/org/local_me.json`]: { cliSessionId: 'me', title: 'Coordinatore', effort: 'high' },
+    // A session on an older copy of the mod publishes its folder name; the pane names it anyway.
+    [`${DESK}/acct/org/local_a.json`]: { cliSessionId: 'a', title: 'HomeLab', effort: 'xhigh' },
   }
   const slash = (e: unknown): string => String((e as { path?: string }).path ?? '').replace(/\\/g, '/')
   on('fs.list', (_, e) => {
@@ -113,12 +116,12 @@ test('the pane draws sessions, workers and every kind of request, on every surfa
 
   for (const surface of ['terminal', 'desktop', 'vscode', 'mobile'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface })
-    expect(await ui.find({ type: 'Text', text: /Home Server · Bash/ })).toBeTruthy()
+    expect(await ui.find({ type: 'Text', text: /HomeLab · Bash/ })).toBeTruthy()
     expect(await ui.find({ type: 'Text', text: /Migrate schema/ })).toBeTruthy()
     expect(await ui.find({ type: 'Text', text: /Update the console/ })).toBeTruthy()
     expect(await ui.find({ type: 'Text', text: /62%/ })).toBeTruthy()
     expect(await ui.find({ type: 'Text', text: /\$1\.50/ })).toBeTruthy()
-    expect(await ui.find({ type: 'Text', text: /Opus 5\.5/ })).toBeTruthy()
+    expect(await ui.find({ type: 'Text', text: /Opus 5\.5 · extra/ })).toBeTruthy()
     expect(await ui.find({ type: 'Text', text: /waiting for a permission: git push origin main/ })).toBeTruthy()
     await ui.unmount()
   }

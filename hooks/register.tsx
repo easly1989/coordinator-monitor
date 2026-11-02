@@ -63,8 +63,6 @@ let home = '.'
 // The desktop app's own record of this session: its sidebar title and effort.
 let label = ''
 let effort = ''
-let metaPath = ''
-let metaAt = 0
 // shortcut: timings live in module memory, so a reload restarts them; persist in `local` if that bothers.
 const agentTimes = new Map<string, { startedAt: number; endedAt?: number }>()
 
@@ -101,48 +99,42 @@ const detectLang = async ($: $, option: string | undefined): Promise<string> => 
 
 type DesktopMeta = { cliSessionId?: string; title?: string; effort?: string }
 
+// Each desktop record as last read, by path and mtime: a refresh rereads only what changed.
+const deskFiles = new Map<string, { mtimeMs: number; meta: DesktopMeta | null }>()
+let deskAt = 0
+
 /**
  * The desktop app files each Code session as claude-code-sessions/<account>/<org>/local_<id>.json,
- * with the CLI's session id and the sidebar title. The mod API has no title getter, so read it there;
- * a session the desktop did not start has no such file and keeps its folder title.
+ * with the CLI's session id, the sidebar title and the effort. The mod API has no title getter, so
+ * read them there, keyed by CLI session id; a session the desktop did not start keeps its folder title.
  */
-const desktopMeta = async ($: $): Promise<void> => {
-  if (Date.now() - metaAt < 60_000) return
-  metaAt = Date.now()
-  if (!metaPath) {
+const desktopIndex = async ($: $): Promise<Map<string, DesktopMeta>> => {
+  if (Date.now() - deskAt >= 60_000) {
+    deskAt = Date.now()
     const appData = await $.env.get('APPDATA')
     const roots = [appData ? `${norm(appData)}/Claude` : '', `${home}/Library/Application Support/Claude`, `${home}/.config/Claude`].filter(Boolean)
+    const seen = new Set<string>()
     for (const root of roots) {
       const dir = `${root}/claude-code-sessions`
       for (const acct of await $.fs.list(dir).catch(() => [])) {
         if (acct.kind !== 'dir') continue
         for (const org of await $.fs.list(`${dir}/${acct.name}`).catch(() => [])) {
           if (org.kind !== 'dir') continue
-          const files = (await $.fs.list(`${dir}/${acct.name}/${org.name}`).catch(() => []))
-            .filter(f => f.kind === 'file' && f.name.startsWith('local_') && f.name.endsWith('.json'))
-            .sort((a, b) => (b.mtimeMs ?? 0) - (a.mtimeMs ?? 0))
-          for (const f of files) {
+          for (const f of await $.fs.list(`${dir}/${acct.name}/${org.name}`).catch(() => [])) {
+            if (f.kind !== 'file' || !f.name.startsWith('local_') || !f.name.endsWith('.json')) continue
             const path = `${dir}/${acct.name}/${org.name}/${f.name}`
-            if ((await readJson<DesktopMeta>($, path))?.cliSessionId === sessionId) {
-              metaPath = path
-              break
-            }
+            seen.add(path)
+            const mtimeMs = f.mtimeMs ?? 0
+            if (deskFiles.get(path)?.mtimeMs !== mtimeMs) deskFiles.set(path, { mtimeMs, meta: await readJson<DesktopMeta>($, path) })
           }
-          if (metaPath) break
         }
-        if (metaPath) break
       }
-      if (metaPath) break
     }
-    if (!metaPath) return
+    for (const p of [...deskFiles.keys()]) if (!seen.has(p)) deskFiles.delete(p)
   }
-  const m = await readJson<DesktopMeta>($, metaPath)
-  if (m?.cliSessionId !== sessionId) {
-    metaPath = ''
-    return
-  }
-  label = m.title?.trim() ?? ''
-  effort = m.effort ?? ''
+  const index = new Map<string, DesktopMeta>()
+  for (const { meta } of deskFiles.values()) if (meta?.cliSessionId) index.set(meta.cliSessionId, meta)
+  return index
 }
 
 // ---------------------------------------------------------------------------
@@ -251,6 +243,16 @@ const gather = async ($: $): Promise<void> => {
     all.push(s)
   }
   const rank = (s: SessionStatus) => (s.isCoordinator ? 0 : s.state === 'waiting' ? 1 : s.state === 'running' ? 2 : s.state === 'idle' ? 3 : 4)
+  // Titles from the desktop's own records, so a session running an older copy of the mod is named too.
+  const desk = await desktopIndex($).catch(() => new Map<string, DesktopMeta>())
+  for (const s of all) {
+    const m = desk.get(s.sessionId)
+    if (m?.title?.trim() && m.title.trim() !== s.title) {
+      s.folder ??= s.title
+      s.title = m.title.trim()
+    }
+    if (!s.effort && m?.effort) s.effort = m.effort
+  }
   all.sort((a, b) => rank(a) - rank(b) || b.heartbeat - a.heartbeat)
   await update($, board, () => ({ sessions: all, updatedAt: now }))
 }
@@ -271,7 +273,9 @@ const tick = async ($: $): Promise<void> => {
   ticking = true
   try {
     await applyAnswers($)
-    await desktopMeta($).catch(() => undefined)
+    const me = (await desktopIndex($).catch(() => new Map<string, DesktopMeta>())).get(sessionId)
+    label = me?.title?.trim() ?? ''
+    effort = me?.effort ?? ''
     await publish($)
     if (isPaneOpen || isCoordinator) await gather($)
   } catch {
@@ -515,7 +519,7 @@ export const register: Register = (on, options) => {
     inbox.sort((x, y) => x.r.createdAt - y.r.createdAt)
 
     const stat = (key: string, label: string, value: string, sub: RenderChildren): RenderNode => (
-      <Box key={key} flexDirection="column" flexGrow={1} flexShrink={1} minWidth={18} gap="xs" padding="sm" backgroundColor={fill(CARD)} borderStyle={isTerm ? 'round' : undefined} borderDimColor>
+      <Box key={key} flexDirection="column" width="32%" flexGrow={1} gap="xs" padding="sm" backgroundColor={fill(CARD)} borderStyle={isTerm ? 'round' : undefined} borderDimColor>
         <Text size="caption" color="subtle" wrap="truncate-end">
           {label}
         </Text>
@@ -758,7 +762,8 @@ export const register: Register = (on, options) => {
             {ago !== undefined ? ` · ${S.updatedAgo(ago)}` : ''}
           </Text>
         </Box>
-        <Box flexDirection="row" flexWrap="wrap" gap="sm">
+        {/* A fixed third each: the bars' wide markup would otherwise push every card onto its own row. */}
+        <Box flexDirection="row" gap="sm">
           {stat(
             'st-5h',
             `${S.fiveHour}${five?.resetsAt ? ` · ${S.until} ${fmtReset(five.resetsAt)}` : ''}`,
