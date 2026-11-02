@@ -66,7 +66,8 @@ export type SessionStatus = {
   requests: MonitorRequest[]
 }
 
-export type AnswerKind = 'approve-once' | 'approve-session' | 'deny' | 'answer'
+/** `dismiss` drops a request without telling the session anything. */
+export type AnswerKind = 'approve-once' | 'approve-session' | 'deny' | 'answer' | 'dismiss'
 
 export type Answer = { requestId: string; at: number; kind: AnswerKind; text?: string }
 

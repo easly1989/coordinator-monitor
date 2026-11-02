@@ -126,3 +126,44 @@ test('the pane draws sessions, workers and every kind of request, on every surfa
     await ui.unmount()
   }
 })
+
+test('a new turn retires the questions the session asked', async ($, on) => {
+  const written: Record<string, string> = {}
+  on('command.register', () => ({ value: { command: 'agents-monitor' } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('env.get', () => ({ value: undefined }))
+  on('settings.read', () => ({ value: {} }))
+  on('session.id', () => ({ value: 'me' }))
+  on('session.cwd', () => ({ value: '/repos/project' }))
+  on('session.model', () => ({ value: 'claude-sonnet-5-5' }))
+  on('session.usage', () => ({ value: { rateLimits: [] } as never }))
+  on('agent.list', () => ({ value: [] }))
+  on('fs.exists', () => ({ value: false }))
+  on('fs.list', () => ({ value: [] }))
+  on('fs.read', () => {
+    throw new Error('ENOENT')
+  })
+  on('fs.write', (_, e) => {
+    written[e.path.replace(/\\/g, '/')] = e.text
+    return { value: undefined }
+  })
+  on('clock.every', () => ({ value: undefined }))
+  on('turn.start', (_, e) => ({ turnId: (e as { turnId: string }).turnId }) as never)
+  on('turn.complete', () => ({ text: '' }) as never)
+
+  const mine = (): SessionStatus => JSON.parse(Object.entries(written).find(([k]) => k.endsWith('/sessions/me.json'))?.[1] ?? '{}') as SessionStatus
+  const settle = async () => {
+    for (let i = 0; i < 20; i++) await new Promise<void>(r => setTimeout(r, 5))
+  }
+
+  await $.session.start({ cwd: '/repos/project', surface: 'desktop', isInteractive: true })
+  await $.turn.start({ turnId: 't1' } as never)
+  await $.turn.complete({ turnId: 't1', answer: 'Done.\n\n## Questions for you\n\n1. Which port?', isAborted: false } as never)
+  await settle()
+  expect(mine().requests.map(r => r.kind)).toEqual(['questions'])
+
+  // Carlo answers in the session itself: its next turn starts.
+  await $.turn.start({ turnId: 't2' } as never)
+  await settle()
+  expect(mine().requests).toEqual([])
+})

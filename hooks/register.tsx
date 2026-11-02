@@ -375,7 +375,15 @@ export const register: Register = (on, options) => {
   })
 
   on('turn.start', async ($, e, next) => {
-    if (!e.agentId) isBusy = true
+    if (!e.agentId) {
+      isBusy = true
+      // A new turn supersedes what the session asked last time, whether the answer came from
+      // the pane or was typed in the session itself. Permissions stay: only the pane grants them.
+      if ((await read($, local)).requests.some(r => r.kind !== 'permission')) {
+        await update($, local, cur => ({ ...cur, requests: cur.requests.filter(r => r.kind === 'permission') }))
+        void publish($)
+      }
+    }
     return next(e)
   })
 
@@ -511,7 +519,6 @@ export const register: Register = (on, options) => {
     const costs = b.sessions.map(s => s.costUsd).filter((c): c is number => typeof c === 'number')
     const ago = b.updatedAt ? Math.max(0, Math.round((Date.now() - b.updatedAt) / 1000)) : undefined
 
-    const open = (s: SessionStatus) => () => $.ui.toast(s.sessionId === sessionId ? S.thisSession : S.openHint(s.title, s.cwd))
 
     // What waits for the person, newest last.
     const inbox: { s: SessionStatus; r: MonitorRequest }[] = []
@@ -539,7 +546,6 @@ export const register: Register = (on, options) => {
               {what}
             </Text>
           </Box>
-          <Button key={`open-${r.id}`} plain label={`${S.open} →`} onPress={open(s)} />
         </Box>
       )
       const shell = (children: RenderChildren) => (
@@ -630,9 +636,11 @@ export const register: Register = (on, options) => {
                 </Text>
                 {field(<Input key={`other-${r.id}`} placeholder={S.otherPlaceholder} submitLabel={S.send} onSubmit={value => void answer($, s, r, 'answer', compose(value))} />)}
               </Box>
-            ) : (
+            ) : null}
+            <Box flexDirection="row" flexWrap="wrap" gap="sm">
               <Button key={`send-${r.id}`} variant="primary" label={S.send} onPress={() => void answer($, s, r, 'answer', compose(''))} />
-            )}
+              <Button key={`dismiss-${r.id}`} variant="secondary" label={S.dismiss} onPress={() => void answer($, s, r, 'dismiss')} />
+            </Box>
           </Box>,
         )
       }
@@ -643,6 +651,9 @@ export const register: Register = (on, options) => {
             {Markdown ? <Markdown key={`md-${r.id}`} text={r.text ?? ''} /> : <Text>{r.text ?? ''}</Text>}
           </Box>
           {Input ? field(<Input key={`reply-${r.id}`} placeholder={S.replyHere} rows={3} submitLabel={S.send} onSubmit={value => value.trim() && void answer($, s, r, 'answer', value)} />) : null}
+          <Box flexDirection="row" gap="sm">
+            <Button key={`dismiss-${r.id}`} variant="secondary" label={S.dismiss} onPress={() => void answer($, s, r, 'dismiss')} />
+          </Box>
         </Box>,
       )
     }
@@ -673,9 +684,7 @@ export const register: Register = (on, options) => {
           <Box flexDirection="row" gap="sm" alignItems="center">
             {crab(costume, s.title, s.state === 'running', s.state === 'ended' || s.state === 'idle')}
             <Box flexDirection="column" flexGrow={1} flexShrink={1}>
-              <Button key={`s-${s.sessionId}`} plain onPress={open(s)}>
-                <Text weight="semibold">{s.title}</Text>
-              </Button>
+              <Text weight="semibold">{s.title}</Text>
               <Text size="footnote" color="subtle" wrap="truncate-end">
                 {flow || asks || who || s.folder || s.cwd}
               </Text>
@@ -704,18 +713,21 @@ export const register: Register = (on, options) => {
               const ratio = a.status === 'done' ? 1 : a.stepTotal ? (a.stepDone ?? 0) / a.stepTotal : 0
               const steps = a.stepTotal ? `${a.stepDone ?? 0}/${a.stepTotal}${a.stepNote ? ` · ${a.stepNote}` : ''}` : ''
               const took = a.startedAt ? fmtDur((a.endedAt ?? Date.now()) - a.startedAt) : ''
-              const pick = () => {
-                if (s.sessionId === sessionId) void $.ui.view({ agentId: a.id }).then(r => r.deny && $.ui.toast(r.deny))
-                else open(s)()
-              }
+              // Only this session's own subagents can be opened from here.
+              const pick = () => void $.ui.view({ agentId: a.id }).then(r => r.deny && $.ui.toast(r.deny))
+              const name = <Text weight="semibold">{a.description || a.type}</Text>
               return (
                 <Box key={`${s.sessionId}-${a.id}`} flexDirection="row" gap="sm" paddingLeft="lg" alignItems="flex-start">
                   {crab(tier === 'other' ? 'other' : tier, word, a.status === 'running')}
                   <Box flexDirection="column" flexGrow={1} flexShrink={1} gap="xs">
                     <Box flexDirection="row" gap="sm" justifyContent="space-between" alignItems="center">
-                      <Button key={`a-${a.id}`} plain dimColor={a.status === 'idle'} onPress={pick}>
-                        <Text weight="semibold">{a.description || a.type}</Text>
-                      </Button>
+                      {s.sessionId === sessionId ? (
+                        <Button key={`a-${a.id}`} plain dimColor={a.status === 'idle'} onPress={pick}>
+                          {name}
+                        </Button>
+                      ) : (
+                        name
+                      )}
                       <Text color={a.status === 'done' ? 'success' : a.status === 'failed' ? 'error' : a.status === 'running' ? BLUE : 'subtle'}>
                         {a.status === 'done' ? '✓' : a.status === 'failed' ? '✕' : a.status === 'running' ? '●' : '◷'}
                       </Text>
