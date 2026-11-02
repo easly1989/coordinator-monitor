@@ -58,6 +58,8 @@ let rules: Rule[] = []
 let critical: string[] = []
 let tierModels: Record<string, string> = { ...TIER_MODEL }
 let forward = true
+/** App permission asks go to the pane, the coordinator's own too: its pane is beside it. */
+let forwardAsks = true
 let ticking = false
 let home = '.'
 // The desktop app's own record of this session: its sidebar title and effort.
@@ -192,7 +194,8 @@ const applyAnswers = async ($: $): Promise<void> => {
   const answers = await readJson<Answer[]>($, `${base}/answers/${sessionId}.json`)
   if (!answers?.length) return
   const l = await read($, local)
-  const fresh = answers.filter(a => !l.applied.includes(a.requestId) && l.requests.some(r => r.id === a.requestId))
+  // An app ask is answered by the hook that waits on it, not here.
+  const fresh = answers.filter(a => !l.applied.includes(a.requestId) && l.requests.some(r => r.id === a.requestId && r.kind !== 'ask'))
   if (!fresh.length) return
   const prompts: string[] = []
   await update($, local, cur => {
@@ -234,6 +237,23 @@ const askWhat = (input: unknown): string => {
 }
 const askKey = (tool: string, what: string): string => `ask\u0000${tool}\u0000${what}`
 const grantKey = (r: MonitorRequest): string => (r.kind === 'ask' ? askKey(r.tool ?? '', r.command ?? '') : (r.command ?? ''))
+
+// How long an app ask waits for the pane before the app's own dialog takes it (a process waits ten minutes at most).
+const ASK_WAIT_MS = 9 * 60_000
+
+/**
+ * Waits until the pane answers request `id`, outside the hook's 10 s budget: a host process watches
+ * this session's answers file, and a `$` call in flight never counts against the hook.
+ * shortcut: the watcher outlives a session interrupted meanwhile, up to ASK_WAIT_MS; harmless, it only reads.
+ */
+const waitAnswer = async ($: $, id: string): Promise<Answer | undefined> => {
+  const path = `${base}/answers/${sessionId}.json`
+  const argv = /^[a-z]:/i.test(home)
+    ? ['powershell', '-NoProfile', '-NonInteractive', '-Command', "while (-not ((Test-Path -LiteralPath $env:CM_FILE) -and ((Get-Content -LiteralPath $env:CM_FILE -Raw) + '').Contains($env:CM_ID))) { Start-Sleep -Milliseconds 400 }"]
+    : ['sh', '-c', 'until grep -qF "$CM_ID" "$CM_FILE" 2>/dev/null; do sleep 0.4; done']
+  await $.process.run(argv, { env: { CM_FILE: path, CM_ID: id }, timeoutMs: ASK_WAIT_MS }).catch(() => undefined)
+  return (await readJson<Answer[]>($, path))?.find(a => a.requestId === id)
+}
 
 /** A Markdown fence no backtick run inside `s` can close, so the text stays quoted. */
 const fence = (s: string): string => {
@@ -393,7 +413,10 @@ export const register: Register = (on, options) => {
     startedAt = Date.now()
     const folder = ((options.coordinatorFolder as string | undefined) ?? '').trim().toLowerCase()
     isCoordinator = !!folder && baseName(cwd).toLowerCase() === folder
-    forward = (options.forwardQuestions as string | undefined) !== 'off' && !isCoordinator
+    forwardAsks = (options.forwardQuestions as string | undefined) !== 'off'
+    forward = forwardAsks && !isCoordinator
+    // An ask left from before a reload has no hook waiting on it any more.
+    await update($, local, cur => ({ ...cur, requests: cur.requests.filter(r => r.kind !== 'ask') }))
     const rulesFile = await readJson<RulesFile>($, `${base}/rules.json`)
     if (!rulesFile && (await $.fs.exists(`${base}/rules.json`).catch(() => false))) $.ui.toast(S.rulesBroken(`${base}/rules.json`))
     const compiled = compileRules(rulesFile)
@@ -493,20 +516,29 @@ export const register: Register = (on, options) => {
     return { deny: S.questionForwarded(id) }
   }).catch(($, e, next) => next(e))
 
-  // The app's own permission dialog goes to the pane, as protected commands do, while a coordinator
-  // is there to answer it. The coordinator itself, and any session when none is, keep the dialog.
+  // The app's own permission dialog goes to the pane while someone is there to answer it: the
+  // coordinator's pane, open. The session holds, as at the dialog, until the answer comes back;
+  // with no answer in time, or no pane, the app's dialog asks as usual.
   on('classic.PermissionRequest', async ($, e, next) => {
-    if (isCoordinator || !forward) return next(e)
+    if (!forwardAsks) return next(e)
     const what = askWhat(e.tool_input)
     if (what.length > ASK_MAX) return next(e)
     const key = askKey(e.tool_name, what)
-    const l = await read($, local)
-    if (l.grantsSession.includes(key) || (await takeOnce($, key))) return { decision: { behavior: 'allow' } }
-    if (!(await coordinatorLive($))) return next(e)
-    const pending = l.requests.find(r => r.kind === 'ask' && askKey(r.tool ?? '', r.command ?? '') === key)
-    const id = pending?.id ?? newId()
-    if (!pending) await addRequest($, { id, kind: 'ask', createdAt: Date.now(), tool: e.tool_name, command: what, rule: S.appPermission })
-    return { decision: { behavior: 'deny', message: S.waitApproval(S.appPermission, id), interrupt: true } }
+    if ((await read($, local)).grantsSession.includes(key)) return { decision: { behavior: 'allow' } }
+    if (!(isCoordinator ? isPaneOpen : await coordinatorLive($))) return next(e)
+    const id = newId()
+    await addRequest($, { id, kind: 'ask', createdAt: Date.now(), tool: e.tool_name, command: what, rule: S.appPermission })
+    const a = await waitAnswer($, id)
+    await update($, local, cur => ({
+      ...cur,
+      requests: cur.requests.filter(r => r.id !== id),
+      applied: [...cur.applied, id].slice(-300),
+      grantsSession: a?.kind === 'approve-session' ? [...cur.grantsSession, key] : cur.grantsSession,
+    }))
+    await publish($)
+    if (a?.kind === 'approve-once' || a?.kind === 'approve-session') return { decision: { behavior: 'allow' } }
+    if (a?.kind === 'deny') return { decision: { behavior: 'deny', message: S.deniedMsg(fence(what)) } }
+    return next(e)
   }).catch(($, e, next) => next(e))
 
   // Protected commands wait for the person's approval from the pane.
