@@ -1,6 +1,6 @@
 {
   "name": "coordinator-monitor",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "One pane for every local Claude Code session: sessions, subagents (savvy-flow aware), pending permissions and questions you can answer in place.",
   "author": { "name": "Carlo Ruggiero (easly1989)", "url": "https://easly1989.github.io/" },
   "homepage": "https://github.com/easly1989/coordinator-monitor",

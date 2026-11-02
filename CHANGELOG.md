@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.0 — 2026-11-03
+
+- **A session running an older copy of the mod is flagged** on its card, with the hint to run `/reload-plugins` there: mods do not hot-reload, and an older copy can behave differently (a 0.2.0 build from before the release stopped subagents at their first permission prompt).
+- Every status file now carries the mod version that wrote it.
+
 ## 0.2.0 — 2026-11-02
 
 - **The pane follows the design mockup**: usage cards in a row, pill tabs, amber cards for what waits for you, each subagent ruled off under its session's header with its tier, model, elapsed time, steps and progress bar.

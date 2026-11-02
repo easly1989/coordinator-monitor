@@ -115,6 +115,7 @@ test('the pane draws sessions, workers and every kind of request, on every surfa
   expect(mine.title).toBe('Coordinatore')
   expect(mine.folder).toBe('coordinator')
   expect(mine.effort).toBe('high')
+  expect(mine.version).toBe('0.3.0')
 
   for (const surface of ['terminal', 'desktop', 'vscode', 'mobile'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface })
@@ -125,6 +126,8 @@ test('the pane draws sessions, workers and every kind of request, on every surfa
     expect(await ui.find({ type: 'Text', text: /\$1\.50/ })).toBeTruthy()
     expect(await ui.find({ type: 'Text', text: /Opus 5\.5 · extra/ })).toBeTruthy()
     expect(await ui.find({ type: 'Text', text: /waiting for a permission: git push origin main/ })).toBeTruthy()
+    // The fixtures publish no version, as copies before 0.3 did: each is flagged.
+    expect(await ui.find({ type: 'Text', text: /runs mod 0\.1: \/reload-plugins there/ })).toBeTruthy()
     await ui.unmount()
   }
 })

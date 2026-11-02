@@ -48,6 +48,8 @@ export type SessionState = 'running' | 'idle' | 'waiting' | 'ended'
 export type SessionStatus = {
   v: 1
   sessionId: string
+  /** The mod version that published it; absent before 0.3. */
+  version?: string
   /** The sidebar title the desktop app gave the session, else the folder. */
   title: string
   /** The folder title (`project` or `project › worktree`). */
