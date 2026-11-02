@@ -127,7 +127,7 @@ test('the pane draws sessions, workers and every kind of request, on every surfa
     expect(await ui.find({ type: 'Text', text: /Opus 5\.5 · extra/ })).toBeTruthy()
     expect(await ui.find({ type: 'Text', text: /waiting for a permission: git push origin main/ })).toBeTruthy()
     // The fixtures publish no version, as copies before 0.3 did: each is flagged.
-    expect(await ui.find({ type: 'Text', text: /runs mod 0\.1: \/reload-plugins there/ })).toBeTruthy()
+    expect(await ui.find({ type: 'Text', text: /runs mod < 0\.3: \/reload-plugins there/ })).toBeTruthy()
     await ui.unmount()
   }
 })

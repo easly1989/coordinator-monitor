@@ -806,7 +806,7 @@ export const register: Register = (on, options) => {
               {/* Mods do not hot-reload: a session keeps the copy it loaded until /reload-plugins. */}
               {s.state !== 'ended' && (s.version ?? '0').localeCompare(MOD_VERSION, undefined, { numeric: true }) < 0 ? (
                 <Text size="caption" color="warning" wrap="truncate-end">
-                  {S.oldMod(s.version ?? '0.1')}
+                  {S.oldMod(s.version ?? '< 0.3')}
                 </Text>
               ) : null}
             </Box>
