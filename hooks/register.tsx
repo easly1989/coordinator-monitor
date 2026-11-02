@@ -26,7 +26,7 @@ const TICK_MS = 3000
 const STALE_MS = 15 * 60 * 1000
 const ENDED_KEEP_MS = 60 * 60 * 1000
 /** Published in every status, so the pane can flag a session still running an older copy. Keep in step with plugin.json. */
-const MOD_VERSION = '0.3.0'
+const MOD_VERSION = '0.3.1'
 const SHELL_TOOLS = new Set(['Bash', 'PowerShell'])
 const STEP_TOOL = 'mcp__savvy-progress__step'
 const FLOW_TOOL = 'mcp__savvy-progress__progress'
@@ -60,8 +60,6 @@ let rules: Rule[] = []
 let critical: string[] = []
 let tierModels: Record<string, string> = { ...TIER_MODEL }
 let forward = true
-/** App permission asks go to the pane, the coordinator's own too: its pane is beside it. */
-let forwardAsks = true
 let ticking = false
 let home = '.'
 // The desktop app's own record of this session: its sidebar title and effort.
@@ -312,6 +310,8 @@ const gather = async ($: $): Promise<void> => {
     if (!s || s.v !== 1) continue
     const age = now - s.heartbeat
     if (s.state === 'ended' ? age > ENDED_KEEP_MS : age > STALE_MS) continue
+    // A session idle while its subagents work is still at work.
+    if (s.state === 'idle' && s.agents.some(a => a.status === 'running')) s.state = 'running'
     all.push(s)
   }
   const rank = (s: SessionStatus) => (s.isCoordinator ? 0 : s.state === 'waiting' ? 1 : s.state === 'running' ? 2 : s.state === 'idle' ? 3 : 4)
@@ -416,8 +416,7 @@ export const register: Register = (on, options) => {
     startedAt = Date.now()
     const folder = ((options.coordinatorFolder as string | undefined) ?? '').trim().toLowerCase()
     isCoordinator = !!folder && baseName(cwd).toLowerCase() === folder
-    forwardAsks = (options.forwardQuestions as string | undefined) !== 'off'
-    forward = forwardAsks && !isCoordinator
+    forward = (options.forwardQuestions as string | undefined) !== 'off' && !isCoordinator
     // An ask left from before a reload has no hook waiting on it any more.
     await update($, local, cur => ({ ...cur, requests: cur.requests.filter(r => r.kind !== 'ask') }))
     const rulesFile = await readJson<RulesFile>($, `${base}/rules.json`)
@@ -519,16 +518,16 @@ export const register: Register = (on, options) => {
     return { deny: S.questionForwarded(id) }
   }).catch(($, e, next) => next(e))
 
-  // The app's own permission dialog goes to the pane while someone is there to answer it: the
-  // coordinator's pane, open. The session holds, as at the dialog, until the answer comes back;
-  // with no answer in time, or no pane, the app's dialog asks as usual.
+  // The app's own permission dialog goes to the pane while a coordinator is there to answer it. The
+  // session holds, as at the dialog, until the answer comes back; with no answer in time, no
+  // coordinator, or in the coordinator itself (the person is in its chat), the app's dialog asks.
   on('classic.PermissionRequest', async ($, e, next) => {
-    if (!forwardAsks) return next(e)
+    if (!forward) return next(e)
     const what = askWhat(e.tool_input)
     if (what.length > ASK_MAX) return next(e)
     const key = askKey(e.tool_name, what)
     if ((await read($, local)).grantsSession.includes(key)) return { decision: { behavior: 'allow' } }
-    if (!(isCoordinator ? isPaneOpen : await coordinatorLive($))) return next(e)
+    if (!(await coordinatorLive($))) return next(e)
     const id = newId()
     await addRequest($, { id, kind: 'ask', createdAt: Date.now(), tool: e.tool_name, command: what, rule: S.appPermission })
     const a = await waitAnswer($, id)
@@ -617,8 +616,10 @@ export const register: Register = (on, options) => {
     for (const s of [...b.sessions].sort((x, y) => x.heartbeat - y.heartbeat)) for (const r of s.rateLimits) limits.set(r.kind, r)
     const five = limits.get('five_hour')
     const week = limits.get('seven_day')
-    const activeCount = b.sessions.filter(s => s.state === 'running' || s.state === 'waiting').length
-    const runningAgents = b.sessions.reduce((n, s) => n + s.agents.filter(a => a.status === 'running').length, 0)
+    // The coordinator is the chat beside the pane: its own card would only repeat it. Its requests still reach the inbox.
+    const others = b.sessions.filter(s => !s.isCoordinator)
+    const activeCount = others.filter(s => s.state === 'running' || s.state === 'waiting').length
+    const runningAgents = others.reduce((n, s) => n + s.agents.filter(a => a.status === 'running').length, 0)
     const costs = b.sessions.map(s => s.costUsd).filter((c): c is number => typeof c === 'number')
     const ago = b.updatedAt ? Math.max(0, Math.round((Date.now() - b.updatedAt) / 1000)) : undefined
 
@@ -768,7 +769,7 @@ export const register: Register = (on, options) => {
       )
     }
 
-    const shown = b.sessions.filter(s =>
+    const shown = others.filter(s =>
       u.filter === 'waiting' ? s.state === 'waiting' : u.filter === 'active' ? s.state === 'running' || s.state === 'waiting' : true,
     )
 
@@ -913,7 +914,7 @@ export const register: Register = (on, options) => {
           )}
           {stat(
             'st-now',
-            `${S.now} · ${activeCount} ${S.active.toLowerCase()} / ${b.sessions.length}`,
+            `${S.now} · ${activeCount} ${S.active.toLowerCase()} / ${others.length}`,
             costs.length ? `≈$${costs.reduce((x, y) => x + y, 0).toFixed(2)}` : String(activeCount),
             <Text size="caption" color="subtle">
               {S.agentsRunning(runningAgents)}
