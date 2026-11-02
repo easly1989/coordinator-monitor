@@ -6,6 +6,9 @@ export type AgentRow = {
   stepDone?: number
   stepTotal?: number
   stepNote?: string
+  /** When this session first saw it run, and saw it finish (epoch ms). */
+  startedAt?: number
+  endedAt?: number
 }
 
 export type ChoiceOption = { label: string; description?: string }
@@ -17,7 +20,8 @@ export type ChoiceQuestion = {
   options: ChoiceOption[]
 }
 
-export type RequestKind = 'permission' | 'choice' | 'questions'
+/** `ask` is the app's own permission dialog, up in the session: shown, answered there. */
+export type RequestKind = 'permission' | 'choice' | 'questions' | 'ask'
 
 export type MonitorRequest = {
   id: string
@@ -44,9 +48,13 @@ export type SessionState = 'running' | 'idle' | 'waiting' | 'ended'
 export type SessionStatus = {
   v: 1
   sessionId: string
+  /** The sidebar title the desktop app gave the session, else the folder. */
   title: string
+  /** The folder title (`project` or `project › worktree`). */
+  folder?: string
   cwd: string
   model: string
+  effort?: string
   state: SessionState
   isCoordinator: boolean
   heartbeat: number
@@ -59,7 +67,8 @@ export type SessionStatus = {
   requests: MonitorRequest[]
 }
 
-export type AnswerKind = 'approve-once' | 'approve-session' | 'deny' | 'answer'
+/** `dismiss` drops a request without telling the session anything. */
+export type AnswerKind = 'approve-once' | 'approve-session' | 'deny' | 'answer' | 'dismiss'
 
 export type Answer = { requestId: string; at: number; kind: AnswerKind; text?: string }
 

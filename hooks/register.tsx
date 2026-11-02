@@ -59,6 +59,12 @@ let critical: string[] = []
 let tierModels: Record<string, string> = { ...TIER_MODEL }
 let forward = true
 let ticking = false
+let home = '.'
+// The desktop app's own record of this session: its sidebar title and effort.
+let label = ''
+let effort = ''
+// shortcut: timings live in module memory, so a reload restarts them; persist in `local` if that bothers.
+const agentTimes = new Map<string, { startedAt: number; endedAt?: number }>()
 
 const norm = (p: string): string => p.replace(/\\/g, '/').replace(/\/+$/, '')
 const baseName = (p: string): string => norm(p).split('/').pop() || p
@@ -91,6 +97,46 @@ const detectLang = async ($: $, option: string | undefined): Promise<string> => 
   return (await $.env.get('LC_ALL')) || (await $.env.get('LANG')) || 'en'
 }
 
+type DesktopMeta = { cliSessionId?: string; title?: string; effort?: string }
+
+// Each desktop record as last read, by path and mtime: a refresh rereads only what changed.
+const deskFiles = new Map<string, { mtimeMs: number; meta: DesktopMeta | null }>()
+let deskAt = 0
+
+/**
+ * The desktop app files each Code session as claude-code-sessions/<account>/<org>/local_<id>.json,
+ * with the CLI's session id, the sidebar title and the effort. The mod API has no title getter, so
+ * read them there, keyed by CLI session id; a session the desktop did not start keeps its folder title.
+ */
+const desktopIndex = async ($: $): Promise<Map<string, DesktopMeta>> => {
+  if (Date.now() - deskAt >= 60_000) {
+    deskAt = Date.now()
+    const appData = await $.env.get('APPDATA')
+    const roots = [appData ? `${norm(appData)}/Claude` : '', `${home}/Library/Application Support/Claude`, `${home}/.config/Claude`].filter(Boolean)
+    const seen = new Set<string>()
+    for (const root of roots) {
+      const dir = `${root}/claude-code-sessions`
+      for (const acct of await $.fs.list(dir).catch(() => [])) {
+        if (acct.kind !== 'dir') continue
+        for (const org of await $.fs.list(`${dir}/${acct.name}`).catch(() => [])) {
+          if (org.kind !== 'dir') continue
+          for (const f of await $.fs.list(`${dir}/${acct.name}/${org.name}`).catch(() => [])) {
+            if (f.kind !== 'file' || !f.name.startsWith('local_') || !f.name.endsWith('.json')) continue
+            const path = `${dir}/${acct.name}/${org.name}/${f.name}`
+            seen.add(path)
+            const mtimeMs = f.mtimeMs ?? 0
+            if (deskFiles.get(path)?.mtimeMs !== mtimeMs) deskFiles.set(path, { mtimeMs, meta: await readJson<DesktopMeta>($, path) })
+          }
+        }
+      }
+    }
+    for (const p of [...deskFiles.keys()]) if (!seen.has(p)) deskFiles.delete(p)
+  }
+  const index = new Map<string, DesktopMeta>()
+  for (const { meta } of deskFiles.values()) if (meta?.cliSessionId) index.set(meta.cliSessionId, meta)
+  return index
+}
+
 // ---------------------------------------------------------------------------
 // The session's own side: publish status, apply answers.
 
@@ -99,12 +145,21 @@ const publish = async ($: $, state?: SessionStatus['state']): Promise<void> => {
   const usage = await $.session.usage().catch(() => null)
   const list = await $.agent.list().catch(() => [])
   const ctx = usage?.context as { usedPercentage?: number; used_percentage?: number } | undefined
+  const now = Date.now()
+  for (const a of list) {
+    const t = agentTimes.get(a.id) ?? { startedAt: now }
+    if (a.status !== 'running' && t.endedAt === undefined) t.endedAt = now
+    if (a.status === 'running') t.endedAt = undefined
+    agentTimes.set(a.id, t)
+  }
   const status: SessionStatus = {
     v: 1,
     sessionId,
-    title,
+    title: label || title,
+    folder: title,
     cwd,
     model,
+    effort: effort || undefined,
     state: state ?? (l.requests.length ? 'waiting' : isBusy ? 'running' : 'idle'),
     isCoordinator,
     heartbeat: Date.now(),
@@ -114,7 +169,18 @@ const publish = async ($: $, state?: SessionStatus['state']): Promise<void> => {
     rateLimits: (usage?.rateLimits ?? []).map(r => ({ kind: r.kind, percentUsed: r.percentUsed, resetsAt: r.resetsAt })),
     agents: list.slice(-30).map(a => {
       const st = l.steps[a.id]
-      return { id: a.id, type: a.type, description: a.description, status: String(a.status), stepDone: st?.done, stepTotal: st?.total, stepNote: st?.note }
+      const t = agentTimes.get(a.id)
+      return {
+        id: a.id,
+        type: a.type,
+        description: a.description,
+        status: String(a.status),
+        stepDone: st?.done,
+        stepTotal: st?.total,
+        stepNote: st?.note,
+        startedAt: t?.startedAt,
+        endedAt: t?.endedAt,
+      }
     }),
     flow: l.flow,
     requests: l.requests,
@@ -136,12 +202,13 @@ const applyAnswers = async ($: $): Promise<void> => {
       if (!req) continue
       next.requests = next.requests.filter(r => r.id !== a.requestId)
       next.applied = [...next.applied, a.requestId].slice(-300)
-      const cmd = req.command ?? ''
+      // Fenced: the command is the session's text, sent on in the person's voice.
+      const cmd = fence(req.command ?? '')
       if (a.kind === 'approve-once') {
-        next.grantsOnce.push(cmd)
+        next.grantsOnce.push(grantKey(req))
         prompts.push(S.approvedMsg(cmd, true))
       } else if (a.kind === 'approve-session') {
-        next.grantsSession.push(cmd)
+        next.grantsSession.push(grantKey(req))
         prompts.push(S.approvedMsg(cmd, false))
       } else if (a.kind === 'deny') {
         prompts.push(S.deniedMsg(cmd))
@@ -155,8 +222,56 @@ const applyAnswers = async ($: $): Promise<void> => {
   await publish($)
 }
 
+// Past this an ask keeps the app's dialog: the card shows, and the grant covers, the whole input.
+const ASK_MAX = 8000
+const sortKeys = (v: unknown): unknown =>
+  Array.isArray(v) ? v.map(sortKeys) : v && typeof v === 'object' ? Object.fromEntries(Object.keys(v).sort().map(k => [k, sortKeys((v as Record<string, unknown>)[k])])) : v
+
+/** What an app permission ask is about, in full: a bare command as is, else every field but the description. */
+const askWhat = (input: unknown): string => {
+  const { description: _, ...rest } = (input && typeof input === 'object' ? input : { input }) as Record<string, unknown>
+  return Object.keys(rest).length === 1 && typeof rest.command === 'string' ? rest.command : JSON.stringify(sortKeys(rest), null, 2)
+}
+const askKey = (tool: string, what: string): string => `ask\u0000${tool}\u0000${what}`
+const grantKey = (r: MonitorRequest): string => (r.kind === 'ask' ? askKey(r.tool ?? '', r.command ?? '') : (r.command ?? ''))
+
+/** A Markdown fence no backtick run inside `s` can close, so the text stays quoted. */
+const fence = (s: string): string => {
+  const f = '`'.repeat(Math.max(3, ...[...s.matchAll(/`+/g)].map(m => m[0].length + 1)))
+  return `${f}\n${s}\n${f}`
+}
+
+/** Takes one approve-once grant, atomically: two calls racing for one grant get it once. */
+const takeOnce = async ($: $, key: string): Promise<boolean> => {
+  let took = false
+  await update($, local, cur => {
+    const i = cur.grantsOnce.indexOf(key)
+    took = i >= 0
+    return took ? { ...cur, grantsOnce: cur.grantsOnce.filter((_, j) => j !== i) } : cur
+  })
+  return took
+}
+
+/** A status file the pane may trust: named after the session it claims, so one session cannot pose as another. */
+const statusFile = async ($: $, name: string): Promise<SessionStatus | null> => {
+  const s = await readJson<SessionStatus>($, `${base}/sessions/${name}`)
+  return s && typeof s.sessionId === 'string' && /^[\w-]+$/.test(s.sessionId) && name === `${s.sessionId}.json` ? s : null
+}
+
+/** Whether a coordinator session is publishing now, so a request sent to the pane gets seen. */
+const coordinatorLive = async ($: $): Promise<boolean> => {
+  for (const f of await $.fs.list(`${base}/sessions`).catch(() => [])) {
+    if (f.kind !== 'file' || !f.name.endsWith('.json') || (f.mtimeMs && Date.now() - f.mtimeMs > 60_000)) continue
+    const s = await statusFile($, f.name)
+    if (s?.isCoordinator && s.sessionId !== sessionId && s.state !== 'ended' && Date.now() - s.heartbeat < 60_000) return true
+  }
+  return false
+}
+
 const addRequest = async ($: $, req: MonitorRequest): Promise<void> => {
-  await update($, local, cur => ({ ...cur, requests: [...cur.requests.filter(r => !(r.kind === req.kind && r.kind !== 'permission')), req] }))
+  // One open question set and one choice at a time; permissions and app asks stack.
+  const single = req.kind === 'questions' || req.kind === 'choice'
+  await update($, local, cur => ({ ...cur, requests: [...cur.requests.filter(r => !(single && r.kind === req.kind)), req] }))
   await publish($)
 }
 
@@ -170,13 +285,23 @@ const gather = async ($: $): Promise<void> => {
   for (const entry of entries) {
     if (entry.kind !== 'file' || !entry.name.endsWith('.json')) continue
     if (entry.mtimeMs && now - entry.mtimeMs > ENDED_KEEP_MS) continue
-    const s = await readJson<SessionStatus>($, `${base}/sessions/${entry.name}`)
+    const s = await statusFile($, entry.name)
     if (!s || s.v !== 1) continue
     const age = now - s.heartbeat
     if (s.state === 'ended' ? age > ENDED_KEEP_MS : age > STALE_MS) continue
     all.push(s)
   }
   const rank = (s: SessionStatus) => (s.isCoordinator ? 0 : s.state === 'waiting' ? 1 : s.state === 'running' ? 2 : s.state === 'idle' ? 3 : 4)
+  // Titles from the desktop's own records, so a session running an older copy of the mod is named too.
+  const desk = await desktopIndex($).catch(() => new Map<string, DesktopMeta>())
+  for (const s of all) {
+    const m = desk.get(s.sessionId)
+    if (m?.title?.trim() && m.title.trim() !== s.title) {
+      s.folder ??= s.title
+      s.title = m.title.trim()
+    }
+    if (!s.effort && m?.effort) s.effort = m.effort
+  }
   all.sort((a, b) => rank(a) - rank(b) || b.heartbeat - a.heartbeat)
   await update($, board, () => ({ sessions: all, updatedAt: now }))
 }
@@ -197,6 +322,9 @@ const tick = async ($: $): Promise<void> => {
   ticking = true
   try {
     await applyAnswers($)
+    const me = (await desktopIndex($).catch(() => new Map<string, DesktopMeta>())).get(sessionId)
+    label = me?.title?.trim() ?? ''
+    effort = me?.effort ?? ''
     await publish($)
     if (isPaneOpen || isCoordinator) await gather($)
   } catch {
@@ -210,21 +338,53 @@ const tick = async ($: $): Promise<void> => {
 // Drawing.
 
 const fmtPct = (n: number | undefined): string => (n === undefined ? '' : `${Math.round(n)}%`)
+/** A reset within a day reads as its time ("16:40"), a later one as its weekday ("Mon"). */
 const fmtReset = (iso: string | undefined): string => {
   if (!iso) return ''
   const d = new Date(iso)
-  return Number.isNaN(d.getTime()) ? '' : d.toLocaleString(undefined, { weekday: 'short', hour: '2-digit', minute: '2-digit' })
+  if (Number.isNaN(d.getTime())) return ''
+  return d.getTime() - Date.now() < 24 * 3600 * 1000
+    ? d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
+    : d.toLocaleDateString(undefined, { weekday: 'short' })
 }
+const clamp01 = (n: number): number => Math.max(0, Math.min(1, n))
 const bar = (ratio: number, width: number): string => {
-  const filled = Math.max(0, Math.min(width, Math.round(ratio * width)))
+  const filled = Math.round(clamp01(ratio) * width)
   return '█'.repeat(filled) + '░'.repeat(width - filled)
 }
+// Wide markup and no width prop: the surface clamps it to the slot, and `none` stretches it to fit.
+const barSvg = (ratio: number, color: string): string =>
+  `<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="4" viewBox="0 0 1000 4" preserveAspectRatio="none">` +
+  `<rect width="1000" height="4" fill="#8080804D"/>` +
+  `<rect width="${Math.round(clamp01(ratio) * 1000)}" height="4" fill="${color}"/></svg>`
+/** "claude-opus-5-5" reads "Opus 5.5". */
+const prettyModel = (id: string): string => {
+  const m = /^claude-([a-z]+)-(\d+)(?:-(\d+))?/.exec(id)
+  return m?.[1] ? `${m[1].charAt(0).toUpperCase()}${m[1].slice(1)} ${m[2]}${m[3] ? `.${m[3]}` : ''}` : id
+}
+const fmtDur = (ms: number): string => {
+  const s = Math.max(0, Math.round(ms / 1000))
+  if (s < 60) return `${s}s`
+  if (s < 3600) return `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s`
+  return `${Math.floor(s / 3600)}h ${String(Math.floor(s / 60) % 60).padStart(2, '0')}m`
+}
+
+// The pane's palette, after the mockup in docs/. Translucent fills sit on
+// either theme; the terminal gets none of them (it has no alpha).
+const AMBER = '#E8A33D'
+const AMBER_TINT = '#E8A33D14'
+const AMBER_LINE = '#E8A33D66'
+const CARD = '#8080801A'
+const CARD_LINE = '#80808033'
+const BLUE = '#5B8DEF'
+const BLUE_TINT = '#5B8DEF33'
+const ON_AMBER = '#1F1E1D'
 
 export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     const started = await next(e)
     S = pickStrings(await detectLang($, options.language as string | undefined))
-    const home = (await $.env.get('HOME')) || (await $.env.get('USERPROFILE')) || '.'
+    home = norm((await $.env.get('HOME')) || (await $.env.get('USERPROFILE')) || '.')
     base = norm((options.busDir as string | undefined)?.trim() || `${home}/.claude/coordinator-monitor`)
     sessionId = await $.session.id()
     cwd = norm(await $.session.cwd())
@@ -264,7 +424,16 @@ export const register: Register = (on, options) => {
   })
 
   on('turn.start', async ($, e, next) => {
-    if (!e.agentId) isBusy = true
+    if (!e.agentId) {
+      isBusy = true
+      // A new turn supersedes what the session asked last time, whether the answer came from
+      // the pane or was typed in the session itself. Permissions stay: only the pane grants them.
+      const asked = (r: MonitorRequest) => r.kind === 'questions' || r.kind === 'choice'
+      if ((await read($, local)).requests.some(asked)) {
+        await update($, local, cur => ({ ...cur, requests: cur.requests.filter(r => !asked(r)) }))
+        void publish($)
+      }
+    }
     return next(e)
   })
 
@@ -324,21 +493,39 @@ export const register: Register = (on, options) => {
     return { deny: S.questionForwarded(id) }
   }).catch(($, e, next) => next(e))
 
+  // The app's own permission dialog goes to the pane, as protected commands do, while a coordinator
+  // is there to answer it. The coordinator itself, and any session when none is, keep the dialog.
+  on('classic.PermissionRequest', async ($, e, next) => {
+    if (isCoordinator || !forward) return next(e)
+    const what = askWhat(e.tool_input)
+    if (what.length > ASK_MAX) return next(e)
+    const key = askKey(e.tool_name, what)
+    const l = await read($, local)
+    if (l.grantsSession.includes(key) || (await takeOnce($, key))) return { decision: { behavior: 'allow' } }
+    if (!(await coordinatorLive($))) return next(e)
+    const pending = l.requests.find(r => r.kind === 'ask' && askKey(r.tool ?? '', r.command ?? '') === key)
+    const id = pending?.id ?? newId()
+    if (!pending) await addRequest($, { id, kind: 'ask', createdAt: Date.now(), tool: e.tool_name, command: what, rule: S.appPermission })
+    return { decision: { behavior: 'deny', message: S.waitApproval(S.appPermission, id), interrupt: true } }
+  }).catch(($, e, next) => next(e))
+
   // Protected commands wait for the person's approval from the pane.
   on('tool.check', async ($, e, next) => {
+    // Only the mod writes the bus: answers would let a session grant itself anything, rules.json or a
+    // status file loosen the rules or pose as another session. Reading it is harmless; a file tool is
+    // judged by its target, so the mod's own source and docs stay editable.
+    if (!e.isReadOnly) {
+      const i = (e.input ?? {}) as Record<string, unknown>
+      const target = JSON.stringify(i.file_path ?? i.notebook_path ?? i).replace(/\\\\/g, '/').toLowerCase()
+      if (target.includes('.claude/coordinator-monitor') || (base && target.includes(base.toLowerCase()))) return { decision: 'deny', reason: S.answersGuard }
+    }
     if (!SHELL_TOOLS.has(e.tool) || !e.tool_use_id) return next(e)
     const command = String((e.input as { command?: unknown } | null)?.command ?? '')
     const rule = command && matchRule(rules, command)
     if (!rule) return next(e)
     const l = await read($, local)
     if (l.grantsSession.includes(command)) return { decision: 'allow', reason: 'approved for this session from the coordinator pane' }
-    if (l.grantsOnce.includes(command)) {
-      await update($, local, cur => {
-        const i = cur.grantsOnce.indexOf(command)
-        return i < 0 ? cur : { ...cur, grantsOnce: cur.grantsOnce.filter((_, j) => j !== i) }
-      })
-      return { decision: 'allow', reason: 'approved once from the coordinator pane' }
-    }
+    if (await takeOnce($, command)) return { decision: 'allow', reason: 'approved once from the coordinator pane' }
     const pending = l.requests.find(r => r.kind === 'permission' && r.command === command)
     const id = pending?.id ?? newId()
     if (!pending) {
@@ -351,17 +538,43 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     isPaneOpen = true
     const ui = $.ui.resolve(e)
-    const { Box, Text, Button } = ui
-    const Svg = e.surface === 'desktop' && 'Svg' in ui ? ui.Svg : undefined
+    const { Box, Text, Button, Code } = ui
+    const isTerm = e.surface === 'terminal'
+    const Svg = !isTerm && 'Svg' in ui ? ui.Svg : undefined
     const Input = 'Input' in ui ? ui.Input : undefined
     const Markdown = 'Markdown' in ui ? ui.Markdown : undefined
     const b = await read($, board)
     const u = await read($, paneUi)
     const cols = Math.max(30, e.props.bodyColumns || 60)
     const sent = new Set(u.sent)
+    // Fills only where the surface blends them.
+    const fill = (c: string): string | undefined => (isTerm ? undefined : c)
 
     const crab = (costume: string, alt: string, walking: boolean, dim = false): RenderChildren =>
       Svg ? <Svg source={crabSvg(costume, { isWalking: walking, isDim: dim, size: 30 })} alt={alt} width={30} height={CRAB_H(30)} /> : null
+    const meter = (ratio: number, color: string, alt: string): RenderChildren =>
+      Svg ? <Svg source={barSvg(ratio, color)} alt={alt} height={4} /> : <Text color={color}>{bar(ratio, Math.max(10, Math.min(40, cols - 16)))}</Text>
+    const badge = (label: string, tone: 'amber' | 'blue' = 'amber'): RenderNode =>
+      tone === 'amber' ? (
+        <Text size="caption" weight="bold" color={isTerm ? 'warning' : ON_AMBER} backgroundColor={fill(AMBER)}>
+          {` ${label} `}
+        </Text>
+      ) : (
+        <Text size="caption" weight="semibold" color={BLUE} backgroundColor={fill(BLUE_TINT)}>
+          {` ${label} `}
+        </Text>
+      )
+    // The desktop draws a field without chrome: frame it so it reads as one.
+    const field = (input: RenderNode): RenderNode => (
+      <Box flexDirection="column" paddingX="sm" borderStyle="round" borderColor={isTerm ? undefined : CARD_LINE} borderDimColor={isTerm} backgroundColor={fill(CARD)}>
+        {input}
+      </Box>
+    )
+    const chip = (label: string): RenderNode => (
+      <Text size="caption" color="subtle" backgroundColor={fill(CARD)}>
+        {` ${label} `}
+      </Text>
+    )
 
     const setFilter = (f: PaneUi['filter']) => () => void update($, paneUi, cur => ({ ...cur, filter: f }))
     const waitingCount = b.sessions.filter(s => s.state === 'waiting').length
@@ -370,35 +583,60 @@ export const register: Register = (on, options) => {
     const five = limits.get('five_hour')
     const week = limits.get('seven_day')
     const activeCount = b.sessions.filter(s => s.state === 'running' || s.state === 'waiting').length
+    const runningAgents = b.sessions.reduce((n, s) => n + s.agents.filter(a => a.status === 'running').length, 0)
+    const costs = b.sessions.map(s => s.costUsd).filter((c): c is number => typeof c === 'number')
+    const ago = b.updatedAt ? Math.max(0, Math.round((Date.now() - b.updatedAt) / 1000)) : undefined
 
-    const open = (s: SessionStatus) => () => $.ui.toast(s.sessionId === sessionId ? S.thisSession : S.openHint(s.title, s.cwd))
 
     // What waits for the person, newest last.
     const inbox: { s: SessionStatus; r: MonitorRequest }[] = []
     for (const s of b.sessions) for (const r of s.requests) if (!sent.has(r.id)) inbox.push({ s, r })
     inbox.sort((x, y) => x.r.createdAt - y.r.createdAt)
 
+    const stat = (key: string, label: string, value: string, sub: RenderChildren): RenderNode => (
+      <Box key={key} flexDirection="column" width="32%" flexGrow={1} gap="xs" padding="sm" backgroundColor={fill(CARD)} borderStyle={isTerm ? 'round' : undefined} borderDimColor>
+        <Text size="caption" color="subtle" wrap="truncate-end">
+          {label}
+        </Text>
+        <Text size="heading" weight="semibold">
+          {value || '—'}
+        </Text>
+        {sub}
+      </Box>
+    )
+
     const card = ({ s, r }: { s: SessionStatus; r: MonitorRequest }): RenderNode => {
-      const head = (label: string) => (
-        <Box flexDirection="row" justifyContent="space-between" gap={1}>
-          <Text bold color="yellow">
-            {label} <Text color={undefined}>{s.title}</Text>
-          </Text>
-          <Button key={`open-${r.id}`} plain label={`${S.open} →`} onPress={open(s)} />
+      const head = (label: string, what: string) => (
+        <Box flexDirection="row" alignItems="center" gap="sm">
+          {badge(label)}
+          <Box flexGrow={1} flexShrink={1}>
+            <Text weight="semibold" wrap="truncate-end">
+              {what}
+            </Text>
+          </Box>
         </Box>
       )
-      if (r.kind === 'permission') {
-        return (
-          <Box key={r.id} flexDirection="column" gap={1} borderStyle="round" borderColor="yellow" paddingX={1}>
-            {head(S.permission)}
-            <Text>{r.command ?? ''}</Text>
-            {r.rule ? <Text dimColor>{r.rule.includes('·') ? `${r.rule} — ${S.critical}` : r.rule}</Text> : null}
-            <Box flexDirection="row" flexWrap="wrap" gap={1}>
+      const shell = (children: RenderChildren) => (
+        <Box key={r.id} flexDirection="column" gap="sm" padding="md" borderStyle="round" borderColor={isTerm ? 'warning' : AMBER_LINE} backgroundColor={fill(AMBER_TINT)}>
+          {children}
+        </Box>
+      )
+      if (r.kind === 'permission' || r.kind === 'ask') {
+        return shell(
+          <Box flexDirection="column" gap="sm">
+            {head(S.permission, `${s.title} · ${r.tool ?? 'Bash'}`)}
+            <Code source={r.command ?? ''} language={r.command?.startsWith('{') ? 'json' : r.tool === 'PowerShell' ? 'powershell' : 'bash'} />
+            {r.rule ? (
+              <Text size="footnote" color={r.rule.includes('·') ? 'warning' : 'subtle'}>
+                {r.rule.includes('·') ? `${r.rule} — ${S.critical}` : r.rule}
+              </Text>
+            ) : null}
+            <Box flexDirection="row" flexWrap="wrap" gap="sm">
               <Button key={`once-${r.id}`} variant="primary" label={S.approveOnce} onPress={() => void answer($, s, r, 'approve-once')} />
-              <Button key={`sess-${r.id}`} label={S.approveSession} onPress={() => void answer($, s, r, 'approve-session')} />
-              <Button key={`deny-${r.id}`} label={S.deny} onPress={() => void answer($, s, r, 'deny')} />
+              <Button key={`sess-${r.id}`} variant="secondary" label={S.approveSession} onPress={() => void answer($, s, r, 'approve-session')} />
+              <Button key={`deny-${r.id}`} variant="secondary" label={S.deny} onPress={() => void answer($, s, r, 'deny')} />
             </Box>
-          </Box>
+          </Box>,
         )
       }
       if (r.kind === 'choice') {
@@ -419,36 +657,79 @@ export const register: Register = (on, options) => {
               return qs.length > 1 ? `${qi + 1}. ${q.question}\n→ ${a || '—'}` : a
             })
             .join('\n\n')
-        return (
-          <Box key={r.id} flexDirection="column" gap={1} borderStyle="round" borderColor="yellow" paddingX={1}>
-            {head(S.choice)}
+        return shell(
+          <Box flexDirection="column" gap="sm">
+            {head(S.choice, s.title)}
             {qs.map((q, qi) => (
-              <Box key={`${r.id}-q${qi}`} flexDirection="column" gap={0}>
-                {q.header ? <Text dimColor>{q.header}</Text> : null}
-                <Text bold>{q.question}</Text>
-                {q.options.map((o, oi) => (
-                  <Button key={`${r.id}-${qi}-${oi}`} plain onPress={toggle(qi, oi, !!q.multiSelect)}>
-                    {picks(qi).includes(oi) ? '● ' : '○ '}
-                    {o.label}
-                    {o.description ? <Text dimColor> — {o.description}</Text> : null}
-                  </Button>
-                ))}
+              <Box key={`${r.id}-q${qi}`} flexDirection="column" gap="sm">
+                <Box flexDirection="row" gap="sm" alignItems="center">
+                  {q.header ? chip(q.header) : null}
+                  <Text size="caption" color="subtle">
+                    {S.questionOf(qi + 1, qs.length)}
+                  </Text>
+                </Box>
+                <Text weight="semibold">{q.question}</Text>
+                {q.options.map((o, oi) => {
+                  const isOn = picks(qi).includes(oi)
+                  return (
+                    <Box
+                      key={`${r.id}-${qi}-${oi}`}
+                      flexDirection="column"
+                      paddingX="md"
+                      paddingY="sm"
+                      borderStyle="round"
+                      borderColor={isOn ? (isTerm ? 'warning' : AMBER) : isTerm ? undefined : CARD_LINE}
+                      borderDimColor={!isOn && isTerm}
+                      backgroundColor={fill(isOn ? AMBER_TINT : CARD)}
+                      hover={isTerm ? undefined : { borderColor: AMBER_LINE }}
+                    >
+                      <Button key={`${r.id}-${qi}-${oi}-b`} plain onPress={toggle(qi, oi, !!q.multiSelect)}>
+                        {isTerm ? (isOn ? '● ' : '○ ') : ''}
+                        <Text weight="semibold">{o.label}</Text>
+                      </Button>
+                      {o.description ? (
+                        <Text size="footnote" color="subtle">
+                          {o.description}
+                        </Text>
+                      ) : null}
+                    </Box>
+                  )
+                })}
               </Box>
             ))}
             {Input ? (
-              <Input key={`other-${r.id}`} label={S.other} placeholder="…" submitLabel={S.send} onSubmit={value => void answer($, s, r, 'answer', compose(value))} />
-            ) : (
+              <Box flexDirection="column" gap="xs">
+                <Text size="caption" color="subtle">
+                  {S.other}
+                </Text>
+                {field(<Input key={`other-${r.id}`} placeholder={S.otherPlaceholder} submitLabel={S.send} onSubmit={value => void answer($, s, r, 'answer', compose(value))} />)}
+              </Box>
+            ) : null}
+            <Box flexDirection="row" flexWrap="wrap" gap="sm">
               <Button key={`send-${r.id}`} variant="primary" label={S.send} onPress={() => void answer($, s, r, 'answer', compose(''))} />
-            )}
-          </Box>
+              <Button key={`dismiss-${r.id}`} variant="secondary" label={S.dismiss} onPress={() => void answer($, s, r, 'dismiss')} />
+            </Box>
+          </Box>,
         )
       }
-      return (
-        <Box key={r.id} flexDirection="column" gap={1} borderStyle="round" borderColor="yellow" paddingX={1}>
-          {head(S.questions)}
-          {Markdown ? <Markdown key={`md-${r.id}`} text={r.text ?? ''} /> : <Text>{r.text ?? ''}</Text>}
-          {Input ? <Input key={`reply-${r.id}`} label={S.replyHere} rows={3} submitLabel={S.send} onSubmit={value => value.trim() && void answer($, s, r, 'answer', value)} /> : null}
-        </Box>
+      return shell(
+        <Box flexDirection="column" gap="sm">
+          {head(S.questions, s.title)}
+          <Box flexDirection="column" padding="sm" backgroundColor={fill(CARD)}>
+            {Markdown ? <Markdown key={`md-${r.id}`} text={r.text ?? ''} /> : <Text>{r.text ?? ''}</Text>}
+          </Box>
+          {Input ? (
+            <Box flexDirection="column" gap="xs">
+              <Text size="caption" color="subtle">
+                {S.replyLabel}
+              </Text>
+              {field(<Input key={`reply-${r.id}`} placeholder={S.replyHere} rows={3} submitLabel={S.send} onSubmit={value => value.trim() && void answer($, s, r, 'answer', value)} />)}
+            </Box>
+          ) : null}
+          <Box flexDirection="row" gap="sm">
+            <Button key={`dismiss-${r.id}`} variant="secondary" label={S.dismiss} onPress={() => void answer($, s, r, 'dismiss')} />
+          </Box>
+        </Box>,
       )
     }
 
@@ -456,27 +737,49 @@ export const register: Register = (on, options) => {
       u.filter === 'waiting' ? s.state === 'waiting' : u.filter === 'active' ? s.state === 'running' || s.state === 'waiting' : true,
     )
 
+    const pill = (state: string): RenderNode | null =>
+      state === 'waiting' ? badge(S.st.waiting ?? state) : state === 'running' ? badge(S.st.running ?? state, 'blue') : (
+        <Text size="caption" color="subtle">
+          {S.st[state] ?? state}
+        </Text>
+      )
+
+    // A hairline across the card; the terminal's border already separates enough.
+    const rule: RenderChildren = Svg ? (
+      <Svg source='<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="1" viewBox="0 0 1000 1" preserveAspectRatio="none"><rect width="1000" height="1" fill="#80808040"/></svg>' alt="—" height={1} />
+    ) : null
+
     const sessionBlock = (s: SessionStatus): RenderNode => {
       const isCol = !!u.collapsed[s.sessionId]
-      const meta = [s.model, s.contextPct !== undefined ? `ctx ${fmtPct(s.contextPct)}` : '', s.isCoordinator ? S.coordinator : '', s.sessionId === sessionId ? S.thisSession : '']
+      const who = [s.isCoordinator ? S.coordinator : '', s.sessionId === sessionId ? S.thisSession : ''].filter(Boolean).join(' · ')
+      const meta = [prettyModel(s.model), s.effort ? (S.effort[s.effort] ?? s.effort) : '', s.contextPct !== undefined ? `ctx ${fmtPct(s.contextPct)}` : '']
         .filter(Boolean)
         .join(' · ')
+      const ask = s.requests[0]
+      const asks = ask?.kind === 'permission' || ask?.kind === 'ask' ? S.waitsPermission(ask.command ?? '') : ask?.kind === 'choice' ? S.hasChoice : ask?.kind === 'questions' ? S.hasQuestions : ''
       const flow = s.flow ? `${s.flow.title} · ${s.flow.done}/${s.flow.total}${s.flow.phase ? ` · ${s.flow.phase}` : ''}` : ''
       const costume = s.state === 'waiting' ? 'waiting' : 'other'
       return (
-        <Box key={s.sessionId} flexDirection="column" borderStyle="round" borderDimColor paddingX={1}>
-          <Box flexDirection="row" gap={1} alignItems="center">
+        <Box key={s.sessionId} flexDirection="column" borderStyle="round" borderColor={isTerm ? undefined : s.state === 'waiting' ? AMBER_LINE : CARD_LINE} borderDimColor={isTerm} backgroundColor={fill(CARD)}>
+          <Box flexDirection="row" gap="sm" alignItems="center" padding="sm">
             {crab(costume, s.title, s.state === 'running', s.state === 'ended' || s.state === 'idle')}
-            <Box flexDirection="column" flexGrow={1}>
-              <Button key={`s-${s.sessionId}`} plain onPress={open(s)}>
-                {s.title} <Text color={s.state === 'waiting' ? 'yellow' : undefined} dimColor={s.state !== 'waiting'}>{S.st[s.state] ?? s.state}</Text>
-              </Button>
-              <Text dimColor>{flow || meta}</Text>
+            <Box flexDirection="column" flexGrow={1} flexShrink={1}>
+              <Text weight="semibold">{s.title}</Text>
+              <Text size="footnote" color="subtle" wrap="truncate-end">
+                {flow || asks || who || s.folder || s.cwd}
+              </Text>
+            </Box>
+            <Box flexDirection="column" alignItems="flex-end">
+              {pill(s.state)}
+              <Text size="caption" color="subtle">
+                {meta}
+              </Text>
             </Box>
             {s.agents.length ? (
               <Button
                 key={`c-${s.sessionId}`}
                 plain
+                dimColor
                 label={isCol ? `▸ ${s.agents.length}` : '▾'}
                 onPress={() => void update($, paneUi, cur => ({ ...cur, collapsed: { ...cur.collapsed, [s.sessionId]: !isCol } }))}
               />
@@ -489,22 +792,47 @@ export const register: Register = (on, options) => {
               const word = tier === 'other' ? a.type : tier === 'explore' ? 'Explore' : tier
               const ratio = a.status === 'done' ? 1 : a.stepTotal ? (a.stepDone ?? 0) / a.stepTotal : 0
               const steps = a.stepTotal ? `${a.stepDone ?? 0}/${a.stepTotal}${a.stepNote ? ` · ${a.stepNote}` : ''}` : ''
-              const pick = () => {
-                if (s.sessionId === sessionId) void $.ui.view({ agentId: a.id }).then(r => r.deny && $.ui.toast(r.deny))
-                else open(s)()
-              }
+              const took = a.startedAt ? fmtDur((a.endedAt ?? Date.now()) - a.startedAt) : ''
+              // Only this session's own subagents can be opened from here.
+              const pick = () => void $.ui.view({ agentId: a.id }).then(r => r.deny && $.ui.toast(r.deny))
+              const name = <Text weight="semibold">{a.description || a.type}</Text>
+              // Each worker is a row of its own under the session's header, ruled off as in the mockup.
               return (
-                <Box key={`${s.sessionId}-${a.id}`} flexDirection="row" gap={1} paddingLeft={2} alignItems="center">
+                <Box key={`${s.sessionId}-${a.id}`} flexDirection="column">
+                  {rule}
+                  <Box flexDirection="row" gap="sm" padding="sm" alignItems="flex-start">
                   {crab(tier === 'other' ? 'other' : tier, word, a.status === 'running')}
-                  <Box flexDirection="column" flexGrow={1}>
-                    <Button key={`a-${a.id}`} plain onPress={pick}>
-                      {a.description || a.type} <Text dimColor>{S.ag[a.status] ?? a.status}</Text>
-                    </Button>
-                    <Text>
-                      <Text color={color}>{word}</Text>
-                      <Text dimColor>{tierModels[tier] ? `  ·  ${tierModels[tier]}` : ''}{steps ? `  ·  ${steps}` : ''}</Text>
-                    </Text>
-                    <Text color={a.status === 'done' ? 'green' : color}>{bar(ratio, Math.max(10, Math.min(40, cols - 16)))}</Text>
+                  <Box flexDirection="column" flexGrow={1} flexShrink={1} gap="xs">
+                    <Box flexDirection="row" gap="sm" justifyContent="space-between" alignItems="center">
+                      {s.sessionId === sessionId ? (
+                        <Button key={`a-${a.id}`} plain dimColor={a.status === 'idle'} onPress={pick}>
+                          {name}
+                        </Button>
+                      ) : (
+                        name
+                      )}
+                      <Text color={a.status === 'done' ? 'success' : a.status === 'failed' ? 'error' : a.status === 'running' ? BLUE : 'subtle'}>
+                        {a.status === 'done' ? '✓' : a.status === 'failed' ? '✕' : a.status === 'running' ? '●' : '◷'}
+                      </Text>
+                    </Box>
+                    <Box flexDirection="row" gap="sm" justifyContent="space-between">
+                      <Text size="caption">
+                        <Text color={color} weight="semibold">
+                          {word}
+                        </Text>
+                        <Text color="subtle">{tierModels[tier] ? ` · ${tierModels[tier]}` : ''}</Text>
+                      </Text>
+                      <Text size="caption" color="subtle">
+                        {took}
+                      </Text>
+                    </Box>
+                    {steps ? (
+                      <Text size="footnote" wrap="truncate-end">
+                        {steps}
+                      </Text>
+                    ) : null}
+                    {meter(ratio, a.status === 'done' ? '#3FB950' : color, `${Math.round(clamp01(ratio) * 100)}%`)}
+                  </Box>
                   </Box>
                 </Box>
               )
@@ -514,43 +842,72 @@ export const register: Register = (on, options) => {
     }
 
     const tab = (f: PaneUi['filter'], label: string) => (
-      <Button key={`tab-${f}`} variant={u.filter === f ? 'primary' : undefined} label={label} onPress={setFilter(f)} />
+      <Button key={`tab-${f}`} variant={u.filter === f ? 'primary' : 'secondary'} label={label} onPress={setFilter(f)} />
     )
 
     return (
-      <Box flexDirection="column" gap={1}>
-        <Text dimColor>
-          {S.allSessions} · {activeCount} {S.sessions}
-        </Text>
-        <Box flexDirection="row" flexWrap="wrap" gap={2}>
-          <Text>
-            {S.fiveHour} <Text bold>{fmtPct(five?.percentUsed) || '—'}</Text>
-            <Text dimColor>{five?.resetsAt ? ` · ${S.resets} ${fmtReset(five.resetsAt)}` : ''}</Text>
+      <Box flexDirection="column" gap="md">
+        <Box flexDirection="row" justifyContent="space-between" alignItems="center" gap="sm">
+          <Text size="heading" weight="semibold">
+            {S.pane}
           </Text>
-          <Text>
-            {S.week} <Text bold>{fmtPct(week?.percentUsed) || '—'}</Text>
-            <Text dimColor>{week?.resetsAt ? ` · ${S.resets} ${fmtReset(week.resetsAt)}` : ''}</Text>
+          <Text size="caption" color="subtle">
+            {S.allSessions}
+            {ago !== undefined ? ` · ${S.updatedAgo(ago)}` : ''}
           </Text>
         </Box>
-        <Box flexDirection="row" flexWrap="wrap" gap={1}>
+        {/* A fixed third each: the bars' wide markup would otherwise push every card onto its own row. */}
+        <Box flexDirection="row" gap="sm">
+          {stat(
+            'st-5h',
+            `${S.fiveHour}${five?.resetsAt ? ` · ${S.until} ${fmtReset(five.resetsAt)}` : ''}`,
+            fmtPct(five?.percentUsed),
+            meter((five?.percentUsed ?? 0) / 100, (five?.percentUsed ?? 0) >= 90 ? '#E5534B' : '#7F77DD', fmtPct(five?.percentUsed)),
+          )}
+          {stat(
+            'st-week',
+            `${S.week}${week?.resetsAt ? ` · ${S.until} ${fmtReset(week.resetsAt)}` : ''}`,
+            fmtPct(week?.percentUsed),
+            meter((week?.percentUsed ?? 0) / 100, (week?.percentUsed ?? 0) >= 93 ? '#E5534B' : '#7F77DD', fmtPct(week?.percentUsed)),
+          )}
+          {stat(
+            'st-now',
+            `${S.now} · ${activeCount} ${S.active.toLowerCase()} / ${b.sessions.length}`,
+            costs.length ? `≈$${costs.reduce((x, y) => x + y, 0).toFixed(2)}` : String(activeCount),
+            <Text size="caption" color="subtle">
+              {S.agentsRunning(runningAgents)}
+            </Text>,
+          )}
+        </Box>
+        <Box flexDirection="row" flexWrap="wrap" gap="sm">
           {tab('all', S.all)}
           {tab('waiting', `${S.waiting} · ${waitingCount}`)}
           {tab('active', S.active)}
         </Box>
         {u.filter !== 'active' && inbox.length ? (
-          <Box flexDirection="column" gap={1}>
-            <Text bold color="yellow">
+          <Box flexDirection="column" gap="sm">
+            <Text size="caption" weight="bold" color={isTerm ? 'warning' : AMBER}>
               {S.inbox} · {inbox.length}
             </Text>
             {inbox.map(card)}
           </Box>
         ) : u.filter !== 'active' ? (
-          <Text dimColor>{S.nothingWaiting}</Text>
+          <Text size="footnote" color="subtle">
+            {S.nothingWaiting}
+          </Text>
         ) : null}
-        <Text bold dimColor>
+        <Text size="caption" weight="bold" color="subtle">
           {S.sessionsAndAgents}
         </Text>
-        {shown.length ? shown.map(sessionBlock) : <Text dimColor>{S.noSessions}</Text>}
+        {shown.length ? (
+          <Box flexDirection="column" gap="sm">
+            {shown.map(sessionBlock)}
+          </Box>
+        ) : (
+          <Text size="footnote" color="subtle">
+            {S.noSessions}
+          </Text>
+        )}
       </Box>
     )
   })
