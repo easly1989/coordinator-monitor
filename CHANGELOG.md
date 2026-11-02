@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.0 — 2026-11-03
+
+- **Sessions follow the coordinator's copy of the mod.** Mods do not hot-reload; now, when a live coordinator publishes a newer version, every other session runs `/reload-plugins` itself once it is idle (at most once per version). After an update, reload the coordinator alone. Sessions on a copy older than 0.4 still need one manual reload to learn this.
+
 ## 0.3.1 — 2026-11-03
 
 - **The coordinator is left out of "Sessions and subagents"**: its chat is beside the pane. Its protected commands still reach the inbox.

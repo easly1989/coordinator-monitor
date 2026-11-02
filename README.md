@@ -62,6 +62,7 @@ The mod has to run in **every** session you want to see: that is what publishes 
 ## Use
 
 - `/agents-monitor` opens the pane in the current session.
+- After updating the mod, run `/reload-plugins` in the coordinator: every other session sees the newer version and reloads itself once it is idle. A session still on an older copy is flagged on its card.
 - Set **Coordinator folder** (`/config`, or `pluginConfigs` below) to the folder name of your coordinator session: the pane opens there by itself, and that session keeps its own questions instead of forwarding them.
 - Click a subagent of the current session to open its transcript. Other sessions open from the sidebar: jumping straight into one is not something the mod API offers yet.
 - Ask your sessions (in your `CLAUDE.md`) to end a turn that needs your input with a `## Questions for you` section, numbered. The Italian `## Domande per te` works too.

@@ -83,6 +83,8 @@ export type Local = {
   steps: Record<string, { done: number; total: number; note?: string }>
   flow: FlowInfo | null
   applied: string[]
+  /** The coordinator's version this session last reloaded its plugins to follow. */
+  reloadTried?: string
 }
 
 export type PaneUi = {
