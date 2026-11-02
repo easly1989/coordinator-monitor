@@ -1,0 +1,92 @@
+const en = {
+  pane: 'Agents',
+  allSessions: 'all local sessions',
+  fiveHour: '5-hour limit',
+  week: 'Week',
+  resets: 'resets',
+  sessions: 'sessions',
+  all: 'All',
+  waiting: 'Waiting for you',
+  active: 'Active',
+  inbox: 'WAITING FOR YOU',
+  nothingWaiting: 'Nothing waiting: every request has an answer.',
+  permission: 'PERMISSION',
+  choice: 'CHOICE',
+  questions: 'QUESTIONS',
+  critical: 'critical service',
+  approveOnce: 'Approve once',
+  approveSession: 'Approve for the session',
+  deny: 'Deny',
+  open: 'Open session',
+  other: 'Other (free answer)',
+  send: 'Send answer',
+  replyHere: 'Answer here (it reaches the session), or open the session to discuss',
+  sessionsAndAgents: 'SESSIONS AND SUBAGENTS',
+  noSessions: 'No local session is publishing yet. Sessions appear once this mod runs in them.',
+  st: { running: 'Running', idle: 'Idle', waiting: 'Waiting', ended: 'Ended' } as Record<string, string>,
+  ag: { running: 'running', done: 'done', failed: 'failed', idle: 'idle' } as Record<string, string>,
+  thisSession: 'this session',
+  coordinator: 'coordinator',
+  openHint: (title: string, cwd: string) => `Open «${title}» from the sidebar (${cwd})`,
+  sentToast: (title: string) => `Sent to «${title}»`,
+  paneOpened: 'Agents pane opened.',
+  rulesBroken: (path: string) => `coordinator-monitor: ${path} is not valid JSON; only the default rules apply.`,
+  // what the model reads
+  waitApproval: (label: string, id: string) =>
+    `This command is protected (${label}) and needs the person's approval, requested in the coordinator pane (request ${id}). Do not retry it and do not work around it: end your turn now and say what you are waiting for. The answer arrives as a new message.`,
+  questionForwarded: (id: string) =>
+    `Your question was forwarded to the person through the coordinator pane (request ${id}). End your turn now without guessing the answer; it arrives as a new message.`,
+  approvedMsg: (cmd: string, once: boolean) =>
+    `Approved from the coordinator pane${once ? ' (this one time)' : ' (for the rest of this session)'}: you may now run\n\n${cmd}`,
+  deniedMsg: (cmd: string) => `Denied from the coordinator pane: do not run\n\n${cmd}\n\nFind another way or explain what you need.`,
+  answerMsg: (text: string) => `Answer to your questions, sent from the coordinator pane:\n\n${text}`,
+}
+
+const it: typeof en = {
+  pane: 'Agenti',
+  allSessions: 'tutte le sessioni locali',
+  fiveHour: 'Limite 5 ore',
+  week: 'Settimana',
+  resets: 'si azzera',
+  sessions: 'sessioni',
+  all: 'Tutte',
+  waiting: 'Attendono te',
+  active: 'Attive',
+  inbox: 'ATTENDONO TE',
+  nothingWaiting: 'Niente in attesa: tutte le richieste hanno avuto risposta.',
+  permission: 'PERMESSO',
+  choice: 'SCELTA',
+  questions: 'DOMANDE',
+  critical: 'servizio critico',
+  approveOnce: 'Approva una volta',
+  approveSession: 'Approva per la sessione',
+  deny: 'Nega',
+  open: 'Apri sessione',
+  other: 'Altro (risposta libera)',
+  send: 'Invia risposta',
+  replyHere: 'Rispondi qui (arriva alla sessione) oppure apri la sessione per discuterne',
+  sessionsAndAgents: 'SESSIONI E SUBAGENTI',
+  noSessions: 'Nessuna sessione locale sta ancora pubblicando. Le sessioni compaiono quando questa mod gira anche lì.',
+  st: { running: 'In corso', idle: 'Inattiva', waiting: 'Attende te', ended: 'Chiusa' },
+  ag: { running: 'in corso', done: 'finito', failed: 'fallito', idle: 'inattivo' },
+  thisSession: 'questa sessione',
+  coordinator: 'coordinatore',
+  openHint: (title, cwd) => `Apri «${title}» dalla barra laterale (${cwd})`,
+  sentToast: title => `Inviato a «${title}»`,
+  paneOpened: 'Pannello Agenti aperto.',
+  rulesBroken: path => `coordinator-monitor: ${path} non è un JSON valido; valgono solo le regole predefinite.`,
+  waitApproval: (label, id) =>
+    `Questo comando è protetto (${label}) e richiede l'approvazione dell'utente, chiesta nel pannello del Coordinatore (richiesta ${id}). Non riprovarlo e non aggirarlo: chiudi il turno ora e di' cosa stai aspettando. La risposta arriverà come nuovo messaggio.`,
+  questionForwarded: id =>
+    `La tua domanda è stata inoltrata all'utente tramite il pannello del Coordinatore (richiesta ${id}). Chiudi il turno ora senza indovinare la risposta: arriverà come nuovo messaggio.`,
+  approvedMsg: (cmd, once) => `Approvato dal pannello del Coordinatore${once ? ' (solo questa volta)' : ' (per il resto della sessione)'}: ora puoi eseguire\n\n${cmd}`,
+  deniedMsg: cmd => `Negato dal pannello del Coordinatore: non eseguire\n\n${cmd}\n\nTrova un'altra strada o spiega cosa ti serve.`,
+  answerMsg: text => `Risposta alle tue domande, inviata dal pannello del Coordinatore:\n\n${text}`,
+}
+
+export type Strings = typeof en
+
+export const pickStrings = (lang: string | undefined): Strings => (lang?.toLowerCase().startsWith('it') ? it : en)
+
+/** The heading a session ends its turn with when it has open questions. */
+export const QUESTIONS_HEADING = /^#{1,3}\s*(questions for you|domande per te)\s*$/im

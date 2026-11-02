@@ -1,0 +1,38 @@
+{
+  "name": "coordinator-monitor",
+  "version": "0.1.1",
+  "description": "One pane for every local Claude Code session: sessions, subagents (savvy-flow aware), pending permissions and questions you can answer in place.",
+  "author": { "name": "Carlo Ruggiero (easly1989)", "url": "https://easly1989.github.io/" },
+  "homepage": "https://github.com/easly1989/coordinator-monitor",
+  "repository": "https://github.com/easly1989/coordinator-monitor",
+  "license": "AGPL-3.0-or-later",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "language": {
+      "type": "string",
+      "title": "Language",
+      "description": "auto follows Claude Code's language setting; en or it",
+      "default": "auto",
+      "options": ["auto", "en", "it"]
+    },
+    "coordinatorFolder": {
+      "type": "string",
+      "title": "Coordinator folder",
+      "description": "Name of the folder the coordinator session runs in: the pane opens by itself there and that session never forwards its own questions. Empty: open the pane with /agents-monitor.",
+      "default": ""
+    },
+    "forwardQuestions": {
+      "type": "string",
+      "title": "Forward questions to the pane",
+      "description": "on: a session's multiple-choice questions and its '## Questions for you' section go to the pane; off: they stay in the session",
+      "default": "on",
+      "options": ["on", "off"]
+    },
+    "busDir": {
+      "type": "string",
+      "title": "Shared folder",
+      "description": "Where sessions publish their status. Empty: ~/.claude/coordinator-monitor",
+      "default": ""
+    }
+  }
+}
