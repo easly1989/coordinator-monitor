@@ -59,6 +59,14 @@ let critical: string[] = []
 let tierModels: Record<string, string> = { ...TIER_MODEL }
 let forward = true
 let ticking = false
+let home = '.'
+// The desktop app's own record of this session: its sidebar title and effort.
+let label = ''
+let effort = ''
+let metaPath = ''
+let metaAt = 0
+// shortcut: timings live in module memory, so a reload restarts them; persist in `local` if that bothers.
+const agentTimes = new Map<string, { startedAt: number; endedAt?: number }>()
 
 const norm = (p: string): string => p.replace(/\\/g, '/').replace(/\/+$/, '')
 const baseName = (p: string): string => norm(p).split('/').pop() || p
@@ -91,6 +99,52 @@ const detectLang = async ($: $, option: string | undefined): Promise<string> => 
   return (await $.env.get('LC_ALL')) || (await $.env.get('LANG')) || 'en'
 }
 
+type DesktopMeta = { cliSessionId?: string; title?: string; effort?: string }
+
+/**
+ * The desktop app files each Code session as claude-code-sessions/<account>/<org>/local_<id>.json,
+ * with the CLI's session id and the sidebar title. The mod API has no title getter, so read it there;
+ * a session the desktop did not start has no such file and keeps its folder title.
+ */
+const desktopMeta = async ($: $): Promise<void> => {
+  if (Date.now() - metaAt < 60_000) return
+  metaAt = Date.now()
+  if (!metaPath) {
+    const appData = await $.env.get('APPDATA')
+    const roots = [appData ? `${norm(appData)}/Claude` : '', `${home}/Library/Application Support/Claude`, `${home}/.config/Claude`].filter(Boolean)
+    for (const root of roots) {
+      const dir = `${root}/claude-code-sessions`
+      for (const acct of await $.fs.list(dir).catch(() => [])) {
+        if (acct.kind !== 'dir') continue
+        for (const org of await $.fs.list(`${dir}/${acct.name}`).catch(() => [])) {
+          if (org.kind !== 'dir') continue
+          const files = (await $.fs.list(`${dir}/${acct.name}/${org.name}`).catch(() => []))
+            .filter(f => f.kind === 'file' && f.name.startsWith('local_') && f.name.endsWith('.json'))
+            .sort((a, b) => (b.mtimeMs ?? 0) - (a.mtimeMs ?? 0))
+          for (const f of files) {
+            const path = `${dir}/${acct.name}/${org.name}/${f.name}`
+            if ((await readJson<DesktopMeta>($, path))?.cliSessionId === sessionId) {
+              metaPath = path
+              break
+            }
+          }
+          if (metaPath) break
+        }
+        if (metaPath) break
+      }
+      if (metaPath) break
+    }
+    if (!metaPath) return
+  }
+  const m = await readJson<DesktopMeta>($, metaPath)
+  if (m?.cliSessionId !== sessionId) {
+    metaPath = ''
+    return
+  }
+  label = m.title?.trim() ?? ''
+  effort = m.effort ?? ''
+}
+
 // ---------------------------------------------------------------------------
 // The session's own side: publish status, apply answers.
 
@@ -99,12 +153,21 @@ const publish = async ($: $, state?: SessionStatus['state']): Promise<void> => {
   const usage = await $.session.usage().catch(() => null)
   const list = await $.agent.list().catch(() => [])
   const ctx = usage?.context as { usedPercentage?: number; used_percentage?: number } | undefined
+  const now = Date.now()
+  for (const a of list) {
+    const t = agentTimes.get(a.id) ?? { startedAt: now }
+    if (a.status !== 'running' && t.endedAt === undefined) t.endedAt = now
+    if (a.status === 'running') t.endedAt = undefined
+    agentTimes.set(a.id, t)
+  }
   const status: SessionStatus = {
     v: 1,
     sessionId,
-    title,
+    title: label || title,
+    folder: title,
     cwd,
     model,
+    effort: effort || undefined,
     state: state ?? (l.requests.length ? 'waiting' : isBusy ? 'running' : 'idle'),
     isCoordinator,
     heartbeat: Date.now(),
@@ -114,7 +177,18 @@ const publish = async ($: $, state?: SessionStatus['state']): Promise<void> => {
     rateLimits: (usage?.rateLimits ?? []).map(r => ({ kind: r.kind, percentUsed: r.percentUsed, resetsAt: r.resetsAt })),
     agents: list.slice(-30).map(a => {
       const st = l.steps[a.id]
-      return { id: a.id, type: a.type, description: a.description, status: String(a.status), stepDone: st?.done, stepTotal: st?.total, stepNote: st?.note }
+      const t = agentTimes.get(a.id)
+      return {
+        id: a.id,
+        type: a.type,
+        description: a.description,
+        status: String(a.status),
+        stepDone: st?.done,
+        stepTotal: st?.total,
+        stepNote: st?.note,
+        startedAt: t?.startedAt,
+        endedAt: t?.endedAt,
+      }
     }),
     flow: l.flow,
     requests: l.requests,
@@ -197,6 +271,7 @@ const tick = async ($: $): Promise<void> => {
   ticking = true
   try {
     await applyAnswers($)
+    await desktopMeta($).catch(() => undefined)
     await publish($)
     if (isPaneOpen || isCoordinator) await gather($)
   } catch {
@@ -224,10 +299,22 @@ const bar = (ratio: number, width: number): string => {
   const filled = Math.round(clamp01(ratio) * width)
   return '█'.repeat(filled) + '░'.repeat(width - filled)
 }
-const barSvg = (ratio: number, color: string, w: number): string =>
-  `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="4" viewBox="0 0 ${w} 4">` +
-  `<rect width="${w}" height="4" rx="2" fill="#8080804D"/>` +
-  `<rect width="${Math.round(clamp01(ratio) * w)}" height="4" rx="2" fill="${color}"/></svg>`
+// Wide markup and no width prop: the surface clamps it to the slot, and `none` stretches it to fit.
+const barSvg = (ratio: number, color: string): string =>
+  `<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="4" viewBox="0 0 1000 4" preserveAspectRatio="none">` +
+  `<rect width="1000" height="4" fill="#8080804D"/>` +
+  `<rect width="${Math.round(clamp01(ratio) * 1000)}" height="4" fill="${color}"/></svg>`
+/** "claude-opus-5-5" reads "Opus 5.5". */
+const prettyModel = (id: string): string => {
+  const m = /^claude-([a-z]+)-(\d+)(?:-(\d+))?/.exec(id)
+  return m?.[1] ? `${m[1].charAt(0).toUpperCase()}${m[1].slice(1)} ${m[2]}${m[3] ? `.${m[3]}` : ''}` : id
+}
+const fmtDur = (ms: number): string => {
+  const s = Math.max(0, Math.round(ms / 1000))
+  if (s < 60) return `${s}s`
+  if (s < 3600) return `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s`
+  return `${Math.floor(s / 3600)}h ${String(Math.floor(s / 60) % 60).padStart(2, '0')}m`
+}
 
 // The pane's palette, after the mockup in docs/. Translucent fills sit on
 // either theme; the terminal gets none of them (it has no alpha).
@@ -244,7 +331,7 @@ export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     const started = await next(e)
     S = pickStrings(await detectLang($, options.language as string | undefined))
-    const home = (await $.env.get('HOME')) || (await $.env.get('USERPROFILE')) || '.'
+    home = norm((await $.env.get('HOME')) || (await $.env.get('USERPROFILE')) || '.')
     base = norm((options.busDir as string | undefined)?.trim() || `${home}/.claude/coordinator-monitor`)
     sessionId = await $.session.id()
     cwd = norm(await $.session.cwd())
@@ -385,8 +472,8 @@ export const register: Register = (on, options) => {
 
     const crab = (costume: string, alt: string, walking: boolean, dim = false): RenderChildren =>
       Svg ? <Svg source={crabSvg(costume, { isWalking: walking, isDim: dim, size: 30 })} alt={alt} width={30} height={CRAB_H(30)} /> : null
-    const meter = (ratio: number, color: string, w: number, alt: string): RenderChildren =>
-      Svg ? <Svg source={barSvg(ratio, color, w)} alt={alt} width={w} height={4} /> : <Text color={color}>{bar(ratio, Math.max(10, Math.min(40, cols - 16)))}</Text>
+    const meter = (ratio: number, color: string, alt: string): RenderChildren =>
+      Svg ? <Svg source={barSvg(ratio, color)} alt={alt} height={4} /> : <Text color={color}>{bar(ratio, Math.max(10, Math.min(40, cols - 16)))}</Text>
     const badge = (label: string, tone: 'amber' | 'blue' = 'amber'): RenderNode =>
       tone === 'amber' ? (
         <Text size="caption" weight="bold" color={isTerm ? 'warning' : ON_AMBER} backgroundColor={fill(AMBER)}>
@@ -397,6 +484,12 @@ export const register: Register = (on, options) => {
           {` ${label} `}
         </Text>
       )
+    // The desktop draws a field without chrome: frame it so it reads as one.
+    const field = (input: RenderNode): RenderNode => (
+      <Box flexDirection="column" paddingX="sm" borderStyle="round" borderColor={isTerm ? undefined : CARD_LINE} borderDimColor={isTerm} backgroundColor={fill(CARD)}>
+        {input}
+      </Box>
+    )
     const chip = (label: string): RenderNode => (
       <Text size="caption" color="subtle" backgroundColor={fill(CARD)}>
         {` ${label} `}
@@ -531,7 +624,7 @@ export const register: Register = (on, options) => {
                 <Text size="caption" color="subtle">
                   {S.other}
                 </Text>
-                <Input key={`other-${r.id}`} placeholder={S.otherPlaceholder} submitLabel={S.send} onSubmit={value => void answer($, s, r, 'answer', compose(value))} />
+                {field(<Input key={`other-${r.id}`} placeholder={S.otherPlaceholder} submitLabel={S.send} onSubmit={value => void answer($, s, r, 'answer', compose(value))} />)}
               </Box>
             ) : (
               <Button key={`send-${r.id}`} variant="primary" label={S.send} onPress={() => void answer($, s, r, 'answer', compose(''))} />
@@ -545,7 +638,7 @@ export const register: Register = (on, options) => {
           <Box flexDirection="column" padding="sm" backgroundColor={fill(CARD)}>
             {Markdown ? <Markdown key={`md-${r.id}`} text={r.text ?? ''} /> : <Text>{r.text ?? ''}</Text>}
           </Box>
-          {Input ? <Input key={`reply-${r.id}`} placeholder={S.replyHere} rows={3} submitLabel={S.send} onSubmit={value => value.trim() && void answer($, s, r, 'answer', value)} /> : null}
+          {Input ? field(<Input key={`reply-${r.id}`} placeholder={S.replyHere} rows={3} submitLabel={S.send} onSubmit={value => value.trim() && void answer($, s, r, 'answer', value)} />) : null}
         </Box>,
       )
     }
@@ -564,7 +657,11 @@ export const register: Register = (on, options) => {
     const sessionBlock = (s: SessionStatus): RenderNode => {
       const isCol = !!u.collapsed[s.sessionId]
       const who = [s.isCoordinator ? S.coordinator : '', s.sessionId === sessionId ? S.thisSession : ''].filter(Boolean).join(' · ')
-      const meta = [s.model.replace(/^claude-/, ''), s.contextPct !== undefined ? `ctx ${fmtPct(s.contextPct)}` : ''].filter(Boolean).join(' · ')
+      const meta = [prettyModel(s.model), s.effort ? (S.effort[s.effort] ?? s.effort) : '', s.contextPct !== undefined ? `ctx ${fmtPct(s.contextPct)}` : '']
+        .filter(Boolean)
+        .join(' · ')
+      const ask = s.requests[0]
+      const asks = ask?.kind === 'permission' ? S.waitsPermission(ask.command ?? '') : ask?.kind === 'choice' ? S.hasChoice : ask?.kind === 'questions' ? S.hasQuestions : ''
       const flow = s.flow ? `${s.flow.title} · ${s.flow.done}/${s.flow.total}${s.flow.phase ? ` · ${s.flow.phase}` : ''}` : ''
       const costume = s.state === 'waiting' ? 'waiting' : 'other'
       return (
@@ -576,7 +673,7 @@ export const register: Register = (on, options) => {
                 <Text weight="semibold">{s.title}</Text>
               </Button>
               <Text size="footnote" color="subtle" wrap="truncate-end">
-                {flow || who || s.cwd}
+                {flow || asks || who || s.folder || s.cwd}
               </Text>
             </Box>
             <Box flexDirection="column" alignItems="flex-end">
@@ -602,6 +699,7 @@ export const register: Register = (on, options) => {
               const word = tier === 'other' ? a.type : tier === 'explore' ? 'Explore' : tier
               const ratio = a.status === 'done' ? 1 : a.stepTotal ? (a.stepDone ?? 0) / a.stepTotal : 0
               const steps = a.stepTotal ? `${a.stepDone ?? 0}/${a.stepTotal}${a.stepNote ? ` · ${a.stepNote}` : ''}` : ''
+              const took = a.startedAt ? fmtDur((a.endedAt ?? Date.now()) - a.startedAt) : ''
               const pick = () => {
                 if (s.sessionId === sessionId) void $.ui.view({ agentId: a.id }).then(r => r.deny && $.ui.toast(r.deny))
                 else open(s)()
@@ -610,12 +708,12 @@ export const register: Register = (on, options) => {
                 <Box key={`${s.sessionId}-${a.id}`} flexDirection="row" gap="sm" paddingLeft="lg" alignItems="flex-start">
                   {crab(tier === 'other' ? 'other' : tier, word, a.status === 'running')}
                   <Box flexDirection="column" flexGrow={1} flexShrink={1} gap="xs">
-                    <Box flexDirection="row" gap="sm" justifyContent="space-between">
-                      <Button key={`a-${a.id}`} plain onPress={pick}>
-                        <Text weight="medium">{a.description || a.type}</Text>
+                    <Box flexDirection="row" gap="sm" justifyContent="space-between" alignItems="center">
+                      <Button key={`a-${a.id}`} plain dimColor={a.status === 'idle'} onPress={pick}>
+                        <Text weight="semibold">{a.description || a.type}</Text>
                       </Button>
-                      <Text size="caption" color={a.status === 'done' ? 'success' : a.status === 'failed' ? 'error' : 'subtle'}>
-                        {S.ag[a.status] ?? a.status}
+                      <Text color={a.status === 'done' ? 'success' : a.status === 'failed' ? 'error' : a.status === 'running' ? BLUE : 'subtle'}>
+                        {a.status === 'done' ? '✓' : a.status === 'failed' ? '✕' : a.status === 'running' ? '●' : '◷'}
                       </Text>
                     </Box>
                     <Text size="caption">
@@ -624,12 +722,19 @@ export const register: Register = (on, options) => {
                       </Text>
                       <Text color="subtle">{tierModels[tier] ? `  ·  ${tierModels[tier]}` : ''}</Text>
                     </Text>
-                    {steps ? (
-                      <Text size="footnote" color="subtle" wrap="truncate-end">
-                        {steps}
-                      </Text>
+                    {steps || took ? (
+                      <Box flexDirection="row" gap="sm" justifyContent="space-between">
+                        <Box flexGrow={1} flexShrink={1}>
+                          <Text size="footnote" wrap="truncate-end">
+                            {steps}
+                          </Text>
+                        </Box>
+                        <Text size="caption" color="subtle">
+                          {took}
+                        </Text>
+                      </Box>
                     ) : null}
-                    {meter(ratio, a.status === 'done' ? '#3FB950' : color, Math.max(120, Math.min(360, cols * 6)), `${Math.round(clamp01(ratio) * 100)}%`)}
+                    {meter(ratio, a.status === 'done' ? '#3FB950' : color, `${Math.round(clamp01(ratio) * 100)}%`)}
                   </Box>
                 </Box>
               )
@@ -658,13 +763,13 @@ export const register: Register = (on, options) => {
             'st-5h',
             `${S.fiveHour}${five?.resetsAt ? ` · ${S.until} ${fmtReset(five.resetsAt)}` : ''}`,
             fmtPct(five?.percentUsed),
-            meter((five?.percentUsed ?? 0) / 100, (five?.percentUsed ?? 0) >= 90 ? '#E5534B' : '#7F77DD', 140, fmtPct(five?.percentUsed)),
+            meter((five?.percentUsed ?? 0) / 100, (five?.percentUsed ?? 0) >= 90 ? '#E5534B' : '#7F77DD', fmtPct(five?.percentUsed)),
           )}
           {stat(
             'st-week',
             `${S.week}${week?.resetsAt ? ` · ${S.until} ${fmtReset(week.resetsAt)}` : ''}`,
             fmtPct(week?.percentUsed),
-            meter((week?.percentUsed ?? 0) / 100, (week?.percentUsed ?? 0) >= 93 ? '#E5534B' : '#7F77DD', 140, fmtPct(week?.percentUsed)),
+            meter((week?.percentUsed ?? 0) / 100, (week?.percentUsed ?? 0) >= 93 ? '#E5534B' : '#7F77DD', fmtPct(week?.percentUsed)),
           )}
           {stat(
             'st-now',

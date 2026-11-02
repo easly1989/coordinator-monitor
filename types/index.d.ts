@@ -6,6 +6,9 @@ export type AgentRow = {
   stepDone?: number
   stepTotal?: number
   stepNote?: string
+  /** When this session first saw it run, and saw it finish (epoch ms). */
+  startedAt?: number
+  endedAt?: number
 }
 
 export type ChoiceOption = { label: string; description?: string }
@@ -44,9 +47,13 @@ export type SessionState = 'running' | 'idle' | 'waiting' | 'ended'
 export type SessionStatus = {
   v: 1
   sessionId: string
+  /** The sidebar title the desktop app gave the session, else the folder. */
   title: string
+  /** The folder title (`project` or `project › worktree`). */
+  folder?: string
   cwd: string
   model: string
+  effort?: string
   state: SessionState
   isCoordinator: boolean
   heartbeat: number
