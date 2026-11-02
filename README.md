@@ -23,6 +23,7 @@ It is a Claude Code **mod** (function hooks, the early-access plugin API). Made 
 - **Every local session in one place.** Each session that runs the mod publishes its status (state, model, context, cost, subagents) to a shared folder; the pane reads them all. Sessions are grouped with their subagents, waiting ones first.
 - **savvy-flow aware.** With [savvy-flow](https://github.com/johnnyvizz/claude-kit/tree/main/plugins/savvy-flow) and [savvy-progress](https://github.com/johnnyvizz/claude-kit/tree/main/plugins/savvy-progress) installed, workers show up with their tier crab (astronaut, detective, engineer, chef, racer), model and effort, and the steps they report. Without them, any subagent is listed.
 - **Protected commands wait for you.** Merges, pushes to `main`, deploys and service restarts never run without your approval, whatever the session's permission mode. The session is told to stop and wait; you approve once, for the session, or deny, from the pane.
+- **The app's permission prompts come to you too.** While a coordinator session is running, a session whose app would ask for a permission sends the ask to the pane instead and stops to wait; approve it once, for the session, or deny it from there. The coordinator itself, and every session when no coordinator is running, keep the app's own dialog.
 - **Questions come to you.** A session's multiple-choice question (the dialog with options) is forwarded to the pane with every option and a free answer field. Open questions a session ends its turn with, under a `## Questions for you` heading, are shown too, with a reply box.
 - **Answered means gone.** A request leaves the pane as soon as you answer it; the owning session receives your answer as a new message and carries on.
 - **Usage at a glance.** The 5-hour and weekly limits, as the latest session reported them.
@@ -109,6 +110,8 @@ Add your own, or mark services as critical so their requests stand out, in `<bus
 `tierModels` relabels the savvy tiers when your copies of the savvy agents run other models than upstream.
 
 The rules are a guard against a session doing something you wanted to supervise, not a sandbox: a command written to dodge a pattern is not caught. Keep your normal permission settings.
+
+Answers are files the pane writes to `<busDir>/answers/`. A session that could write one could approve its own app permissions, so the mod refuses any tool call whose input names that folder. That too is a guard, not a sandbox: a command that builds the path at run time is not caught.
 
 ## How it works
 

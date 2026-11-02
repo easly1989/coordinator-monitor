@@ -20,7 +20,8 @@ export type ChoiceQuestion = {
   options: ChoiceOption[]
 }
 
-export type RequestKind = 'permission' | 'choice' | 'questions'
+/** `ask` is the app's own permission dialog, up in the session: shown, answered there. */
+export type RequestKind = 'permission' | 'choice' | 'questions' | 'ask'
 
 export type MonitorRequest = {
   id: string

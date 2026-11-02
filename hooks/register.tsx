@@ -204,10 +204,10 @@ const applyAnswers = async ($: $): Promise<void> => {
       next.applied = [...next.applied, a.requestId].slice(-300)
       const cmd = req.command ?? ''
       if (a.kind === 'approve-once') {
-        next.grantsOnce.push(cmd)
+        next.grantsOnce.push(grantKey(req))
         prompts.push(S.approvedMsg(cmd, true))
       } else if (a.kind === 'approve-session') {
-        next.grantsSession.push(cmd)
+        next.grantsSession.push(grantKey(req))
         prompts.push(S.approvedMsg(cmd, false))
       } else if (a.kind === 'deny') {
         prompts.push(S.deniedMsg(cmd))
@@ -221,8 +221,28 @@ const applyAnswers = async ($: $): Promise<void> => {
   await publish($)
 }
 
+/** What an app permission ask is about: the command, the file, the address, else its input. */
+const askWhat = (input: unknown): string => {
+  const i = (input ?? {}) as { command?: unknown; file_path?: unknown; url?: unknown }
+  return String(i.command ?? i.file_path ?? i.url ?? JSON.stringify(input ?? '')).slice(0, 2000)
+}
+const askKey = (tool: string, what: string): string => `ask\u0000${tool}\u0000${what}`
+const grantKey = (r: MonitorRequest): string => (r.kind === 'ask' ? askKey(r.tool ?? '', r.command ?? '') : (r.command ?? ''))
+
+/** Whether a coordinator session is publishing now, so a request sent to the pane gets seen. */
+const coordinatorLive = async ($: $): Promise<boolean> => {
+  for (const f of await $.fs.list(`${base}/sessions`).catch(() => [])) {
+    if (f.kind !== 'file' || !f.name.endsWith('.json') || (f.mtimeMs && Date.now() - f.mtimeMs > 60_000)) continue
+    const s = await readJson<SessionStatus>($, `${base}/sessions/${f.name}`)
+    if (s?.isCoordinator && s.sessionId !== sessionId && s.state !== 'ended' && Date.now() - s.heartbeat < 60_000) return true
+  }
+  return false
+}
+
 const addRequest = async ($: $, req: MonitorRequest): Promise<void> => {
-  await update($, local, cur => ({ ...cur, requests: [...cur.requests.filter(r => !(r.kind === req.kind && r.kind !== 'permission')), req] }))
+  // One open question set and one choice at a time; permissions and app asks stack.
+  const single = req.kind === 'questions' || req.kind === 'choice'
+  await update($, local, cur => ({ ...cur, requests: [...cur.requests.filter(r => !(single && r.kind === req.kind)), req] }))
   await publish($)
 }
 
@@ -379,8 +399,9 @@ export const register: Register = (on, options) => {
       isBusy = true
       // A new turn supersedes what the session asked last time, whether the answer came from
       // the pane or was typed in the session itself. Permissions stay: only the pane grants them.
-      if ((await read($, local)).requests.some(r => r.kind !== 'permission')) {
-        await update($, local, cur => ({ ...cur, requests: cur.requests.filter(r => r.kind === 'permission') }))
+      const asked = (r: MonitorRequest) => r.kind === 'questions' || r.kind === 'choice'
+      if ((await read($, local)).requests.some(asked)) {
+        await update($, local, cur => ({ ...cur, requests: cur.requests.filter(r => !asked(r)) }))
         void publish($)
       }
     }
@@ -443,8 +464,33 @@ export const register: Register = (on, options) => {
     return { deny: S.questionForwarded(id) }
   }).catch(($, e, next) => next(e))
 
+  // The app's own permission dialog goes to the pane, as protected commands do, while a coordinator
+  // is there to answer it. The coordinator itself, and any session when none is, keep the dialog.
+  on('classic.PermissionRequest', async ($, e, next) => {
+    if (isCoordinator || !forward) return next(e)
+    const what = askWhat(e.tool_input)
+    const key = askKey(e.tool_name, what)
+    const l = await read($, local)
+    if (l.grantsSession.includes(key)) return { decision: { behavior: 'allow' } }
+    if (l.grantsOnce.includes(key)) {
+      await update($, local, cur => {
+        const i = cur.grantsOnce.indexOf(key)
+        return i < 0 ? cur : { ...cur, grantsOnce: cur.grantsOnce.filter((_, j) => j !== i) }
+      })
+      return { decision: { behavior: 'allow' } }
+    }
+    if (!(await coordinatorLive($))) return next(e)
+    const pending = l.requests.find(r => r.kind === 'ask' && askKey(r.tool ?? '', r.command ?? '') === key)
+    const id = pending?.id ?? newId()
+    if (!pending) await addRequest($, { id, kind: 'ask', createdAt: Date.now(), tool: e.tool_name, command: what, rule: S.appPermission })
+    return { decision: { behavior: 'deny', message: S.waitApproval(S.appPermission, id), interrupt: true } }
+  }).catch(($, e, next) => next(e))
+
   // Protected commands wait for the person's approval from the pane.
   on('tool.check', async ($, e, next) => {
+    // Only the pane writes answers: a session that could write its own would grant itself anything.
+    const said = JSON.stringify(e.input ?? '').replace(/\\\\/g, '/').toLowerCase()
+    if (said.includes('coordinator-monitor/answers') || said.includes(`${base}/answers`.toLowerCase())) return { decision: 'deny', reason: S.answersGuard }
     if (!SHELL_TOOLS.has(e.tool) || !e.tool_use_id) return next(e)
     const command = String((e.input as { command?: unknown } | null)?.command ?? '')
     const rule = command && matchRule(rules, command)
@@ -553,7 +599,7 @@ export const register: Register = (on, options) => {
           {children}
         </Box>
       )
-      if (r.kind === 'permission') {
+      if (r.kind === 'permission' || r.kind === 'ask') {
         return shell(
           <Box flexDirection="column" gap="sm">
             {head(S.permission, `${s.title} · ${r.tool ?? 'Bash'}`)}
@@ -683,7 +729,7 @@ export const register: Register = (on, options) => {
         .filter(Boolean)
         .join(' · ')
       const ask = s.requests[0]
-      const asks = ask?.kind === 'permission' ? S.waitsPermission(ask.command ?? '') : ask?.kind === 'choice' ? S.hasChoice : ask?.kind === 'questions' ? S.hasQuestions : ''
+      const asks = ask?.kind === 'permission' || ask?.kind === 'ask' ? S.waitsPermission(ask.command ?? '') : ask?.kind === 'choice' ? S.hasChoice : ask?.kind === 'questions' ? S.hasQuestions : ''
       const flow = s.flow ? `${s.flow.title} · ${s.flow.done}/${s.flow.total}${s.flow.phase ? ` · ${s.flow.phase}` : ''}` : ''
       const costume = s.state === 'waiting' ? 'waiting' : 'other'
       return (

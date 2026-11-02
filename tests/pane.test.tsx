@@ -1,6 +1,8 @@
-import { expect, test } from 'claude-code/testing'
+import { describe, expect, test, type TestBody } from 'claude-code/testing'
 
 import type { SessionStatus } from '../types'
+
+type TestOn = Parameters<TestBody>[1]
 
 // The test environment has timers; the engine's lib types leave them out.
 declare const setTimeout: (run: () => void, ms: number) => unknown
@@ -166,4 +168,66 @@ test('a new turn retires the questions the session asked', async ($, on) => {
   await $.turn.start({ turnId: 't2' } as never)
   await settle()
   expect(mine().requests).toEqual([])
+})
+describe('the app asking for a permission', () => {
+  const setup = (on: TestOn, coordinator: boolean) => {
+    const written: Record<string, string> = {}
+    const COORD = JSON.stringify({ v: 1, sessionId: 'c', title: 'Coordinatore', cwd: '/c', model: 'm', state: 'running', isCoordinator: true, heartbeat: Date.now(), startedAt: 0, rateLimits: [], agents: [], flow: null, requests: [] })
+    on('command.register', () => ({ value: { command: 'agents-monitor' } }))
+    on('session.start', (_, e) => ({ cwd: e.cwd }))
+    on('env.get', () => ({ value: undefined }))
+    on('settings.read', () => ({ value: {} }))
+    on('session.id', () => ({ value: 'me' }))
+    on('session.cwd', () => ({ value: '/repos/project' }))
+    on('session.model', () => ({ value: 'claude-sonnet-5-5' }))
+    on('session.usage', () => ({ value: { rateLimits: [] } as never }))
+    on('agent.list', () => ({ value: [] }))
+    on('fs.exists', () => ({ value: false }))
+    on('fs.list', (_, e) => ({ value: coordinator && e.path.replace(/\\/g, '/').endsWith('/sessions') ? [{ kind: 'file', name: 'c.json', mtimeMs: Date.now() } as never] : [] }))
+    on('fs.read', (_, e) => {
+      if (coordinator && e.path.replace(/\\/g, '/').endsWith('/sessions/c.json')) return { value: COORD }
+      throw new Error('ENOENT')
+    })
+    on('fs.write', (_, e) => {
+      written[e.path.replace(/\\/g, '/')] = e.text
+      return { value: undefined }
+    })
+    on('clock.every', () => ({ value: undefined }))
+    return () => JSON.parse(Object.entries(written).find(([k]) => k.endsWith('/sessions/me.json'))?.[1] ?? '{}') as SessionStatus
+  }
+
+  test('goes to the pane while a coordinator is there, and the session stops to wait', async ($, on) => {
+    const mine = setup(on, true)
+    let dialog = false
+    on('classic.PermissionRequest', () => {
+      dialog = true
+      return { decision: { behavior: 'allow' } } as never
+    })
+    await $.session.start({ cwd: '/repos/project', surface: 'desktop', isInteractive: true })
+    const r = (await $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: { command: 'npm test' } } as never)) as { decision?: { behavior: string; interrupt?: boolean } }
+    expect(dialog).toBe(false)
+    expect(r.decision?.behavior).toBe('deny')
+    expect(r.decision?.interrupt).toBe(true)
+    expect(mine().requests.map(q => `${q.kind}:${q.tool}:${q.command}`)).toEqual(['ask:Bash:npm test'])
+  })
+
+  test('keeps the dialog when no coordinator is there', async ($, on) => {
+    setup(on, false)
+    let dialog = false
+    on('classic.PermissionRequest', () => {
+      dialog = true
+      return { decision: { behavior: 'allow' } } as never
+    })
+    await $.session.start({ cwd: '/repos/project', surface: 'desktop', isInteractive: true })
+    await $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: { command: 'npm test' } } as never)
+    expect(dialog).toBe(true)
+  })
+
+  test('no session may write the pane answers itself', async ($, on) => {
+    setup(on, true)
+    on('tool.check', () => ({ decision: 'allow' }) as never)
+    await $.session.start({ cwd: '/repos/project', surface: 'desktop', isInteractive: true })
+    const r = (await $.tool.check({ tool: 'Write', input: { file_path: 'C:\\Users\\x\\.claude\\coordinator-monitor\\answers\\me.json', content: '[]' }, tool_use_id: 'u1', isReadOnly: false } as never)) as { decision?: string }
+    expect(r.decision).toBe('deny')
+  })
 })
