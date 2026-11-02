@@ -527,7 +527,12 @@ export const register: Register = (on, options) => {
               </Box>
             ))}
             {Input ? (
-              <Input key={`other-${r.id}`} label={S.other} placeholder={S.otherPlaceholder} submitLabel={S.send} onSubmit={value => void answer($, s, r, 'answer', compose(value))} />
+              <Box flexDirection="column" gap="xs">
+                <Text size="caption" color="subtle">
+                  {S.other}
+                </Text>
+                <Input key={`other-${r.id}`} placeholder={S.otherPlaceholder} submitLabel={S.send} onSubmit={value => void answer($, s, r, 'answer', compose(value))} />
+              </Box>
             ) : (
               <Button key={`send-${r.id}`} variant="primary" label={S.send} onPress={() => void answer($, s, r, 'answer', compose(''))} />
             )}
@@ -540,7 +545,7 @@ export const register: Register = (on, options) => {
           <Box flexDirection="column" padding="sm" backgroundColor={fill(CARD)}>
             {Markdown ? <Markdown key={`md-${r.id}`} text={r.text ?? ''} /> : <Text>{r.text ?? ''}</Text>}
           </Box>
-          {Input ? <Input key={`reply-${r.id}`} label={S.replyHere} rows={3} submitLabel={S.send} onSubmit={value => value.trim() && void answer($, s, r, 'answer', value)} /> : null}
+          {Input ? <Input key={`reply-${r.id}`} placeholder={S.replyHere} rows={3} submitLabel={S.send} onSubmit={value => value.trim() && void answer($, s, r, 'answer', value)} /> : null}
         </Box>,
       )
     }
