@@ -170,7 +170,8 @@ test('a new turn retires the questions the session asked', async ($, on) => {
   expect(mine().requests).toEqual([])
 })
 describe('the app asking for a permission', () => {
-  const setup = (on: TestOn, coordinator: boolean) => {
+  // `file` is the name the coordinator's status file is listed under: anything but c.json poses as it.
+  const setup = (on: TestOn, coordinator: boolean, file = 'c.json') => {
     const written: Record<string, string> = {}
     const COORD = JSON.stringify({ v: 1, sessionId: 'c', title: 'Coordinatore', cwd: '/c', model: 'm', state: 'running', isCoordinator: true, heartbeat: Date.now(), startedAt: 0, rateLimits: [], agents: [], flow: null, requests: [] })
     on('command.register', () => ({ value: { command: 'agents-monitor' } }))
@@ -183,9 +184,9 @@ describe('the app asking for a permission', () => {
     on('session.usage', () => ({ value: { rateLimits: [] } as never }))
     on('agent.list', () => ({ value: [] }))
     on('fs.exists', () => ({ value: false }))
-    on('fs.list', (_, e) => ({ value: coordinator && e.path.replace(/\\/g, '/').endsWith('/sessions') ? [{ kind: 'file', name: 'c.json', mtimeMs: Date.now() } as never] : [] }))
+    on('fs.list', (_, e) => ({ value: coordinator && e.path.replace(/\\/g, '/').endsWith('/sessions') ? [{ kind: 'file', name: file, mtimeMs: Date.now() } as never] : [] }))
     on('fs.read', (_, e) => {
-      if (coordinator && e.path.replace(/\\/g, '/').endsWith('/sessions/c.json')) return { value: COORD }
+      if (coordinator && e.path.replace(/\\/g, '/').endsWith(`/sessions/${file}`)) return { value: COORD }
       throw new Error('ENOENT')
     })
     on('fs.write', (_, e) => {
@@ -209,6 +210,26 @@ describe('the app asking for a permission', () => {
     expect(r.decision?.behavior).toBe('deny')
     expect(r.decision?.interrupt).toBe(true)
     expect(mine().requests.map(q => `${q.kind}:${q.tool}:${q.command}`)).toEqual(['ask:Bash:npm test'])
+    // Any field beyond the command is part of what is asked: it shows, and it gets its own grant.
+    await $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: { command: 'npm test', description: 'run tests', dangerouslyDisableSandbox: true } } as never)
+    expect(mine().requests[1]?.command).toContain('"dangerouslyDisableSandbox": true')
+    expect(mine().requests[1]?.command).not.toContain('run tests')
+    // Too long to show whole: the app's own dialog asks.
+    await $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: { command: 'x'.repeat(9000) } } as never)
+    expect(dialog).toBe(true)
+    expect(mine().requests.length).toBe(2)
+  })
+
+  test('a status file posing as another session does not count', async ($, on) => {
+    setup(on, true, 'forged.json')
+    let dialog = false
+    on('classic.PermissionRequest', () => {
+      dialog = true
+      return { decision: { behavior: 'allow' } } as never
+    })
+    await $.session.start({ cwd: '/repos/project', surface: 'desktop', isInteractive: true })
+    await $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: { command: 'npm test' } } as never)
+    expect(dialog).toBe(true)
   })
 
   test('keeps the dialog when no coordinator is there', async ($, on) => {
@@ -229,5 +250,10 @@ describe('the app asking for a permission', () => {
     await $.session.start({ cwd: '/repos/project', surface: 'desktop', isInteractive: true })
     const r = (await $.tool.check({ tool: 'Write', input: { file_path: 'C:\\Users\\x\\.claude\\coordinator-monitor\\answers\\me.json', content: '[]' }, tool_use_id: 'u1', isReadOnly: false } as never)) as { decision?: string }
     expect(r.decision).toBe('deny')
+    // The mod's own source, and a read of the bus, stay allowed.
+    const src = (await $.tool.check({ tool: 'Edit', input: { file_path: 'C:\\repos\\coordinator-monitor\\hooks\\register.tsx', old_string: 'a', new_string: '.claude/coordinator-monitor' }, tool_use_id: 'u2' } as never)) as { decision?: string }
+    expect(src.decision).toBe('allow')
+    const look = (await $.tool.check({ tool: 'Read', input: { file_path: 'C:\\Users\\x\\.claude\\coordinator-monitor\\sessions\\c.json' }, tool_use_id: 'u3', isReadOnly: true } as never)) as { decision?: string }
+    expect(look.decision).toBe('allow')
   })
 })

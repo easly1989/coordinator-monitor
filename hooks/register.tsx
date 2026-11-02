@@ -202,7 +202,8 @@ const applyAnswers = async ($: $): Promise<void> => {
       if (!req) continue
       next.requests = next.requests.filter(r => r.id !== a.requestId)
       next.applied = [...next.applied, a.requestId].slice(-300)
-      const cmd = req.command ?? ''
+      // Fenced: the command is the session's text, sent on in the person's voice.
+      const cmd = fence(req.command ?? '')
       if (a.kind === 'approve-once') {
         next.grantsOnce.push(grantKey(req))
         prompts.push(S.approvedMsg(cmd, true))
@@ -221,19 +222,47 @@ const applyAnswers = async ($: $): Promise<void> => {
   await publish($)
 }
 
-/** What an app permission ask is about: the command, the file, the address, else its input. */
+// Past this an ask keeps the app's dialog: the card shows, and the grant covers, the whole input.
+const ASK_MAX = 8000
+const sortKeys = (v: unknown): unknown =>
+  Array.isArray(v) ? v.map(sortKeys) : v && typeof v === 'object' ? Object.fromEntries(Object.keys(v).sort().map(k => [k, sortKeys((v as Record<string, unknown>)[k])])) : v
+
+/** What an app permission ask is about, in full: a bare command as is, else every field but the description. */
 const askWhat = (input: unknown): string => {
-  const i = (input ?? {}) as { command?: unknown; file_path?: unknown; url?: unknown }
-  return String(i.command ?? i.file_path ?? i.url ?? JSON.stringify(input ?? '')).slice(0, 2000)
+  const { description: _, ...rest } = (input && typeof input === 'object' ? input : { input }) as Record<string, unknown>
+  return Object.keys(rest).length === 1 && typeof rest.command === 'string' ? rest.command : JSON.stringify(sortKeys(rest), null, 2)
 }
 const askKey = (tool: string, what: string): string => `ask\u0000${tool}\u0000${what}`
 const grantKey = (r: MonitorRequest): string => (r.kind === 'ask' ? askKey(r.tool ?? '', r.command ?? '') : (r.command ?? ''))
+
+/** A Markdown fence no backtick run inside `s` can close, so the text stays quoted. */
+const fence = (s: string): string => {
+  const f = '`'.repeat(Math.max(3, ...[...s.matchAll(/`+/g)].map(m => m[0].length + 1)))
+  return `${f}\n${s}\n${f}`
+}
+
+/** Takes one approve-once grant, atomically: two calls racing for one grant get it once. */
+const takeOnce = async ($: $, key: string): Promise<boolean> => {
+  let took = false
+  await update($, local, cur => {
+    const i = cur.grantsOnce.indexOf(key)
+    took = i >= 0
+    return took ? { ...cur, grantsOnce: cur.grantsOnce.filter((_, j) => j !== i) } : cur
+  })
+  return took
+}
+
+/** A status file the pane may trust: named after the session it claims, so one session cannot pose as another. */
+const statusFile = async ($: $, name: string): Promise<SessionStatus | null> => {
+  const s = await readJson<SessionStatus>($, `${base}/sessions/${name}`)
+  return s && typeof s.sessionId === 'string' && /^[\w-]+$/.test(s.sessionId) && name === `${s.sessionId}.json` ? s : null
+}
 
 /** Whether a coordinator session is publishing now, so a request sent to the pane gets seen. */
 const coordinatorLive = async ($: $): Promise<boolean> => {
   for (const f of await $.fs.list(`${base}/sessions`).catch(() => [])) {
     if (f.kind !== 'file' || !f.name.endsWith('.json') || (f.mtimeMs && Date.now() - f.mtimeMs > 60_000)) continue
-    const s = await readJson<SessionStatus>($, `${base}/sessions/${f.name}`)
+    const s = await statusFile($, f.name)
     if (s?.isCoordinator && s.sessionId !== sessionId && s.state !== 'ended' && Date.now() - s.heartbeat < 60_000) return true
   }
   return false
@@ -256,7 +285,7 @@ const gather = async ($: $): Promise<void> => {
   for (const entry of entries) {
     if (entry.kind !== 'file' || !entry.name.endsWith('.json')) continue
     if (entry.mtimeMs && now - entry.mtimeMs > ENDED_KEEP_MS) continue
-    const s = await readJson<SessionStatus>($, `${base}/sessions/${entry.name}`)
+    const s = await statusFile($, entry.name)
     if (!s || s.v !== 1) continue
     const age = now - s.heartbeat
     if (s.state === 'ended' ? age > ENDED_KEEP_MS : age > STALE_MS) continue
@@ -469,16 +498,10 @@ export const register: Register = (on, options) => {
   on('classic.PermissionRequest', async ($, e, next) => {
     if (isCoordinator || !forward) return next(e)
     const what = askWhat(e.tool_input)
+    if (what.length > ASK_MAX) return next(e)
     const key = askKey(e.tool_name, what)
     const l = await read($, local)
-    if (l.grantsSession.includes(key)) return { decision: { behavior: 'allow' } }
-    if (l.grantsOnce.includes(key)) {
-      await update($, local, cur => {
-        const i = cur.grantsOnce.indexOf(key)
-        return i < 0 ? cur : { ...cur, grantsOnce: cur.grantsOnce.filter((_, j) => j !== i) }
-      })
-      return { decision: { behavior: 'allow' } }
-    }
+    if (l.grantsSession.includes(key) || (await takeOnce($, key))) return { decision: { behavior: 'allow' } }
     if (!(await coordinatorLive($))) return next(e)
     const pending = l.requests.find(r => r.kind === 'ask' && askKey(r.tool ?? '', r.command ?? '') === key)
     const id = pending?.id ?? newId()
@@ -488,22 +511,21 @@ export const register: Register = (on, options) => {
 
   // Protected commands wait for the person's approval from the pane.
   on('tool.check', async ($, e, next) => {
-    // Only the pane writes answers: a session that could write its own would grant itself anything.
-    const said = JSON.stringify(e.input ?? '').replace(/\\\\/g, '/').toLowerCase()
-    if (said.includes('coordinator-monitor/answers') || said.includes(`${base}/answers`.toLowerCase())) return { decision: 'deny', reason: S.answersGuard }
+    // Only the mod writes the bus: answers would let a session grant itself anything, rules.json or a
+    // status file loosen the rules or pose as another session. Reading it is harmless; a file tool is
+    // judged by its target, so the mod's own source and docs stay editable.
+    if (!e.isReadOnly) {
+      const i = (e.input ?? {}) as Record<string, unknown>
+      const target = JSON.stringify(i.file_path ?? i.notebook_path ?? i).replace(/\\\\/g, '/').toLowerCase()
+      if (target.includes('.claude/coordinator-monitor') || (base && target.includes(base.toLowerCase()))) return { decision: 'deny', reason: S.answersGuard }
+    }
     if (!SHELL_TOOLS.has(e.tool) || !e.tool_use_id) return next(e)
     const command = String((e.input as { command?: unknown } | null)?.command ?? '')
     const rule = command && matchRule(rules, command)
     if (!rule) return next(e)
     const l = await read($, local)
     if (l.grantsSession.includes(command)) return { decision: 'allow', reason: 'approved for this session from the coordinator pane' }
-    if (l.grantsOnce.includes(command)) {
-      await update($, local, cur => {
-        const i = cur.grantsOnce.indexOf(command)
-        return i < 0 ? cur : { ...cur, grantsOnce: cur.grantsOnce.filter((_, j) => j !== i) }
-      })
-      return { decision: 'allow', reason: 'approved once from the coordinator pane' }
-    }
+    if (await takeOnce($, command)) return { decision: 'allow', reason: 'approved once from the coordinator pane' }
     const pending = l.requests.find(r => r.kind === 'permission' && r.command === command)
     const id = pending?.id ?? newId()
     if (!pending) {
@@ -603,7 +625,7 @@ export const register: Register = (on, options) => {
         return shell(
           <Box flexDirection="column" gap="sm">
             {head(S.permission, `${s.title} · ${r.tool ?? 'Bash'}`)}
-            <Code source={r.command ?? ''} language={r.tool === 'PowerShell' ? 'powershell' : 'bash'} />
+            <Code source={r.command ?? ''} language={r.command?.startsWith('{') ? 'json' : r.tool === 'PowerShell' ? 'powershell' : 'bash'} />
             {r.rule ? (
               <Text size="footnote" color={r.rule.includes('·') ? 'warning' : 'subtle'}>
                 {r.rule.includes('·') ? `${r.rule} — ${S.critical}` : r.rule}

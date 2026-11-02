@@ -111,7 +111,7 @@ Add your own, or mark services as critical so their requests stand out, in `<bus
 
 The rules are a guard against a session doing something you wanted to supervise, not a sandbox: a command written to dodge a pattern is not caught. Keep your normal permission settings.
 
-Answers are files the pane writes to `<busDir>/answers/`. A session that could write one could approve its own app permissions, so the mod refuses any tool call whose input names that folder. That too is a guard, not a sandbox: a command that builds the path at run time is not caught.
+Answers are files the pane writes to `<busDir>/answers/`. A session that could write one could approve its own app permissions, and one that wrote `rules.json` or a status file could loosen the rules or pose as another session, so the mod refuses any tool call that would change `<busDir>`: a file tool aimed there, or a command that names it. Reading it stays allowed. That too is a guard, not a sandbox: every session runs as you, so a command that builds the path at run time is not caught. An app permission approved from the pane covers exactly what the card showed, the whole input; an input too long to show keeps the app's own dialog.
 
 ## How it works
 
