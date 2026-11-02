@@ -722,6 +722,11 @@ export const register: Register = (on, options) => {
         </Text>
       )
 
+    // A hairline across the card; the terminal's border already separates enough.
+    const rule: RenderChildren = Svg ? (
+      <Svg source='<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="1" viewBox="0 0 1000 1" preserveAspectRatio="none"><rect width="1000" height="1" fill="#80808040"/></svg>' alt="—" height={1} />
+    ) : null
+
     const sessionBlock = (s: SessionStatus): RenderNode => {
       const isCol = !!u.collapsed[s.sessionId]
       const who = [s.isCoordinator ? S.coordinator : '', s.sessionId === sessionId ? S.thisSession : ''].filter(Boolean).join(' · ')
@@ -733,8 +738,8 @@ export const register: Register = (on, options) => {
       const flow = s.flow ? `${s.flow.title} · ${s.flow.done}/${s.flow.total}${s.flow.phase ? ` · ${s.flow.phase}` : ''}` : ''
       const costume = s.state === 'waiting' ? 'waiting' : 'other'
       return (
-        <Box key={s.sessionId} flexDirection="column" gap="sm" padding="sm" borderStyle="round" borderColor={isTerm ? undefined : s.state === 'waiting' ? AMBER_LINE : CARD_LINE} borderDimColor={isTerm} backgroundColor={fill(CARD)}>
-          <Box flexDirection="row" gap="sm" alignItems="center">
+        <Box key={s.sessionId} flexDirection="column" borderStyle="round" borderColor={isTerm ? undefined : s.state === 'waiting' ? AMBER_LINE : CARD_LINE} borderDimColor={isTerm} backgroundColor={fill(CARD)}>
+          <Box flexDirection="row" gap="sm" alignItems="center" padding="sm">
             {crab(costume, s.title, s.state === 'running', s.state === 'ended' || s.state === 'idle')}
             <Box flexDirection="column" flexGrow={1} flexShrink={1}>
               <Text weight="semibold">{s.title}</Text>
@@ -769,8 +774,11 @@ export const register: Register = (on, options) => {
               // Only this session's own subagents can be opened from here.
               const pick = () => void $.ui.view({ agentId: a.id }).then(r => r.deny && $.ui.toast(r.deny))
               const name = <Text weight="semibold">{a.description || a.type}</Text>
+              // Each worker is a row of its own under the session's header, ruled off as in the mockup.
               return (
-                <Box key={`${s.sessionId}-${a.id}`} flexDirection="row" gap="sm" paddingLeft="lg" alignItems="flex-start">
+                <Box key={`${s.sessionId}-${a.id}`} flexDirection="column">
+                  {rule}
+                  <Box flexDirection="row" gap="sm" padding="sm" alignItems="flex-start">
                   {crab(tier === 'other' ? 'other' : tier, word, a.status === 'running')}
                   <Box flexDirection="column" flexGrow={1} flexShrink={1} gap="xs">
                     <Box flexDirection="row" gap="sm" justifyContent="space-between" alignItems="center">
@@ -785,25 +793,24 @@ export const register: Register = (on, options) => {
                         {a.status === 'done' ? '✓' : a.status === 'failed' ? '✕' : a.status === 'running' ? '●' : '◷'}
                       </Text>
                     </Box>
-                    <Text size="caption">
-                      <Text color={color} weight="semibold">
-                        {word}
-                      </Text>
-                      <Text color="subtle">{tierModels[tier] ? `  ·  ${tierModels[tier]}` : ''}</Text>
-                    </Text>
-                    {steps || took ? (
-                      <Box flexDirection="row" gap="sm" justifyContent="space-between">
-                        <Box flexGrow={1} flexShrink={1}>
-                          <Text size="footnote" wrap="truncate-end">
-                            {steps}
-                          </Text>
-                        </Box>
-                        <Text size="caption" color="subtle">
-                          {took}
+                    <Box flexDirection="row" gap="sm" justifyContent="space-between">
+                      <Text size="caption">
+                        <Text color={color} weight="semibold">
+                          {word}
                         </Text>
-                      </Box>
+                        <Text color="subtle">{tierModels[tier] ? ` · ${tierModels[tier]}` : ''}</Text>
+                      </Text>
+                      <Text size="caption" color="subtle">
+                        {took}
+                      </Text>
+                    </Box>
+                    {steps ? (
+                      <Text size="footnote" wrap="truncate-end">
+                        {steps}
+                      </Text>
                     ) : null}
                     {meter(ratio, a.status === 'done' ? '#3FB950' : color, `${Math.round(clamp01(ratio) * 100)}%`)}
+                  </Box>
                   </Box>
                 </Box>
               )
