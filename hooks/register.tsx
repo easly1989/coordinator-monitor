@@ -650,7 +650,14 @@ export const register: Register = (on, options) => {
           <Box flexDirection="column" padding="sm" backgroundColor={fill(CARD)}>
             {Markdown ? <Markdown key={`md-${r.id}`} text={r.text ?? ''} /> : <Text>{r.text ?? ''}</Text>}
           </Box>
-          {Input ? field(<Input key={`reply-${r.id}`} placeholder={S.replyHere} rows={3} submitLabel={S.send} onSubmit={value => value.trim() && void answer($, s, r, 'answer', value)} />) : null}
+          {Input ? (
+            <Box flexDirection="column" gap="xs">
+              <Text size="caption" color="subtle">
+                {S.replyLabel}
+              </Text>
+              {field(<Input key={`reply-${r.id}`} placeholder={S.replyHere} rows={3} submitLabel={S.send} onSubmit={value => value.trim() && void answer($, s, r, 'answer', value)} />)}
+            </Box>
+          ) : null}
           <Box flexDirection="row" gap="sm">
             <Button key={`dismiss-${r.id}`} variant="secondary" label={S.dismiss} onPress={() => void answer($, s, r, 'dismiss')} />
           </Box>
