@@ -26,7 +26,7 @@ const TICK_MS = 3000
 const STALE_MS = 15 * 60 * 1000
 const ENDED_KEEP_MS = 60 * 60 * 1000
 /** Published in every status, so the pane can flag a session still running an older copy. Keep in step with plugin.json. */
-const MOD_VERSION = '0.3.1'
+const MOD_VERSION = '0.4.0'
 const SHELL_TOOLS = new Set(['Bash', 'PowerShell'])
 const STEP_TOOL = 'mcp__savvy-progress__step'
 const FLOW_TOOL = 'mcp__savvy-progress__progress'
@@ -61,6 +61,7 @@ let critical: string[] = []
 let tierModels: Record<string, string> = { ...TIER_MODEL }
 let forward = true
 let ticking = false
+let lastFollow = 0
 let home = '.'
 // The desktop app's own record of this session: its sidebar title and effort.
 let label = ''
@@ -340,6 +341,25 @@ const answer = async ($: $, target: SessionStatus, req: MonitorRequest, kind: An
   if (target.sessionId === sessionId) await applyAnswers($)
 }
 
+const newer = (a: string, b: string): boolean => a.localeCompare(b, undefined, { numeric: true }) > 0
+
+/**
+ * Mods do not hot-reload: a session keeps the copy it loaded. When a live coordinator publishes a
+ * newer version, this session reloads its plugins itself (queued until it is idle), once per version
+ * so a reload that brings nothing newer is not retried every tick.
+ */
+const followCoordinator = async ($: $): Promise<void> => {
+  let newest = ''
+  for (const f of await $.fs.list(`${base}/sessions`).catch(() => [])) {
+    if (f.kind !== 'file' || !f.name.endsWith('.json') || (f.mtimeMs && Date.now() - f.mtimeMs > 60_000)) continue
+    const s = await statusFile($, f.name)
+    if (s?.isCoordinator && s.state !== 'ended' && s.version && newer(s.version, newest)) newest = s.version
+  }
+  if (!newest || !newer(newest, MOD_VERSION) || (await read($, local)).reloadTried === newest) return
+  await update($, local, cur => ({ ...cur, reloadTried: newest }))
+  await $.command.run({ command: 'reload-plugins' })
+}
+
 const tick = async ($: $): Promise<void> => {
   if (ticking) return
   ticking = true
@@ -350,6 +370,10 @@ const tick = async ($: $): Promise<void> => {
     effort = me?.effort ?? ''
     await publish($)
     if (isPaneOpen || isCoordinator) await gather($)
+    if (!isCoordinator && Date.now() - lastFollow > 30_000) {
+      lastFollow = Date.now()
+      await followCoordinator($).catch(() => undefined)
+    }
   } catch {
     // a failed tick is retried on the next one
   } finally {

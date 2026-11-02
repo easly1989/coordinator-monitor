@@ -124,7 +124,7 @@ test('the pane draws sessions, workers and every kind of request, on every surfa
   expect(mine.title).toBe('Coordinatore')
   expect(mine.folder).toBe('coordinator')
   expect(mine.effort).toBe('high')
-  expect(mine.version).toBe('0.3.1')
+  expect(mine.version).toBe('0.4.0')
 
   for (const surface of ['terminal', 'desktop', 'vscode', 'mobile'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface })
@@ -187,9 +187,10 @@ test('a new turn retires the questions the session asked', async ($, on) => {
 })
 describe('the app asking for a permission', () => {
   // `file` is the name the coordinator's status file is listed under: anything but c.json poses as it.
-  const setup = (on: TestOn, coordinator: boolean, file = 'c.json') => {
+  // `version` is the copy of the mod the coordinator publishes.
+  const setup = (on: TestOn, coordinator: boolean, file = 'c.json', version?: string) => {
     const written: Record<string, string> = {}
-    const COORD = JSON.stringify({ v: 1, sessionId: 'c', title: 'Coordinatore', cwd: '/c', model: 'm', state: 'running', isCoordinator: true, heartbeat: Date.now(), startedAt: 0, rateLimits: [], agents: [], flow: null, requests: [] })
+    const COORD = JSON.stringify({ v: 1, sessionId: 'c', version, title: 'Coordinatore', cwd: '/c', model: 'm', state: 'running', isCoordinator: true, heartbeat: Date.now(), startedAt: 0, rateLimits: [], agents: [], flow: null, requests: [] })
     on('command.register', () => ({ value: { command: 'agents-monitor' } }))
     on('session.start', (_, e) => ({ cwd: e.cwd }))
     on('env.get', () => ({ value: undefined }))
@@ -256,6 +257,18 @@ describe('the app asking for a permission', () => {
     // Too long to show whole: the dialog, without asking the pane.
     await $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: { command: 'x'.repeat(9000) } } as never)
     expect(pane.seen.length).toBe(3)
+  })
+
+  test('a session reloads its plugins once when the coordinator runs a newer copy', async ($, on) => {
+    setup(on, true, 'c.json', '9.9.9')
+    const runs: string[] = []
+    on('command.run', (_, e) => {
+      runs.push(e.command)
+      return { text: '' } as never
+    })
+    await $.session.start({ cwd: '/repos/project', surface: 'desktop', isInteractive: true })
+    for (let i = 0; i < 50 && !runs.length; i++) await new Promise<void>(r => setTimeout(r, 10))
+    expect(runs).toEqual(['reload-plugins'])
   })
 
   test('a status file posing as another session does not count', async ($, on) => {
