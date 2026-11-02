@@ -210,15 +210,35 @@ const tick = async ($: $): Promise<void> => {
 // Drawing.
 
 const fmtPct = (n: number | undefined): string => (n === undefined ? '' : `${Math.round(n)}%`)
+/** A reset within a day reads as its time ("16:40"), a later one as its weekday ("Mon"). */
 const fmtReset = (iso: string | undefined): string => {
   if (!iso) return ''
   const d = new Date(iso)
-  return Number.isNaN(d.getTime()) ? '' : d.toLocaleString(undefined, { weekday: 'short', hour: '2-digit', minute: '2-digit' })
+  if (Number.isNaN(d.getTime())) return ''
+  return d.getTime() - Date.now() < 24 * 3600 * 1000
+    ? d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
+    : d.toLocaleDateString(undefined, { weekday: 'short' })
 }
+const clamp01 = (n: number): number => Math.max(0, Math.min(1, n))
 const bar = (ratio: number, width: number): string => {
-  const filled = Math.max(0, Math.min(width, Math.round(ratio * width)))
+  const filled = Math.round(clamp01(ratio) * width)
   return '█'.repeat(filled) + '░'.repeat(width - filled)
 }
+const barSvg = (ratio: number, color: string, w: number): string =>
+  `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="4" viewBox="0 0 ${w} 4">` +
+  `<rect width="${w}" height="4" rx="2" fill="#8080804D"/>` +
+  `<rect width="${Math.round(clamp01(ratio) * w)}" height="4" rx="2" fill="${color}"/></svg>`
+
+// The pane's palette, after the mockup in docs/. Translucent fills sit on
+// either theme; the terminal gets none of them (it has no alpha).
+const AMBER = '#E8A33D'
+const AMBER_TINT = '#E8A33D14'
+const AMBER_LINE = '#E8A33D66'
+const CARD = '#8080801A'
+const CARD_LINE = '#80808033'
+const BLUE = '#5B8DEF'
+const BLUE_TINT = '#5B8DEF33'
+const ON_AMBER = '#1F1E1D'
 
 export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
@@ -351,17 +371,37 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     isPaneOpen = true
     const ui = $.ui.resolve(e)
-    const { Box, Text, Button } = ui
-    const Svg = e.surface === 'desktop' && 'Svg' in ui ? ui.Svg : undefined
+    const { Box, Text, Button, Code } = ui
+    const isTerm = e.surface === 'terminal'
+    const Svg = !isTerm && 'Svg' in ui ? ui.Svg : undefined
     const Input = 'Input' in ui ? ui.Input : undefined
     const Markdown = 'Markdown' in ui ? ui.Markdown : undefined
     const b = await read($, board)
     const u = await read($, paneUi)
     const cols = Math.max(30, e.props.bodyColumns || 60)
     const sent = new Set(u.sent)
+    // Fills only where the surface blends them.
+    const fill = (c: string): string | undefined => (isTerm ? undefined : c)
 
     const crab = (costume: string, alt: string, walking: boolean, dim = false): RenderChildren =>
       Svg ? <Svg source={crabSvg(costume, { isWalking: walking, isDim: dim, size: 30 })} alt={alt} width={30} height={CRAB_H(30)} /> : null
+    const meter = (ratio: number, color: string, w: number, alt: string): RenderChildren =>
+      Svg ? <Svg source={barSvg(ratio, color, w)} alt={alt} width={w} height={4} /> : <Text color={color}>{bar(ratio, Math.max(10, Math.min(40, cols - 16)))}</Text>
+    const badge = (label: string, tone: 'amber' | 'blue' = 'amber'): RenderNode =>
+      tone === 'amber' ? (
+        <Text size="caption" weight="bold" color={isTerm ? 'warning' : ON_AMBER} backgroundColor={fill(AMBER)}>
+          {` ${label} `}
+        </Text>
+      ) : (
+        <Text size="caption" weight="semibold" color={BLUE} backgroundColor={fill(BLUE_TINT)}>
+          {` ${label} `}
+        </Text>
+      )
+    const chip = (label: string): RenderNode => (
+      <Text size="caption" color="subtle" backgroundColor={fill(CARD)}>
+        {` ${label} `}
+      </Text>
+    )
 
     const setFilter = (f: PaneUi['filter']) => () => void update($, paneUi, cur => ({ ...cur, filter: f }))
     const waitingCount = b.sessions.filter(s => s.state === 'waiting').length
@@ -370,6 +410,9 @@ export const register: Register = (on, options) => {
     const five = limits.get('five_hour')
     const week = limits.get('seven_day')
     const activeCount = b.sessions.filter(s => s.state === 'running' || s.state === 'waiting').length
+    const runningAgents = b.sessions.reduce((n, s) => n + s.agents.filter(a => a.status === 'running').length, 0)
+    const costs = b.sessions.map(s => s.costUsd).filter((c): c is number => typeof c === 'number')
+    const ago = b.updatedAt ? Math.max(0, Math.round((Date.now() - b.updatedAt) / 1000)) : undefined
 
     const open = (s: SessionStatus) => () => $.ui.toast(s.sessionId === sessionId ? S.thisSession : S.openHint(s.title, s.cwd))
 
@@ -378,27 +421,51 @@ export const register: Register = (on, options) => {
     for (const s of b.sessions) for (const r of s.requests) if (!sent.has(r.id)) inbox.push({ s, r })
     inbox.sort((x, y) => x.r.createdAt - y.r.createdAt)
 
+    const stat = (key: string, label: string, value: string, sub: RenderChildren): RenderNode => (
+      <Box key={key} flexDirection="column" flexGrow={1} flexShrink={1} minWidth={18} gap="xs" padding="sm" backgroundColor={fill(CARD)} borderStyle={isTerm ? 'round' : undefined} borderDimColor>
+        <Text size="caption" color="subtle" wrap="truncate-end">
+          {label}
+        </Text>
+        <Text size="heading" weight="semibold">
+          {value || '—'}
+        </Text>
+        {sub}
+      </Box>
+    )
+
     const card = ({ s, r }: { s: SessionStatus; r: MonitorRequest }): RenderNode => {
-      const head = (label: string) => (
-        <Box flexDirection="row" justifyContent="space-between" gap={1}>
-          <Text bold color="yellow">
-            {label} <Text color={undefined}>{s.title}</Text>
-          </Text>
+      const head = (label: string, what: string) => (
+        <Box flexDirection="row" alignItems="center" gap="sm">
+          {badge(label)}
+          <Box flexGrow={1} flexShrink={1}>
+            <Text weight="semibold" wrap="truncate-end">
+              {what}
+            </Text>
+          </Box>
           <Button key={`open-${r.id}`} plain label={`${S.open} →`} onPress={open(s)} />
         </Box>
       )
+      const shell = (children: RenderChildren) => (
+        <Box key={r.id} flexDirection="column" gap="sm" padding="md" borderStyle="round" borderColor={isTerm ? 'warning' : AMBER_LINE} backgroundColor={fill(AMBER_TINT)}>
+          {children}
+        </Box>
+      )
       if (r.kind === 'permission') {
-        return (
-          <Box key={r.id} flexDirection="column" gap={1} borderStyle="round" borderColor="yellow" paddingX={1}>
-            {head(S.permission)}
-            <Text>{r.command ?? ''}</Text>
-            {r.rule ? <Text dimColor>{r.rule.includes('·') ? `${r.rule} — ${S.critical}` : r.rule}</Text> : null}
-            <Box flexDirection="row" flexWrap="wrap" gap={1}>
+        return shell(
+          <Box flexDirection="column" gap="sm">
+            {head(S.permission, `${s.title} · ${r.tool ?? 'Bash'}`)}
+            <Code source={r.command ?? ''} language={r.tool === 'PowerShell' ? 'powershell' : 'bash'} />
+            {r.rule ? (
+              <Text size="footnote" color={r.rule.includes('·') ? 'warning' : 'subtle'}>
+                {r.rule.includes('·') ? `${r.rule} — ${S.critical}` : r.rule}
+              </Text>
+            ) : null}
+            <Box flexDirection="row" flexWrap="wrap" gap="sm">
               <Button key={`once-${r.id}`} variant="primary" label={S.approveOnce} onPress={() => void answer($, s, r, 'approve-once')} />
-              <Button key={`sess-${r.id}`} label={S.approveSession} onPress={() => void answer($, s, r, 'approve-session')} />
-              <Button key={`deny-${r.id}`} label={S.deny} onPress={() => void answer($, s, r, 'deny')} />
+              <Button key={`sess-${r.id}`} variant="secondary" label={S.approveSession} onPress={() => void answer($, s, r, 'approve-session')} />
+              <Button key={`deny-${r.id}`} variant="secondary" label={S.deny} onPress={() => void answer($, s, r, 'deny')} />
             </Box>
-          </Box>
+          </Box>,
         )
       }
       if (r.kind === 'choice') {
@@ -419,36 +486,62 @@ export const register: Register = (on, options) => {
               return qs.length > 1 ? `${qi + 1}. ${q.question}\n→ ${a || '—'}` : a
             })
             .join('\n\n')
-        return (
-          <Box key={r.id} flexDirection="column" gap={1} borderStyle="round" borderColor="yellow" paddingX={1}>
-            {head(S.choice)}
+        return shell(
+          <Box flexDirection="column" gap="sm">
+            {head(S.choice, s.title)}
             {qs.map((q, qi) => (
-              <Box key={`${r.id}-q${qi}`} flexDirection="column" gap={0}>
-                {q.header ? <Text dimColor>{q.header}</Text> : null}
-                <Text bold>{q.question}</Text>
-                {q.options.map((o, oi) => (
-                  <Button key={`${r.id}-${qi}-${oi}`} plain onPress={toggle(qi, oi, !!q.multiSelect)}>
-                    {picks(qi).includes(oi) ? '● ' : '○ '}
-                    {o.label}
-                    {o.description ? <Text dimColor> — {o.description}</Text> : null}
-                  </Button>
-                ))}
+              <Box key={`${r.id}-q${qi}`} flexDirection="column" gap="sm">
+                <Box flexDirection="row" gap="sm" alignItems="center">
+                  {q.header ? chip(q.header) : null}
+                  <Text size="caption" color="subtle">
+                    {S.questionOf(qi + 1, qs.length)}
+                  </Text>
+                </Box>
+                <Text weight="semibold">{q.question}</Text>
+                {q.options.map((o, oi) => {
+                  const isOn = picks(qi).includes(oi)
+                  return (
+                    <Box
+                      key={`${r.id}-${qi}-${oi}`}
+                      flexDirection="column"
+                      paddingX="md"
+                      paddingY="sm"
+                      borderStyle="round"
+                      borderColor={isOn ? (isTerm ? 'warning' : AMBER) : isTerm ? undefined : CARD_LINE}
+                      borderDimColor={!isOn && isTerm}
+                      backgroundColor={fill(isOn ? AMBER_TINT : CARD)}
+                      hover={isTerm ? undefined : { borderColor: AMBER_LINE }}
+                    >
+                      <Button key={`${r.id}-${qi}-${oi}-b`} plain onPress={toggle(qi, oi, !!q.multiSelect)}>
+                        {isTerm ? (isOn ? '● ' : '○ ') : ''}
+                        <Text weight="semibold">{o.label}</Text>
+                      </Button>
+                      {o.description ? (
+                        <Text size="footnote" color="subtle">
+                          {o.description}
+                        </Text>
+                      ) : null}
+                    </Box>
+                  )
+                })}
               </Box>
             ))}
             {Input ? (
-              <Input key={`other-${r.id}`} label={S.other} placeholder="…" submitLabel={S.send} onSubmit={value => void answer($, s, r, 'answer', compose(value))} />
+              <Input key={`other-${r.id}`} label={S.other} placeholder={S.otherPlaceholder} submitLabel={S.send} onSubmit={value => void answer($, s, r, 'answer', compose(value))} />
             ) : (
               <Button key={`send-${r.id}`} variant="primary" label={S.send} onPress={() => void answer($, s, r, 'answer', compose(''))} />
             )}
-          </Box>
+          </Box>,
         )
       }
-      return (
-        <Box key={r.id} flexDirection="column" gap={1} borderStyle="round" borderColor="yellow" paddingX={1}>
-          {head(S.questions)}
-          {Markdown ? <Markdown key={`md-${r.id}`} text={r.text ?? ''} /> : <Text>{r.text ?? ''}</Text>}
+      return shell(
+        <Box flexDirection="column" gap="sm">
+          {head(S.questions, s.title)}
+          <Box flexDirection="column" padding="sm" backgroundColor={fill(CARD)}>
+            {Markdown ? <Markdown key={`md-${r.id}`} text={r.text ?? ''} /> : <Text>{r.text ?? ''}</Text>}
+          </Box>
           {Input ? <Input key={`reply-${r.id}`} label={S.replyHere} rows={3} submitLabel={S.send} onSubmit={value => value.trim() && void answer($, s, r, 'answer', value)} /> : null}
-        </Box>
+        </Box>,
       )
     }
 
@@ -456,27 +549,42 @@ export const register: Register = (on, options) => {
       u.filter === 'waiting' ? s.state === 'waiting' : u.filter === 'active' ? s.state === 'running' || s.state === 'waiting' : true,
     )
 
+    const pill = (state: string): RenderNode | null =>
+      state === 'waiting' ? badge(S.st.waiting ?? state) : state === 'running' ? badge(S.st.running ?? state, 'blue') : (
+        <Text size="caption" color="subtle">
+          {S.st[state] ?? state}
+        </Text>
+      )
+
     const sessionBlock = (s: SessionStatus): RenderNode => {
       const isCol = !!u.collapsed[s.sessionId]
-      const meta = [s.model, s.contextPct !== undefined ? `ctx ${fmtPct(s.contextPct)}` : '', s.isCoordinator ? S.coordinator : '', s.sessionId === sessionId ? S.thisSession : '']
-        .filter(Boolean)
-        .join(' · ')
+      const who = [s.isCoordinator ? S.coordinator : '', s.sessionId === sessionId ? S.thisSession : ''].filter(Boolean).join(' · ')
+      const meta = [s.model.replace(/^claude-/, ''), s.contextPct !== undefined ? `ctx ${fmtPct(s.contextPct)}` : ''].filter(Boolean).join(' · ')
       const flow = s.flow ? `${s.flow.title} · ${s.flow.done}/${s.flow.total}${s.flow.phase ? ` · ${s.flow.phase}` : ''}` : ''
       const costume = s.state === 'waiting' ? 'waiting' : 'other'
       return (
-        <Box key={s.sessionId} flexDirection="column" borderStyle="round" borderDimColor paddingX={1}>
-          <Box flexDirection="row" gap={1} alignItems="center">
+        <Box key={s.sessionId} flexDirection="column" gap="sm" padding="sm" borderStyle="round" borderColor={isTerm ? undefined : s.state === 'waiting' ? AMBER_LINE : CARD_LINE} borderDimColor={isTerm} backgroundColor={fill(CARD)}>
+          <Box flexDirection="row" gap="sm" alignItems="center">
             {crab(costume, s.title, s.state === 'running', s.state === 'ended' || s.state === 'idle')}
-            <Box flexDirection="column" flexGrow={1}>
+            <Box flexDirection="column" flexGrow={1} flexShrink={1}>
               <Button key={`s-${s.sessionId}`} plain onPress={open(s)}>
-                {s.title} <Text color={s.state === 'waiting' ? 'yellow' : undefined} dimColor={s.state !== 'waiting'}>{S.st[s.state] ?? s.state}</Text>
+                <Text weight="semibold">{s.title}</Text>
               </Button>
-              <Text dimColor>{flow || meta}</Text>
+              <Text size="footnote" color="subtle" wrap="truncate-end">
+                {flow || who || s.cwd}
+              </Text>
+            </Box>
+            <Box flexDirection="column" alignItems="flex-end">
+              {pill(s.state)}
+              <Text size="caption" color="subtle">
+                {meta}
+              </Text>
             </Box>
             {s.agents.length ? (
               <Button
                 key={`c-${s.sessionId}`}
                 plain
+                dimColor
                 label={isCol ? `▸ ${s.agents.length}` : '▾'}
                 onPress={() => void update($, paneUi, cur => ({ ...cur, collapsed: { ...cur.collapsed, [s.sessionId]: !isCol } }))}
               />
@@ -494,17 +602,29 @@ export const register: Register = (on, options) => {
                 else open(s)()
               }
               return (
-                <Box key={`${s.sessionId}-${a.id}`} flexDirection="row" gap={1} paddingLeft={2} alignItems="center">
+                <Box key={`${s.sessionId}-${a.id}`} flexDirection="row" gap="sm" paddingLeft="lg" alignItems="flex-start">
                   {crab(tier === 'other' ? 'other' : tier, word, a.status === 'running')}
-                  <Box flexDirection="column" flexGrow={1}>
-                    <Button key={`a-${a.id}`} plain onPress={pick}>
-                      {a.description || a.type} <Text dimColor>{S.ag[a.status] ?? a.status}</Text>
-                    </Button>
-                    <Text>
-                      <Text color={color}>{word}</Text>
-                      <Text dimColor>{tierModels[tier] ? `  ·  ${tierModels[tier]}` : ''}{steps ? `  ·  ${steps}` : ''}</Text>
+                  <Box flexDirection="column" flexGrow={1} flexShrink={1} gap="xs">
+                    <Box flexDirection="row" gap="sm" justifyContent="space-between">
+                      <Button key={`a-${a.id}`} plain onPress={pick}>
+                        <Text weight="medium">{a.description || a.type}</Text>
+                      </Button>
+                      <Text size="caption" color={a.status === 'done' ? 'success' : a.status === 'failed' ? 'error' : 'subtle'}>
+                        {S.ag[a.status] ?? a.status}
+                      </Text>
+                    </Box>
+                    <Text size="caption">
+                      <Text color={color} weight="semibold">
+                        {word}
+                      </Text>
+                      <Text color="subtle">{tierModels[tier] ? `  ·  ${tierModels[tier]}` : ''}</Text>
                     </Text>
-                    <Text color={a.status === 'done' ? 'green' : color}>{bar(ratio, Math.max(10, Math.min(40, cols - 16)))}</Text>
+                    {steps ? (
+                      <Text size="footnote" color="subtle" wrap="truncate-end">
+                        {steps}
+                      </Text>
+                    ) : null}
+                    {meter(ratio, a.status === 'done' ? '#3FB950' : color, Math.max(120, Math.min(360, cols * 6)), `${Math.round(clamp01(ratio) * 100)}%`)}
                   </Box>
                 </Box>
               )
@@ -514,43 +634,71 @@ export const register: Register = (on, options) => {
     }
 
     const tab = (f: PaneUi['filter'], label: string) => (
-      <Button key={`tab-${f}`} variant={u.filter === f ? 'primary' : undefined} label={label} onPress={setFilter(f)} />
+      <Button key={`tab-${f}`} variant={u.filter === f ? 'primary' : 'secondary'} label={label} onPress={setFilter(f)} />
     )
 
     return (
-      <Box flexDirection="column" gap={1}>
-        <Text dimColor>
-          {S.allSessions} · {activeCount} {S.sessions}
-        </Text>
-        <Box flexDirection="row" flexWrap="wrap" gap={2}>
-          <Text>
-            {S.fiveHour} <Text bold>{fmtPct(five?.percentUsed) || '—'}</Text>
-            <Text dimColor>{five?.resetsAt ? ` · ${S.resets} ${fmtReset(five.resetsAt)}` : ''}</Text>
+      <Box flexDirection="column" gap="md">
+        <Box flexDirection="row" justifyContent="space-between" alignItems="center" gap="sm">
+          <Text size="heading" weight="semibold">
+            {S.pane}
           </Text>
-          <Text>
-            {S.week} <Text bold>{fmtPct(week?.percentUsed) || '—'}</Text>
-            <Text dimColor>{week?.resetsAt ? ` · ${S.resets} ${fmtReset(week.resetsAt)}` : ''}</Text>
+          <Text size="caption" color="subtle">
+            {S.allSessions}
+            {ago !== undefined ? ` · ${S.updatedAgo(ago)}` : ''}
           </Text>
         </Box>
-        <Box flexDirection="row" flexWrap="wrap" gap={1}>
+        <Box flexDirection="row" flexWrap="wrap" gap="sm">
+          {stat(
+            'st-5h',
+            `${S.fiveHour}${five?.resetsAt ? ` · ${S.until} ${fmtReset(five.resetsAt)}` : ''}`,
+            fmtPct(five?.percentUsed),
+            meter((five?.percentUsed ?? 0) / 100, (five?.percentUsed ?? 0) >= 90 ? '#E5534B' : '#7F77DD', 140, fmtPct(five?.percentUsed)),
+          )}
+          {stat(
+            'st-week',
+            `${S.week}${week?.resetsAt ? ` · ${S.until} ${fmtReset(week.resetsAt)}` : ''}`,
+            fmtPct(week?.percentUsed),
+            meter((week?.percentUsed ?? 0) / 100, (week?.percentUsed ?? 0) >= 93 ? '#E5534B' : '#7F77DD', 140, fmtPct(week?.percentUsed)),
+          )}
+          {stat(
+            'st-now',
+            `${S.now} · ${activeCount} ${S.active.toLowerCase()} / ${b.sessions.length}`,
+            costs.length ? `≈$${costs.reduce((x, y) => x + y, 0).toFixed(2)}` : String(activeCount),
+            <Text size="caption" color="subtle">
+              {S.agentsRunning(runningAgents)}
+            </Text>,
+          )}
+        </Box>
+        <Box flexDirection="row" flexWrap="wrap" gap="sm">
           {tab('all', S.all)}
           {tab('waiting', `${S.waiting} · ${waitingCount}`)}
           {tab('active', S.active)}
         </Box>
         {u.filter !== 'active' && inbox.length ? (
-          <Box flexDirection="column" gap={1}>
-            <Text bold color="yellow">
+          <Box flexDirection="column" gap="sm">
+            <Text size="caption" weight="bold" color={isTerm ? 'warning' : AMBER}>
               {S.inbox} · {inbox.length}
             </Text>
             {inbox.map(card)}
           </Box>
         ) : u.filter !== 'active' ? (
-          <Text dimColor>{S.nothingWaiting}</Text>
+          <Text size="footnote" color="subtle">
+            {S.nothingWaiting}
+          </Text>
         ) : null}
-        <Text bold dimColor>
+        <Text size="caption" weight="bold" color="subtle">
           {S.sessionsAndAgents}
         </Text>
-        {shown.length ? shown.map(sessionBlock) : <Text dimColor>{S.noSessions}</Text>}
+        {shown.length ? (
+          <Box flexDirection="column" gap="sm">
+            {shown.map(sessionBlock)}
+          </Box>
+        ) : (
+          <Text size="footnote" color="subtle">
+            {S.noSessions}
+          </Text>
+        )}
       </Box>
     )
   })

@@ -67,6 +67,8 @@ The mod has to run in **every** session you want to see: that is what publishes 
 
 ### Settings
 
+The key under `pluginConfigs` is the mod's source id, which depends on how it is loaded: `coordinator-monitor` (or `coordinator-monitor@inline`) from `--plugin-dir` or `CLAUDE_CODE_PLUGIN_DIRS`, `coordinator-monitor@skills-dir` when it sits in `~/.claude/skills/`, `coordinator-monitor@<marketplace>` when installed. Under the wrong key the options are silently ignored and the defaults apply (the pane then never opens by itself).
+
 ```json
 {
   "pluginConfigs": {
