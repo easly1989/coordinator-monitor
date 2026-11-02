@@ -25,6 +25,8 @@ const PANE = 'coordinator-monitor'
 const TICK_MS = 3000
 const STALE_MS = 15 * 60 * 1000
 const ENDED_KEEP_MS = 60 * 60 * 1000
+/** Published in every status, so the pane can flag a session still running an older copy. Keep in step with plugin.json. */
+const MOD_VERSION = '0.3.0'
 const SHELL_TOOLS = new Set(['Bash', 'PowerShell'])
 const STEP_TOOL = 'mcp__savvy-progress__step'
 const FLOW_TOOL = 'mcp__savvy-progress__progress'
@@ -157,6 +159,7 @@ const publish = async ($: $, state?: SessionStatus['state']): Promise<void> => {
   const status: SessionStatus = {
     v: 1,
     sessionId,
+    version: MOD_VERSION,
     title: label || title,
     folder: title,
     cwd,
@@ -800,6 +803,12 @@ export const register: Register = (on, options) => {
               <Text size="footnote" color="subtle" wrap="truncate-end">
                 {flow || asks || who || s.folder || s.cwd}
               </Text>
+              {/* Mods do not hot-reload: a session keeps the copy it loaded until /reload-plugins. */}
+              {s.state !== 'ended' && (s.version ?? '0').localeCompare(MOD_VERSION, undefined, { numeric: true }) < 0 ? (
+                <Text size="caption" color="warning" wrap="truncate-end">
+                  {S.oldMod(s.version ?? '< 0.3')}
+                </Text>
+              ) : null}
             </Box>
             <Box flexDirection="column" alignItems="flex-end">
               {pill(s.state)}
