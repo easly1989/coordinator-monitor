@@ -1,7 +1,7 @@
-// What a permission request does, at a glance: a shell command split into its steps with what kind of
-// harm each kind of step can do, a file write or edit as its path and its code. Deterministic, so the
-// summary says only what the request says. Where the split is not certain it gives up, and the card
-// shows the request itself: a summary must never hide a step that will run.
+// A reading aid for a permission request: a shell command split into its steps with what kind of
+// harm each kind of step can do, a file write or edit as its path and its code. Only an aid: the card
+// always shows the request itself, which is what is approved. Where the split is not certain the aid
+// gives up rather than guess: a step it hides would be worse than no steps at all.
 
 export type Shell = 'bash' | 'powershell'
 
@@ -11,13 +11,23 @@ export type RequestView =
   | { kind: 'edit'; path: string; diff: string; isEveryMatch?: boolean }
 
 /**
- * A command line split at `&&`, `||`, `;`, `|` and newlines outside quotes and `$( … )`, quoting as
- * `shell` reads it: in bash `\` escapes outside quotes and inside `"…"` only; in PowerShell the escape
- * is a backtick and a quote doubles itself. `null` when the split is not certain: a quote or `$(` left
- * open, a here-doc or here-string, backtick substitution in bash, a line continuation.
+ * Characters that change how text reads without showing themselves: controls but tab and newline
+ * (ESC, a bare CR), bidi marks, overrides and isolates, zero-width and other invisible fillers,
+ * variation selectors, tag characters, lone surrogates.
+ */
+const HIDDEN =
+  /[\u0000-\u0008\u000B-\u001F\u007F-\u009F\u00AD\u034F\u061C\u115F-\u1160\u17B4-\u17B5\u180B-\u180F\u200B-\u200F\u2028-\u202E\u2060-\u206F\u3164\uFE00-\uFE0F\uFEFF\uFFA0\uFFF0-\uFFFB\u{1D173}-\u{1D17A}\u{E0000}-\u{E0FFF}\uD800-\uDFFF]/u
+
+/**
+ * A command line split at `&&`, `||`, `&`, `;`, `|` and newlines outside quotes and `$( … )`, quoting
+ * as `shell` reads it: in bash `\` escapes outside quotes and inside `"…"` only; in PowerShell the
+ * escape is a backtick and a quote doubles itself. `null` when the split is not certain: a quote or
+ * `$(` left open, a here-doc or here-string, backtick substitution or `$'…'` in bash, a line
+ * continuation, a comment, a curly quote (PowerShell reads them as quotes), a hidden character.
  */
 export const stepsOf = (cmd: string, shell: Shell = 'bash'): string[] | null => {
-  if (shell === 'bash' ? /<<|`/.test(cmd) : /@["']\s*$|^\s*["']@/m.test(cmd)) return null
+  if (HIDDEN.test(cmd.replace(/\r\n/g, '\n')) || /[\u2018-\u201F]/.test(cmd)) return null
+  if (shell === 'bash' ? /<<|`|\$'/.test(cmd) : /@["']\s*$|^\s*["']@/m.test(cmd)) return null
   const esc = shell === 'bash' ? '\\' : '`'
   const out: string[] = []
   let cur = ''
@@ -43,6 +53,9 @@ export const stepsOf = (cmd: string, shell: Shell = 'bash'): string[] | null => 
       if (cmd[i + 1] === '\n' || cmd[i + 1] === '\r') return null
       cur += two
       i++
+    } else if (c === '#' && (/(^|\s)$/.test(cur) || cur.endsWith('<'))) {
+      // A comment, or a PowerShell block comment: what it swallows depends on rules not worth guessing.
+      return null
     } else if (c === '"' || c === "'") {
       quote = c
       cur += c
@@ -57,6 +70,11 @@ export const stepsOf = (cmd: string, shell: Shell = 'bash'): string[] | null => 
       out.push(cur)
       cur = ''
       i++
+    } else if (!depth && c === '&' && cur.trim() && !/[<>]$/.test(cur) && cmd[i + 1] !== '>') {
+      // A lone `&` runs what is before it in the background and goes on: a step. Kept are a redirection
+      // (`2>&1`, `&>`) and PowerShell's call operator, which starts its step.
+      out.push(cur)
+      cur = ''
     } else if (!depth && (c === ';' || c === '|' || c === '\n')) {
       out.push(cur)
       cur = ''
@@ -64,7 +82,8 @@ export const stepsOf = (cmd: string, shell: Shell = 'bash'): string[] | null => 
   }
   if (quote || depth) return null
   out.push(cur)
-  return out.map(s => s.replace(/\s+/g, ' ').trim()).filter(Boolean)
+  // Nothing inside a step is collapsed: what shows is what runs.
+  return out.map(s => s.trim()).filter(Boolean)
 }
 
 // shortcut: word lists for the common tools on this machine; a step they miss shows with no chip.
@@ -80,11 +99,17 @@ export const risksOf = (cmd: string): string[] => RISKS.filter(([, re]) => re.te
 export const lineCount = (s: string): number => (s ? s.split('\n').length : 0)
 
 /**
- * Characters that change how text reads without showing themselves (bidi overrides and isolates,
- * zero-width marks, ESC and the other controls), drawn as visible `\u` codes. Tab and newline stay.
+ * `s` with every hidden character drawn as a visible code (`\u202E`, `\u{E0041}`). Tab and newline
+ * stay; a character a shell may read as a line break (CR, NEL, the line and paragraph separators) also
+ * breaks the line where it stands, so what follows it shows as the line it is.
  */
 export const visible = (s: string): string =>
-  s.replace(/[\u0000-\u0008\u000B-\u001F\u007F-\u009F\u061C\u200B-\u200F\u2028-\u202E\u2060-\u2069\uFEFF]/g, ch => `\\u${(ch.codePointAt(0) ?? 0).toString(16).toUpperCase().padStart(4, '0')}`)
+  s.replace(new RegExp(HIDDEN.source, 'gu'), (ch: string, at: number) => {
+    const n = ch.codePointAt(0) ?? 0
+    const hex = n.toString(16).toUpperCase()
+    const code = n > 0xffff ? `\\u{${hex}}` : `\\u${hex.padStart(4, '0')}`
+    return /[\r\u0085\u2028\u2029]/.test(ch) && s[at + ch.length] !== '\n' ? `${code}\n` : code
+  })
 
 /**
  * `what` as the card holds it (a bare command for a shell tool, else the tool's input as JSON), read

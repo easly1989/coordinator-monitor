@@ -16,7 +16,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderChildren, RenderNode } from 'claude-code'
 
-import type { Answer, AnswerKind, Board, ChoiceQuestion, Local, MonitorRequest, PaneUi, PlanItem, Queues, SessionStatus } from '../types'
+import type { AgentRow, Answer, AnswerKind, Board, ChoiceOption, ChoiceQuestion, Local, MonitorRequest, PaneUi, PlanItem, Queues, SessionStatus } from '../types'
 import { CRAB_H, TIER_COLOR, TIER_MODEL, crabSvg, hatFor, tierOf } from './crab'
 import { QUESTIONS_HEADING, asksGoAhead, pickStrings, type Strings } from './i18n'
 import { lineCount, viewOf, visible } from './request'
@@ -311,7 +311,9 @@ const askWhat = (input: unknown): string => {
   return Object.keys(rest).length === 1 && typeof rest.command === 'string' ? rest.command : JSON.stringify(sortKeys(rest), null, 2)
 }
 const askKey = (tool: string, what: string): string => `ask\u0000${tool}\u0000${what}`
-const grantKey = (r: MonitorRequest): string => (r.kind === 'ask' ? askKey(r.tool ?? '', r.command ?? '') : (r.command ?? ''))
+/** A grant belongs to whoever asked: a subagent's serves that agent alone, never its parent or another agent. */
+const scoped = (agentId: string | undefined, key: string): string => (agentId ? `agent\u0000${agentId}\u0000${key}` : key)
+const grantKey = (r: MonitorRequest): string => scoped(r.agentId, r.kind === 'ask' ? askKey(r.tool ?? '', r.command ?? '') : (r.command ?? ''))
 
 // How long an app ask waits for the pane before the app's own dialog takes it (a process waits ten minutes at most).
 const ASK_WAIT_MS = 9 * 60_000
@@ -490,17 +492,48 @@ const gather = async ($: $): Promise<void> => {
     if (!s || s.v !== 1) continue
     const age = now - s.heartbeat
     if (s.state === 'ended' ? age > ENDED_KEEP_MS : age > STALE_MS) continue
-    // Another session wrote it: a request's texts are drawn only as the strings they should be.
+    // Another session wrote it: its texts are drawn only as the strings they should be, every hidden
+    // character as a code. The command stays as written: the card reads it, then draws it the same way.
     const str = (v: unknown): string | undefined => (typeof v === 'string' ? v : undefined)
-    s.requests = (Array.isArray(s.requests) ? s.requests : [])
-      .filter(r => r && typeof r.id === 'string')
-      .map(r => ({ ...r, tool: str(r.tool), command: str(r.command), rule: str(r.rule), text: str(r.text), summary: str(r.summary), decision: str(r.decision), explain: str(r.explain) }))
-    s.plan = (Array.isArray(s.plan) ? s.plan : [])
+    const txt = (v: unknown): string | undefined => (typeof v === 'string' ? visible(v) : undefined)
+    const arr = <T,>(v: unknown): T[] => (Array.isArray(v) ? (v as T[]) : [])
+    s.requests = arr<MonitorRequest>(s.requests)
+      // An id ends up in keys, answers and notes: the mod makes them short and plain, so nothing else is one.
+      .filter(r => r && typeof r.id === 'string' && /^[\w-]{1,40}$/.test(r.id))
+      .map(r => ({
+        ...r,
+        tool: txt(r.tool),
+        command: str(r.command),
+        rule: txt(r.rule),
+        text: txt(r.text),
+        summary: txt(r.summary),
+        decision: txt(r.decision),
+        explain: txt(r.explain),
+        agentId: str(r.agentId),
+        questions: arr<ChoiceQuestion>(r.questions)
+          .filter(q => q && typeof q === 'object')
+          .map(q => ({
+            header: txt(q.header),
+            question: txt(q.question) ?? '',
+            multiSelect: !!q.multiSelect,
+            options: arr<ChoiceOption>(q.options)
+              .filter(o => o && typeof o === 'object')
+              .map(o => ({ label: txt(o.label) ?? '', description: txt(o.description) })),
+          })),
+      }))
+    s.plan = arr<PlanItem>(s.plan)
       .filter(p => p && typeof p.text === 'string')
-      .map(p => ({ text: p.text, status: p.status === 'completed' || p.status === 'in_progress' ? p.status : 'pending' }))
-    s.queue = own(queues, s.sessionId)
+      .map(p => ({ text: visible(p.text), status: p.status === 'completed' || p.status === 'in_progress' ? p.status : 'pending' }))
+    s.queue = own(queues, s.sessionId)?.map(visible)
+    s.agents = arr<AgentRow>(s.agents)
+      .filter(a => a && typeof a.id === 'string')
+      .map(a => ({ ...a, type: txt(a.type) ?? '', description: txt(a.description) ?? '', status: str(a.status) ?? '', stepNote: txt(a.stepNote) }))
+    s.flow = s.flow && typeof s.flow === 'object' ? { ...s.flow, title: txt(s.flow.title) ?? '', phase: txt(s.flow.phase) } : null
+    s.title = txt(s.title) ?? s.sessionId
+    s.folder = txt(s.folder)
+    s.model = txt(s.model) ?? ''
     if (!STATES.has(s.state)) s.state = 'idle'
-    s.effort = str(s.effort)
+    s.effort = txt(s.effort)
     // A session idle while its subagents work is still at work.
     if (s.state === 'idle' && s.agents.some(a => a.status === 'running')) s.state = 'running'
     all.push(s)
@@ -512,7 +545,7 @@ const gather = async ($: $): Promise<void> => {
     const m = desk.get(s.sessionId)
     if (m?.title?.trim() && m.title.trim() !== s.title) {
       s.folder ??= s.title
-      s.title = m.title.trim()
+      s.title = visible(m.title.trim())
     }
     if (!s.effort && m?.effort) s.effort = m.effort
     s.localId = m?.localId
@@ -966,7 +999,7 @@ export const register: Register = (on, options) => {
     if (!forward) return next(e)
     const what = askWhat(e.tool_input)
     if (what.length > ASK_MAX) return next(e)
-    const key = askKey(e.tool_name, what)
+    const key = scoped(e.agent_id, askKey(e.tool_name, what))
     if ((await read($, local)).grantsSession.includes(key)) return { decision: { behavior: 'allow' } }
     if (!(await coordinatorLive($))) return next(e)
     const id = newId()
@@ -1000,9 +1033,10 @@ export const register: Register = (on, options) => {
     const rule = command && matchRule(rules, command)
     if (!rule) return next(e)
     const l = await read($, local)
-    if (l.grantsSession.includes(command)) return { decision: 'allow', reason: 'approved for this session from the coordinator pane' }
-    if (await takeOnce($, command)) return { decision: 'allow', reason: 'approved once from the coordinator pane' }
-    const pending = l.requests.find(r => r.kind === 'permission' && r.command === command)
+    const key = scoped(e.agentId, command)
+    if (l.grantsSession.includes(key)) return { decision: 'allow', reason: 'approved for this session from the coordinator pane' }
+    if (await takeOnce($, key)) return { decision: 'allow', reason: 'approved once from the coordinator pane' }
+    const pending = l.requests.find(r => r.kind === 'permission' && r.command === command && r.agentId === e.agentId)
     const id = pending?.id ?? newId()
     if (!pending) {
       const crit = criticalIn(critical, command)
@@ -1022,8 +1056,8 @@ export const register: Register = (on, options) => {
             ...cur,
             requests: cur.requests.filter(r => r.id !== id),
             applied: [...cur.applied, id].slice(-300),
-            grantsSession: a.kind === 'approve-session' ? [...cur.grantsSession, command] : cur.grantsSession,
-            grantsOnce: a.kind === 'approve-once' && isGone ? [...cur.grantsOnce, command] : cur.grantsOnce,
+            grantsSession: a.kind === 'approve-session' ? [...cur.grantsSession, key] : cur.grantsSession,
+            grantsOnce: a.kind === 'approve-once' && isGone ? [...cur.grantsOnce, key] : cur.grantsOnce,
           }))
           await publish($)
           return a.kind === 'deny'
@@ -1199,12 +1233,11 @@ export const register: Register = (on, options) => {
       if (r.kind === 'permission' || r.kind === 'ask') {
         const what = r.command ?? ''
         // Characters that hide or reorder text are drawn as codes, here and in the summary.
-        const raw = <Code key={`raw-${r.id}`} source={visible(what)} language={what.startsWith('{') ? 'json' : r.tool === 'PowerShell' ? 'powershell' : 'bash'} />
-        // A large request, or a file it writes, leads with what it does; the request itself stays a press
-        // away. Read as the asking tool reads it; where the split is not certain there is no summary.
+        const raw = <Code key={`raw-${r.id}`} source={visible(what)} wrap="wrap" language={what.startsWith('{') ? 'json' : r.tool === 'PowerShell' ? 'powershell' : 'bash'} />
+        // A large request, or a file it writes, gets a reading aid on top: its steps as the asking tool's
+        // shell reads them, or the file's path and code. None where the split is not certain.
         const view = viewOf(r.tool ?? 'Bash', what)
-        const isSummed = !!view && (isLarge(what) || view.kind !== 'shell')
-        const isRawOpen = !!u.open?.[`${r.id}:raw`]
+        const isAided = !!view && (isLarge(what) || view.kind !== 'shell')
         const HEAD_LINES = 12
         const summary: RenderChildren = !view ? null : view.kind === 'shell' ? (
           <Box flexDirection="column" gap="xs">
@@ -1246,14 +1279,17 @@ export const register: Register = (on, options) => {
         return shell(
           <Box flexDirection="column" gap="sm">
             {head(S.permission, `${s.title} · ${r.tool ?? 'Bash'}`)}
-            {isSummed ? summary : raw}
-            {isSummed ? (
-              <Text size="caption" color="subtle">
-                {S.partialSummary}
-              </Text>
+            {/* A reading aid above the request, never in its place: the request itself is what is approved. */}
+            {isAided ? (
+              <Box flexDirection="column" gap="xs" padding="sm" borderStyle="round" borderColor={isTerm ? undefined : '#FFFFFF1F'} borderDimColor={isTerm}>
+                <Text size="caption" color="subtle">
+                  {S.readingAid}
+                </Text>
+                {summary}
+              </Box>
             ) : null}
-            {/* Written from the request itself: shown only beside the request, never in its place. */}
-            {r.explain && (!isSummed || isRawOpen) ? (
+            {/* Written from the request itself, as unverified as the aid. */}
+            {r.explain ? (
               <Box flexDirection="column" gap="xs" padding="sm" borderStyle="round" borderColor={isTerm ? undefined : '#7F77DD66'} borderDimColor={isTerm} backgroundColor={fill('#7F77DD14')}>
                 <Text size="caption" weight="semibold" color="#B3ADF0">
                   {S.explainLabel}
@@ -1264,23 +1300,15 @@ export const register: Register = (on, options) => {
                 </Text>
               </Box>
             ) : null}
-            {isSummed ? (
-              <Box flexDirection="column" gap="xs">
-                <Box flexDirection="row" gap="sm" alignItems="center" justifyContent="space-between">
-                  <Text size="caption" color="subtle">
-                    {`${view?.kind === 'shell' ? `${S.steps(view.steps.length)} · ` : ''}${S.commandSize(lineCount(what), what.length)}`}
-                  </Text>
-                  <Button
-                    key={`raw-${r.id}-b`}
-                    plain
-                    dimColor
-                    label={isRawOpen ? `▾ ${S.hideCommand}` : `▸ ${S.showCommand}`}
-                    onPress={() => void update($, paneUi, cur => ({ ...cur, open: { ...cur.open, [`${r.id}:raw`]: !isRawOpen } }))}
-                  />
-                </Box>
-                {isRawOpen ? raw : null}
-              </Box>
-            ) : null}
+            {/* The whole request, always shown, wrapped, never cut. */}
+            <Box flexDirection="column" gap="xs">
+              {isAided ? (
+                <Text size="caption" color="subtle">
+                  {`${S.fullRequest} · ${view?.kind === 'shell' ? `${S.steps(view.steps.length)} · ` : ''}${S.commandSize(lineCount(what), what.length)}`}
+                </Text>
+              ) : null}
+              {raw}
+            </Box>
             {r.rule ? (
               <Text size="footnote" color={r.rule.includes('·') ? 'warning' : 'subtle'}>
                 {r.rule.includes('·') ? `${r.rule} — ${S.critical}` : r.rule}

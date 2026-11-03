@@ -45,8 +45,9 @@ const FILES: Record<string, SessionStatus> = {
         id: 'c1',
         kind: 'choice',
         createdAt: now + 1,
-        questions: [{ question: 'Which way?', header: 'OAuth', options: [{ label: 'Update the console', description: 'with gcloud' }, { label: 'Code only' }] }],
+        questions: [{ question: 'Which way?', header: 'OAuth', options: [{ label: 'Update the console', description: 'with gcloud\u200B' }, { label: 'Code only' }] }],
       },
+      { id: 'x"><y', kind: 'questions', createdAt: now + 2, text: 'not a request id' },
     ],
   }),
   // Idle itself while its worker runs: it counts as running.
@@ -169,14 +170,16 @@ test('the pane draws sessions, workers and every kind of request, on every surfa
     expect(await ui.find({ type: 'Code', source: 'git push origin main' } as never)).toBeTruthy()
     expect(await ui.find({ type: 'Text', text: /^Writes C:\/repos\/demo\/run\.py · 31 lines$/ })).toBeTruthy()
     expect(await ui.find({ type: 'Code', text: /^(print\(1\)\n){11}print\(1\)$/ })).toBeTruthy()
-    expect(await ui.find({ type: 'Code', text: /"file_path": "C:\/repos\/demo\/run\.py"/ })).toBeFalsy()
-    expect(await ui.find({ type: 'Text', text: /Writes a demo script/ })).toBeFalsy()
-    await ui.press({ key: 'raw-p4-b' })
+    // The aid sits above the request, labelled as such; the request itself is always there, whole.
+    expect(await ui.find({ type: 'Text', text: /^Reading aid, may be inaccurate/ })).toBeTruthy()
     expect(await ui.find({ type: 'Code', text: /"file_path": "C:\/repos\/demo\/run\.py"/ })).toBeTruthy()
     expect(await ui.find({ type: 'Text', text: /Writes a demo script/ })).toBeTruthy()
-    await ui.press({ key: 'raw-p4-b' })
+    expect(await ui.find({ key: 'raw-p4-b' })).toBeFalsy()
     expect(await ui.find({ type: 'Code', text: /line\n"@; Remove-Item C:\/demo\/x # \\u202Egnp\.exe$/ })).toBeTruthy()
-    expect(await ui.find({ key: 'raw-p5-b' })).toBeFalsy()
+    // Another session's texts draw their hidden characters as codes; a request with an id the mod
+    // would not make is dropped.
+    expect((await ui.find({ key: 'c1-0-0-b' }))?.text).toMatch(/with gcloud\\u200B/)
+    expect(await ui.find({ text: /not a request id/ })).toBeFalsy()
     expect(await ui.find({ type: 'Text', text: /git push origin main/ })).toBeFalsy()
     // The fixtures publish no version, as copies before 0.3 did: each is flagged.
     expect(await ui.find({ type: 'Text', text: /runs mod < 0\.3: \/reload-plugins there/ })).toBeTruthy()
@@ -637,12 +640,17 @@ describe('a session reporting', () => {
     expect(prompts.some(t => t.includes('npm publish'))).toBe(false)
 
     isReachable = false
-    await $.tool.check({ tool: 'Bash', input: { command: 'gh release create v1' }, tool_use_id: 'u2', agentId: 'w1' } as never)
+    const check = async (u: string, agentId?: string) =>
+      ((await $.tool.check({ tool: 'Bash', input: { command: 'gh release create v1' }, tool_use_id: u, agentId } as never)) as { decision?: string }).decision
+    await check('u2', 'w1')
     await settle()
     const [b] = mine().requests
-    written[answersFile()] = JSON.stringify([{ requestId: b?.id, at: Date.now(), kind: 'deny' }])
+    written[answersFile()] = JSON.stringify([{ requestId: b?.id, at: Date.now(), kind: 'approve-once' }])
     for (let i = 0; i < 300 && !prompts.some(t => t.includes('gh release create v1')); i++) await new Promise<void>(r => setTimeout(r, 10))
-    expect(prompts.at(-1)).toMatch(/subagent "w1 \(Release worker\)"[\s\S]*that agent's, not yours[\s\S]*Denied[\s\S]*gh release create v1/)
+    expect(prompts.at(-1)).toMatch(/subagent "w1 \(Release worker\)"[\s\S]*that agent's, not yours[\s\S]*for that agent alone[\s\S]*Approved[\s\S]*gh release create v1/)
+    // The approval is the agent's alone: the parent running the same command is asked again.
+    expect(await check('u3')).toBe('deny')
+    expect(await check('u4', 'w1')).toBe('allow')
     await settle()
   })
 })
