@@ -109,27 +109,22 @@ const DOC_OPENER = /<<(-?)[ \t]*(['"]?)([A-Za-z_]\w*)\2(?=[ \t;&|<>)]|$)/
 const LANGUAGE: Record<string, string> = { node: 'javascript', python: 'python', python3: 'python', bash: 'bash', sh: 'bash', source: 'bash', pwsh: 'powershell', powershell: 'powershell' }
 const INTERP = 'node|python3?|bash|sh|pwsh|powershell'
 
-/**
- * Where a here-doc opened between `head` and `after` goes: a program it is piped to (on its line, or on
- * the line after its end, when its line ends in `|`), a file, else the command that reads it.
- */
-const targetOf = (head: string, after: string, next: string): { to: string; path?: string; language?: string } => {
-  const pipe = /(?<![\|>])\|(?!\|)(.*)$/.exec(after)
-  if (pipe) {
-    const to = ((pipe[1] ?? '').trim() || next.trim()).split(/[\s;&|]/)[0]?.replace(/\.exe$/i, '').toLowerCase() || 'the next command'
-    return { to, language: LANGUAGE[to] }
-  }
-  const part = head.split(/&&|\|\||[;&|]/).pop()?.trim() ?? ''
-  const file = /^(?:cat|tee)\b.*?>{0,2}\s*([^\s;&|<>]+)$/.exec(part) ?? (/^(?:cat|tee)\b/.test(part) ? /^\s*>{1,2}\s*([^\s;&|<>]+)/.exec(after) : null)
+// The programs a here-doc may be drawn as going to: cat or tee, which store it, or one that reads it as code.
+const READER = new RegExp(`^(?:[A-Za-z_]\\w*=\\S*[ \\t]+)*(?:cat|tee|${INTERP})(?:\\.exe)?(?=[ \\t]|$)`, 'i')
+
+/** Where a here-doc opened by the step `part`, with `after` the rest of its line, goes: a file, else the program. */
+const targetOf = (part: string, after: string): { to: string; path?: string; language?: string } => {
+  const run = part.replace(/^(?:[A-Za-z_]\w*=\S*[ \t]+)*/, '')
+  const file = /^(?:cat|tee)\b.*?>{0,2}\s*([^\s;&|<>]+)$/.exec(run) ?? (/^(?:cat|tee)\b/.test(run) ? /^\s*>{1,2}\s*([^\s;&|<>]+)/.exec(after) : null)
   if (file?.[1] && !file[1].startsWith('-') && !/^(cat|tee)$/.test(file[1])) return { to: file[1], path: file[1] }
-  const by = new RegExp(`^(${INTERP})(?:\\.exe)?\\b`, 'i').exec(part)?.[1]?.toLowerCase()
+  const by = new RegExp(`^(${INTERP})(?:\\.exe)?\\b`, 'i').exec(run)?.[1]?.toLowerCase()
   if (by) return { to: by, language: LANGUAGE[by] }
-  return { to: part.split(/\s+/)[0] || 'the command' }
+  return { to: run.split(/\s+/)[0] || 'the command' }
 }
 
 /**
- * `cmd` cut into its parts. Only a here-doc whose end line is there is cut out (one opener on its line),
- * and an inline script only when its closing quote is found; anything else stays shell text.
+ * `cmd` cut into its parts. A here-doc is cut out only where every part of its reading is certain (see
+ * below), an inline script only when its closing quote is found; anything else stays shell text.
  */
 export const segmentsOf = (cmd: string, shell: Shell = 'bash'): Segment[] => {
   const out: Segment[] = []
@@ -151,14 +146,19 @@ export const segmentsOf = (cmd: string, shell: Shell = 'bash'): Segment[] => {
       // `EOF-1`, `EOF` and a CR) is not the one this reads, so the line stays shell text.
       const m = (line.match(/<</g) ?? []).length === 1 ? DOC_OPENER.exec(line) : null
       if (!m || line.includes('<<<')) continue
+      // Fail closed: a block is drawn only where all around it is plain. Before `<<`, text that splits
+      // for certain and ends in cat, tee or a program that reads code; after the word, text that splits
+      // for certain and leaves nothing open (no `|`, no line continuation, no `&&` or `||` going on);
+      // after the end line, no `|` taking the output on. Anything else is shell text.
       const head = line.slice(0, m.index)
-      // A `<<` inside quotes, or after a comment, opens nothing: the line stays shell text.
-      if (head.trim() && !stepsOf(head, 'bash')) continue
+      const after = line.slice((m.index ?? 0) + m[0].length)
+      const part = stepsOf(head, 'bash')?.at(-1) ?? ''
+      if (!READER.test(part) || (after.trim() && !stepsOf(after, 'bash')) || /[|\\]|&&[ \t]*$/.test(after)) continue
       const word = m[3] ?? ''
       // Exactly the word, as bash wants it: `EOF` with a CR after it is not the end.
       end = lines.findIndex((l, j) => j > i && (m[1] === '-' ? l.replace(/^\t+/, '') : l) === word)
-      if (end < 0) continue
-      t = targetOf(head, line.slice((m.index ?? 0) + m[0].length), lines[end + 1] ?? '')
+      if (end < 0 || /^[ \t]*(\||&&)/.test(lines[end + 1] ?? '')) continue
+      t = targetOf(part, after)
       // An unquoted word: the shell runs each `$( )` and backtick in the body as it reads it.
       const body = lines.slice(i + 1, end).join('\n')
       if (!m[2] && /\$\(|`/.test(body)) t.isRunning = true
