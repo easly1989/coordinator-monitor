@@ -54,9 +54,9 @@ const en = {
   rulesBroken: (path: string) => `coordinator-monitor: ${path} is not valid JSON; only the default rules apply.`,
   // what the model reads
   waitApproval: (label: string, id: string) =>
-    `This command is protected (${label}) and needs the person's approval, requested in the coordinator pane (request ${id}). Do not retry it and do not work around it: end your turn now and say what you are waiting for. The person already sees this request as a card: do not ask for it again among your questions. The answer arrives as a new message.`,
+    `This command is protected (${label}) and needs the person's approval, requested in the coordinator pane (request ${id}, shown as #${id.slice(-6)} on its card). Do not retry it and do not work around it: end your turn now and say what you are waiting for. The person already sees this request as a card: do not ask for it again among your questions. The answer arrives as a new message.`,
   questionForwarded: (id: string) =>
-    `Your question was forwarded to the person through the coordinator pane (request ${id}). End your turn now without guessing the answer and without asking it again among your questions; it arrives as a new message.`,
+    `Your question was forwarded to the person through the coordinator pane (request ${id}, shown as #${id.slice(-6)} on its card). End your turn now without guessing the answer and without asking it again among your questions; it arrives as a new message.`,
   approvedMsg: (cmd: string, once: boolean) =>
     `Approved from the coordinator pane${once ? ' (this one time)' : ' (for the rest of this session)'}: you may now run\n\n${cmd}`,
   deniedMsg: (cmd: string) => `Denied from the coordinator pane: do not run\n\n${cmd}\n\nFind another way or explain what you need.`,
@@ -103,8 +103,9 @@ const en = {
   queueAmbiguous: (q: string, names: string) => `"${q}" matches more than one session: ${names}. Name one exactly.`,
   queueBroken: 'The queue file is unreadable; nothing was changed.',
   readMsg: (time: string) => `Read receipt: the person has read your report of ${time} in the coordinator pane. Do not reply to this; carry on with your work if you have any.`,
+  idCopied: (id: string) => `Copied request id ${id}`,
   answeredMsg: (time: string, session: string, id: string, answer: string) =>
-    `[coordinator-monitor] At ${time} the person answered request ${id} of the session titled ${session} in the pane: ${answer}`,
+    `[coordinator-monitor] At ${time} the person answered request ${id} (#${id.slice(-6)}) of the session titled ${session} in the pane: ${answer}`,
   answerKind: { 'approve-once': 'approved once', 'approve-session': 'approved for the session', deny: 'denied', read: 'marked as read (the session was told)', order: 'reordered its planned tasks (the session was told)' } as Record<string, string>,
 }
 
@@ -163,9 +164,9 @@ const it: typeof en = {
   paneOpened: 'Pannello Agenti aperto.',
   rulesBroken: path => `coordinator-monitor: ${path} non è un JSON valido; valgono solo le regole predefinite.`,
   waitApproval: (label, id) =>
-    `Questo comando è protetto (${label}) e richiede l'approvazione dell'utente, chiesta nel pannello del Coordinatore (richiesta ${id}). Non riprovarlo e non aggirarlo: chiudi il turno ora e di' cosa stai aspettando. L'utente vede già questa richiesta come scheda: non chiederla di nuovo tra le tue domande. La risposta arriverà come nuovo messaggio.`,
+    `Questo comando è protetto (${label}) e richiede l'approvazione dell'utente, chiesta nel pannello del Coordinatore (richiesta ${id}, sulla scheda #${id.slice(-6)}). Non riprovarlo e non aggirarlo: chiudi il turno ora e di' cosa stai aspettando. L'utente vede già questa richiesta come scheda: non chiederla di nuovo tra le tue domande. La risposta arriverà come nuovo messaggio.`,
   questionForwarded: id =>
-    `La tua domanda è stata inoltrata all'utente tramite il pannello del Coordinatore (richiesta ${id}). Chiudi il turno ora senza indovinare la risposta e senza ripeterla tra le tue domande: arriverà come nuovo messaggio.`,
+    `La tua domanda è stata inoltrata all'utente tramite il pannello del Coordinatore (richiesta ${id}, sulla scheda #${id.slice(-6)}). Chiudi il turno ora senza indovinare la risposta e senza ripeterla tra le tue domande: arriverà come nuovo messaggio.`,
   approvedMsg: (cmd, once) => `Approvato dal pannello del Coordinatore${once ? ' (solo questa volta)' : ' (per il resto della sessione)'}: ora puoi eseguire\n\n${cmd}`,
   deniedMsg: cmd => `Negato dal pannello del Coordinatore: non eseguire\n\n${cmd}\n\nTrova un'altra strada o spiega cosa ti serve.`,
   answerMsg: text => `Risposta alle tue domande, inviata dal pannello del Coordinatore:\n\n${text}`,
@@ -210,8 +211,9 @@ const it: typeof en = {
   queueAmbiguous: (q, names) => `"${q}" corrisponde a più sessioni: ${names}. Indicane una con esattezza.`,
   queueBroken: 'Il file della coda non è leggibile; non ho cambiato nulla.',
   readMsg: time => `Conferma di lettura: l'utente ha letto il tuo report delle ${time} nel pannello del Coordinatore. Non rispondere a questo messaggio; prosegui col tuo lavoro se ne hai.`,
+  idCopied: id => `Id della richiesta copiato: ${id}`,
   answeredMsg: (time, session, id, answer) =>
-    `[coordinator-monitor] Alle ${time} l'utente ha risposto nel pannello alla richiesta ${id} della sessione intitolata ${session}: ${answer}`,
+    `[coordinator-monitor] Alle ${time} l'utente ha risposto nel pannello alla richiesta ${id} (#${id.slice(-6)}) della sessione intitolata ${session}: ${answer}`,
   answerKind: { 'approve-once': 'approvato una volta', 'approve-session': 'approvato per la sessione', deny: 'negato', read: 'letto (la sessione è stata avvisata)', order: 'riordinato le attività programmate (la sessione è stata avvisata)' },
 }
 

@@ -110,6 +110,11 @@ test('the pane draws sessions, workers and every kind of request, on every surfa
     notes.push(JSON.stringify((e as { message: unknown }).message))
     return next(e)
   })
+  const copied: string[] = []
+  on('ui.copy', (_, e) => {
+    copied.push((e as { text: string }).text)
+    return { value: { isCopied: true } } as never
+  })
   const runs: { argv: string[]; env?: Record<string, string> }[] = []
   on('process.run', (_, e) => {
     runs.push({ argv: [...e.argv], env: e.init?.env as Record<string, string> | undefined })
@@ -209,6 +214,10 @@ test('the pane draws sessions, workers and every kind of request, on every surfa
   }
   // This session has no link to itself; one the desktop app does not know has none either.
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  // Each card shows its request's short id; a press copies the whole id.
+  expect((await ui.find({ key: 'id-p4' }))?.text).toBe('#p4')
+  await ui.press({ key: 'id-p4' })
+  expect(copied).toEqual(['p4'])
   expect(await ui.find({ key: 'open-me' })).toBeFalsy()
   expect(await ui.find({ key: 'open-b' })).toBeFalsy()
   // Every answer given here is noted in this session (the coordinator) too: the session's title quoted,
@@ -217,9 +226,9 @@ test('the pane draws sessions, workers and every kind of request, on every surfa
   expect(Object.entries(written).find(([k]) => k.endsWith('/answers/a.json'))?.[1]).toContain('approve-once')
   await ui.press({ key: 'read-r2' })
   await ui.press({ key: 'dismiss-c1' })
-  expect(notes[0]).toMatch(/answered request p1 of the session titled \\"HomeLab\\" in the pane: approved once/)
+  expect(notes[0]).toMatch(/answered request p1 \(#p1\) of the session titled \\"HomeLab\\" in the pane: approved once/)
   expect(notes[0]).not.toMatch(/git push/)
-  expect(notes[1]).toMatch(/request r2 of the session titled \\"Notes\\"[\s\S]*marked as read/)
+  expect(notes[1]).toMatch(/request r2 \(#r2\) of the session titled \\"Notes\\"[\s\S]*marked as read/)
   expect(notes.length).toBe(2)
   await ui.unmount()
 })
@@ -473,6 +482,11 @@ describe('a session reporting', () => {
     // A section asking only for the card adds nothing; one with no numbered list is judged line by line.
     await $.turn.start({ turnId: 't2' } as never)
     await $.turn.complete({ turnId: 't2', answer: `## Questions for you\n\n1. Approve request ${id} in the pane?`, isAborted: false } as never)
+    await settle()
+    expect(mine().requests.map(r => r.kind)).toEqual(['permission'])
+    // Its short form, as the card shows it, is the same card.
+    await $.turn.start({ turnId: 't2a' } as never)
+    await $.turn.complete({ turnId: 't2a', answer: `## Questions for you\n\n1. Approve #${id.slice(-6)} in the pane?`, isAborted: false } as never)
     await settle()
     expect(mine().requests.map(r => r.kind)).toEqual(['permission'])
     await $.turn.start({ turnId: 't2b' } as never)

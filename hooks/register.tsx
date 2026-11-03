@@ -103,6 +103,8 @@ const titleOf = (dir: string): string => {
 }
 
 const newId = (): string => `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`
+/** The id as a card shows it: its last six characters, the random four and the clock's last two. */
+const shortId = (id: string): string => id.slice(-6)
 
 const readJson = async <T,>($: $, path: string): Promise<T | null> => {
   try {
@@ -369,9 +371,13 @@ const optionsOf = (item: string): string[] => {
 /** The requests this session raised itself, open or done with: a closing message pointing at one repeats its card. */
 const ownIds = (l: Local): Set<string> => new Set([...l.applied, ...l.requests.filter(r => r.kind !== 'questions' && r.kind !== 'report').map(r => r.id)])
 const ASK_VERB = /\b(approv|confirm|conferm|answer|rispond|accept|accett)\w*/i
-/** Whether `text` asks the person to answer one of `ids` ("approve request <id>"), not merely mentions one. */
-const asksOwn = (text: string, ids: Set<string>): boolean =>
-  [...text.matchAll(/\b[a-z0-9]{8,16}\b/g)].some(m => ids.has(m[0]) && ASK_VERB.test(text.slice(Math.max(0, m.index - 100), m.index).split(/[.!?\n]/).pop() ?? ''))
+/** Whether `text` asks the person to answer one of `ids` ("approve request <id>" or "#<short id>"), not merely mentions one. */
+const asksOwn = (text: string, ids: Set<string>): boolean => {
+  const shorts = new Set([...ids].map(shortId))
+  return [...text.matchAll(/(#)?\b([a-z0-9]{6,16})\b/g)].some(
+    m => (m[1] ? shorts.has(m[2] ?? '') : ids.has(m[2] ?? '')) && ASK_VERB.test(text.slice(Math.max(0, m.index - 100), m.index).split(/[.!?\n]/).pop() ?? ''),
+  )
+}
 
 type PlanArgs = { items?: { content?: unknown; status?: unknown }[]; advance?: boolean; done?: number[]; start?: number }
 const planStatus = (s: unknown): PlanItem['status'] => (s === 'completed' || s === 'in_progress' ? s : 'pending')
@@ -1171,6 +1177,14 @@ export const register: Register = (on, options) => {
               {what}
             </Text>
           </Box>
+          {/* The request's short id, as sessions and the coordinator quote it; a press copies the whole id. */}
+          <Button
+            key={`id-${r.id}`}
+            plain
+            dimColor
+            label={`#${shortId(r.id)}`}
+            onPress={press => void $.ui.copy({ text: r.id, surface: press.surface }).then(c => $.ui.toast(c.isCopied ? S.idCopied(r.id) : r.id))}
+          />
           {openButton(s, `open-${r.id}`)}
         </Box>
       )
