@@ -123,6 +123,12 @@ The coordinator session gets a tool, `queue`, to list, add or remove a session's
 
 The rules are a guard against a session doing something you wanted to supervise, not a sandbox: a command written to dodge a pattern is not caught. Keep your normal permission settings.
 
+A rule matches the command's text, so a command that only mentions a protected one can raise a card. One case is left out because the shell never runs it: the body of a here-doc handed to a command that only stores it. That covers `cat` or `tee` into a file, `git commit -F -`, and `gh pr|issue create|edit|comment --body-file -`, in the plain form `cat > file <<'EOF'` with the body and `EOF` on lines of their own. Everything else is matched whole on purpose:
+- a here-doc fed to a shell or an interpreter (`bash`, `python -`, `node`);
+- a quoted argument (`bash -c "…"`, `ssh host "…"`, `node -e "…"`, `eval`).
+
+In those, the text is code that can run the protected command, and from the text alone the mod cannot tell a test string from a call. To write a test or a note that names a protected command, use a file tool (Write, Edit) rather than a shell here-doc.
+
 Answers are files the pane writes to `<busDir>/answers/`. A session that could write one could approve its own app permissions, and one that wrote `rules.json` or a status file could loosen the rules or pose as another session, so the mod refuses any tool call that would change `<busDir>`: a file tool aimed there, or a command that names it. Reading it stays allowed. That too is a guard, not a sandbox: every session runs as you, so a command that builds the path at run time is not caught. An app permission approved from the pane covers exactly what the card showed, the whole input; an input too long to show keeps the app's own dialog.
 
 ## How it works

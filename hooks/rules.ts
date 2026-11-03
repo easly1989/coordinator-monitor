@@ -62,7 +62,39 @@ export const compileRules = (file: RulesFile | null): { rules: Rule[]; critical:
   return { rules, critical }
 }
 
-export const matchRule = (rules: readonly Rule[], command: string): Rule | undefined => rules.find(r => r.re.test(command))
+export const matchRule = (rules: readonly Rule[], command: string): Rule | undefined => {
+  const text = runnableText(command)
+  return rules.find(r => r.re.test(text))
+}
+
+// A command that only stores the text it reads: cat or tee into a file, a commit message, a PR or issue body.
+const SINK = /^\s*(cat|tee|git\s+commit\b.*\s-F\s*-|gh\s+(pr|issue)\s+(create|edit|comment)\b.*\s--body-file\s+-)(\s|$)/
+
+/**
+ * `command` without the bodies of the here-docs it hands to a command that only stores them, which
+ * the shell never runs: writing a test or a commit message that names a protected command is not one.
+ * Only the plain form is read (`cat > f <<'EOF'` ending its line, the body, then `EOF`); anything else,
+ * and a body fed to a shell or an interpreter (`bash`, `python -`, `node`), is matched whole, as that
+ * text can run.
+ */
+export const runnableText = (command: string): string => {
+  const lines = command.split('\n')
+  const out: string[] = []
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i] ?? ''
+    out.push(line)
+    const m = /<<(-?)\s*(['"]?)([A-Za-z_]\w*)\2\s*$/.exec(line)
+    if (!m) continue
+    const head = line.slice(0, m.index)
+    // The command the body goes to; with a quote in the line, the whole line, so a quoted `;` splits nothing.
+    const to = /["']/.test(head) ? head : (head.split(/&&|\|\||[;|&]/).pop() ?? '')
+    if (/[`$<>]\(|`/.test(head) || !SINK.test(to)) continue
+    const end = lines.findIndex((l, j) => j > i && (m[1] ? l.replace(/^\t+/, '') : l) === m[3])
+    // No end line: the shell would take the rest as the body, but nothing here is sure of it.
+    if (end > i) i = end
+  }
+  return out.join('\n')
+}
 
 export const criticalIn = (critical: readonly string[], command: string): string | undefined => {
   const low = command.toLowerCase()

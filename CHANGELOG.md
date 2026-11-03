@@ -3,6 +3,7 @@
 ## 0.6.2 — 2026-11-03
 
 - **Each card shows its request's short id** (`#x1nb2c`, the last six characters), dim, in its header. A press copies the whole id. The messages sessions get, and the coordinator's notes, quote the same short form. A closing message that asks for a card by its short form is recognised like one that names the whole id.
+- **Fewer false protected-command cards.** The body of a here-doc handed to a command that only stores it is no longer matched against the rules. That covers `cat` or `tee` into a file, `git commit -F -`, and `gh pr|issue create|edit|comment --body-file -`. So writing a test or a commit message that names `gh pr merge` raises no card. A body fed to a shell or an interpreter (`bash`, `python -`, `node`), and a quoted argument (`bash -c`, `ssh`, `node -e`), are still matched whole, since that text can run; the README says why.
 
 ## 0.6.1 — 2026-11-03
 
