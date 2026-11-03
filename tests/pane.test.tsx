@@ -148,6 +148,8 @@ test('the pane draws sessions, workers and every kind of request, on every surfa
     expect(await ui.find({ type: 'Text', text: /HomeLab · Bash/ })).toBeTruthy()
     expect(await ui.find({ type: 'Text', text: /Migrate schema/ })).toBeTruthy()
     expect(await ui.find({ type: 'Text', text: /Update the console/ })).toBeTruthy()
+    // A choice's whole option is its press target: the title and the line under it.
+    expect((await ui.find({ key: 'c1-0-0-b' }))?.text).toMatch(/Update the console\s*with gcloud/)
     expect(await ui.find({ type: 'Text', text: /62%/ })).toBeTruthy()
     expect(await ui.find({ type: 'Text', text: /\$1\.50/ })).toBeTruthy()
     expect(await ui.find({ type: 'Text', text: /Opus 5\.5 · extra/ })).toBeTruthy()

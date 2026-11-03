@@ -962,15 +962,19 @@ export const register: Register = (on, options) => {
                       backgroundColor={fill(isOn ? AMBER_TINT : CARD)}
                       hover={isTerm ? undefined : { borderColor: AMBER_LINE }}
                     >
+                      {/* A Box takes no press: the Button holds both lines, so either one picks the option. */}
                       <Button key={`${r.id}-${qi}-${oi}-b`} plain onPress={toggle(qi, oi, !!q.multiSelect)}>
                         {isTerm ? (isOn ? '● ' : '○ ') : ''}
                         <Text weight="semibold">{o.label}</Text>
+                        {o.description ? '\n' : ''}
+                        {o.description ? (
+                          <Text size="footnote" color="subtle">
+                            {o.description}
+                          </Text>
+                        ) : (
+                          ''
+                        )}
                       </Button>
-                      {o.description ? (
-                        <Text size="footnote" color="subtle">
-                          {o.description}
-                        </Text>
-                      ) : null}
                     </Box>
                   )
                 })}
