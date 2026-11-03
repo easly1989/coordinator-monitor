@@ -27,7 +27,7 @@ It is a Claude Code **mod** (function hooks, the early-access plugin API). Made 
 - **The app's permission prompts come to you too.** While a coordinator session is running, a session whose app would ask for a permission sends the ask to the pane and holds there, as it would at the dialog; approve it once, for the session, or deny it, and the session carries on. With no answer in nine minutes, or no coordinator running, the app's own dialog asks. The coordinator keeps its own dialog: you are in its chat.
 - **Questions come to you.** A session's multiple-choice question (the dialog with options) is forwarded to the pane with every option and a free answer field. Open questions a session ends its turn with, under a `## Questions for you` heading, are shown too, with a reply box.
 - **Reports come to you.** A session that ends its turn with a report and no questions section shows it in the inbox as one line, the whole report a click away, with a reply box. One that waits for your go-ahead (its desktop wrap-up asks, or its text asks for confirmation) is marked, and **Go ahead** answers it.
-- **Answered means gone.** A request leaves the pane as soon as you answer it; the owning session receives your answer as a new message and carries on. Answered in the session itself, it leaves too: questions and reports on the session's next turn, an app permission once the call runs or the turn ends, a protected command once you type in the session. Anything else you can dismiss.
+- **Answered means gone.** A request leaves the pane as soon as you answer it; the owning session receives your answer as a new message and carries on. Answered in the session itself, it leaves too: questions, choices, reports and protected commands once you type in the session (not a slash command), an app permission once the call runs or the turn ends. A session's next closing message supersedes what it asked or reported before. Anything else you can dismiss.
 - **Usage at a glance.** The 5-hour and weekly limits, as the latest session reported them.
 
 <p align="center">
@@ -129,7 +129,7 @@ session C ─┘             …
                           B receives your answer as a new message and goes on
 ```
 
-Everything stays on your machine: plain JSON files, no server, no network. A session that stops publishing for 15 minutes drops out of the pane; a closed one stays an hour, marked as ended.
+Everything stays on your machine: plain JSON files, no server, no network. A session's closing message (its report) is written there too, so the pane can show it. A session that stops publishing for 15 minutes drops out of the pane; a closed one stays an hour, marked as ended.
 
 ## Credits
 

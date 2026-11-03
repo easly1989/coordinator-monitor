@@ -67,6 +67,16 @@ const FILES: Record<string, SessionStatus> = {
     isCoordinator: true,
     requests: [{ id: 'p2', kind: 'permission', createdAt: now + 2, tool: 'Bash', command: 'gh pr merge 7', rule: 'merge' }],
   }),
+  // A plain report ahead of a permission, its text not a string: the card still says what it waits on.
+  'd.json': status({
+    sessionId: 'd',
+    title: 'Notes',
+    state: 'waiting',
+    requests: [
+      { id: 'r2', kind: 'report', createdAt: now + 4, text: 42 as never, awaits: false },
+      { id: 'p3', kind: 'permission', createdAt: now + 5, tool: 'Bash', command: 'npm publish', rule: 'publish' },
+    ],
+  }),
 }
 
 test('the pane draws sessions, workers and every kind of request, on every surface', async ($, on) => {
@@ -150,7 +160,9 @@ test('the pane draws sessions, workers and every kind of request, on every surfa
     expect(await ui.find({ type: 'Text', text: /^\s*Running\s*$/ })).toBeTruthy()
     expect(await ui.find({ type: 'Text', text: /Lead · Bash/ })).toBeTruthy()
     expect(await ui.find({ type: 'Text', text: /^Lead$/ })).toBeFalsy()
-    expect(await ui.find({ type: 'Text', text: /2 active \/ 2/ })).toBeTruthy()
+    expect(await ui.find({ type: 'Text', text: /3 active \/ 3/ })).toBeTruthy()
+    // Notes: its report waits on nothing, so its card names the permission behind it.
+    expect((await ui.findAll({ type: 'Text', text: /^waiting for a permission$/ })).length).toBe(2)
     // Each worker row carries its context, tokens and elapsed time.
     expect(await ui.find({ type: 'Text', text: /ctx 22% · 44k/ })).toBeTruthy()
     // A report waiting for a go-ahead: its wrap-up question as the gist, the whole text on demand.
@@ -172,7 +184,7 @@ test('the pane draws sessions, workers and every kind of request, on every surfa
   await ui.unmount()
 })
 
-test('a new turn retires the questions the session asked', async ($, on) => {
+test('questions leave when the person replies in the session, or the session speaks again', async ($, on) => {
   const written: Record<string, string> = {}
   on('command.register', () => ({ value: { command: 'agents-monitor' } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
@@ -195,6 +207,7 @@ test('a new turn retires the questions the session asked', async ($, on) => {
   on('clock.every', () => ({ value: undefined }))
   on('turn.start', (_, e) => ({ turnId: (e as { turnId: string }).turnId }) as never)
   on('turn.complete', () => ({ text: '' }) as never)
+  on('prompt.submit', (_, e) => ({ text: (e as { text: string }).text }) as never)
 
   const mine = (): SessionStatus => JSON.parse(Object.entries(written).find(([k]) => k.endsWith('/sessions/me.json'))?.[1] ?? '{}') as SessionStatus
   const settle = async () => {
@@ -207,10 +220,25 @@ test('a new turn retires the questions the session asked', async ($, on) => {
   await settle()
   expect(mine().requests.map(r => r.kind)).toEqual(['questions'])
 
-  // Carlo answers in the session itself: its next turn starts.
+  // A background task's notification starts a turn: that is not the person answering.
+  await $.prompt.submit({ text: 'task done', origin: { kind: 'task-notification' }, wait: false } as never)
   await $.turn.start({ turnId: 't2' } as never)
   await settle()
+  expect(mine().requests.map(r => r.kind)).toEqual(['questions'])
+  // Carlo answers in the session itself.
+  await $.prompt.submit({ text: '8080', origin: { kind: 'composer' }, wait: false } as never)
+  await settle()
   expect(mine().requests).toEqual([])
+
+  // The answer may come through another session instead: the session's next closing message supersedes the questions.
+  await $.turn.complete({ turnId: 't2', answer: 'Done.\n\n## Questions for you\n\n1. Which host?', isAborted: false } as never)
+  await settle()
+  await $.prompt.submit({ text: 'Carlo says: localhost', origin: { kind: 'peer' }, wait: false } as never)
+  await $.turn.start({ turnId: 't3' } as never)
+  await settle()
+  await $.turn.complete({ turnId: 't3', answer: 'Set the host to localhost.', isAborted: false } as never)
+  await settle()
+  expect(mine().requests.map(r => r.kind)).toEqual(['report'])
 })
 
 describe('a session reporting', () => {
@@ -226,8 +254,12 @@ describe('a session reporting', () => {
     on('session.usage', () => ({ value: { rateLimits: [] } as never }))
     on('agent.list', () => ({ value: agents as never }))
     on('fs.exists', () => ({ value: false }))
-    on('fs.list', () => ({ value: [] }))
-    on('fs.read', () => {
+    const path = (e: unknown) => String((e as { path?: string }).path ?? '').replace(/\\/g, '/')
+    // The bus as this session writes it: its own status file, and the answers the pane leaves.
+    on('fs.list', (_, e) => ({ value: path(e).endsWith('/sessions') && written[`${path(e)}/me.json`] ? [{ kind: 'file', name: 'me.json', mtimeMs: Date.now() } as never] : [] }))
+    on('fs.read', (_, e) => {
+      const text = written[path(e)]
+      if (text !== undefined) return { value: text }
       throw new Error('ENOENT')
     })
     on('fs.write', (_, e) => {
@@ -238,12 +270,17 @@ describe('a session reporting', () => {
     on('turn.start', (_, e) => ({ turnId: (e as { turnId: string }).turnId }) as never)
     on('turn.complete', () => ({ text: '' }) as never)
     on('tool.call', () => ({ result: 'ok' }) as never)
-    on('prompt.submit', (_, e) => ({ text: (e as { text: string }).text }) as never)
+    const prompts: string[] = []
+    on('prompt.submit', (_, e) => {
+      prompts.push((e as { text: string }).text)
+      return { text: (e as { text: string }).text } as never
+    })
     const mine = (): SessionStatus => JSON.parse(Object.entries(written).find(([k]) => k.endsWith('/sessions/me.json'))?.[1] ?? '{}') as SessionStatus
     const settle = async () => {
       for (let i = 0; i < 20; i++) await new Promise<void>(r => setTimeout(r, 5))
     }
-    return { mine, settle }
+    const answersFile = () => Object.keys(written).find(k => k.endsWith('/sessions/me.json'))?.replace('/sessions/', '/answers/') ?? ''
+    return { mine, settle, written, prompts, answersFile }
   }
 
   test('a turn that ends on a report shows it, waiting when it asks for a go-ahead', async ($, on) => {
@@ -261,10 +298,12 @@ describe('a session reporting', () => {
     expect(r?.awaits).toBe(true)
     expect(mine().state).toBe('waiting')
 
-    // The next turn retires it; a report that only informs does not make the session wait.
+    // A turn a notification started keeps it; that turn's own closing message supersedes it, and a
+    // report that only informs does not make the session wait.
+    await $.prompt.submit({ text: 'build finished', origin: { kind: 'task-notification' }, wait: false } as never)
     await $.turn.start({ turnId: 't2' } as never)
     await settle()
-    expect(mine().requests).toEqual([])
+    expect(mine().requests.map(x => x.id)).toEqual([r?.id])
     await $.turn.complete({ turnId: 't2', answer: 'All tests pass. Nothing left to do.', isAborted: false } as never)
     await settle()
     expect(mine().requests.map(x => [x.kind, x.awaits])).toEqual([['report', false]])
@@ -303,9 +342,49 @@ describe('a session reporting', () => {
     await $.prompt.submit({ text: 'task done', origin: { kind: 'task-notification' }, wait: false } as never)
     await settle()
     expect(mine().requests.map(r => r.kind)).toEqual(['permission'])
+    // A slash command is not an answer either.
+    await $.prompt.submit({ text: '/help', command: { name: 'help', args: '' }, origin: { kind: 'composer' }, wait: false } as never)
+    await settle()
+    expect(mine().requests.map(r => r.kind)).toEqual(['permission'])
     await $.prompt.submit({ text: 'leave it for now', origin: { kind: 'composer' }, wait: false } as never)
     await settle()
     expect(mine().requests).toEqual([])
+  })
+
+  test('a card the pane answered survives the person typing until its answer is applied, and an answer retires no other card', async ($, on) => {
+    const { mine, settle, written, prompts, answersFile } = setup(on)
+    on('tool.check', () => ({ decision: 'allow' }) as never)
+    on('ui.open', () => ({ value: { isPlaced: true } }))
+    await $.session.start({ cwd: '/repos/project', surface: 'desktop', isInteractive: true })
+    await $.tool.check({ tool: 'Bash', input: { command: 'gh pr merge 7' }, tool_use_id: 'u1' } as never)
+    await $.tool.check({ tool: 'Bash', input: { command: 'npm publish' }, tool_use_id: 'u2' } as never)
+    await settle()
+    const [a, b] = mine().requests
+    expect([a?.command, b?.command]).toEqual(['gh pr merge 7', 'npm publish'])
+
+    // Approved from the pane, not yet picked up; then the person types: the approval still reaches the
+    // session, and only the unanswered card is retired.
+    written[answersFile()] = JSON.stringify([{ requestId: a?.id, at: Date.now(), kind: 'approve-once' }])
+    await $.prompt.submit({ text: 'meanwhile, update the docs', origin: { kind: 'composer' }, wait: false } as never)
+    for (let i = 0; i < 300 && !prompts.some(t => t.includes('gh pr merge 7')); i++) await new Promise<void>(r => setTimeout(r, 10))
+    await settle()
+    expect(prompts.filter(t => t.startsWith('Approved')).length).toBe(1)
+    expect(mine().requests).toEqual([])
+
+    // Two cards again; approving one from the pane sends the session a message, which leaves the other.
+    await $.tool.check({ tool: 'Bash', input: { command: 'npm publish' }, tool_use_id: 'u3' } as never)
+    await $.tool.check({ tool: 'Bash', input: { command: 'gh release create v1' }, tool_use_id: 'u4' } as never)
+    delete written[answersFile()]
+    await settle()
+    expect(mine().requests.map(r => r.command)).toEqual(['npm publish', 'gh release create v1'])
+    await $.command.run({ command: 'agents-monitor', args: '' } as never)
+    const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+    const [first] = mine().requests
+    await ui.press({ key: `once-${first?.id}` })
+    await settle()
+    expect(prompts.some(t => t.includes('npm publish'))).toBe(true)
+    expect(mine().requests.map(r => r.command)).toEqual(['gh release create v1'])
+    await ui.unmount()
   })
 })
 describe('the app asking for a permission', () => {

@@ -9,7 +9,7 @@ export type AgentRow = {
   /** When this session first saw it run, and saw it finish (epoch ms). */
   startedAt?: number
   endedAt?: number
-  /** Its context window's fill and the tokens it has used, from its own model requests. */
+  /** Its context window's fill, and that context in tokens, at its last model request. */
   ctxPct?: number
   tokens?: number
 }

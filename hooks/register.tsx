@@ -72,10 +72,13 @@ let label = ''
 let effort = ''
 // shortcut: timings live in module memory, so a reload restarts them; persist in `local` if that bothers.
 const agentTimes = new Map<string, { startedAt: number; endedAt?: number }>()
-// Each subagent's last context fill and its tokens so far, from its model requests.
-const agentUse = new Map<string, { ctx: number; max: number; tokens: number }>()
+// Each subagent's context at its last model request, in tokens, and its window.
+const agentUse = new Map<string, { ctx: number; max: number }>()
 // The wrap-up the main loop called this turn, read when the turn ends.
 let wrap: { recap?: string; ask?: string } | null = null
+let turnStartedAt = 0
+// The answers this mod sends the session in the person's voice: they reach its own prompt.submit hook.
+const ownPrompts = new Set<string>()
 
 const norm = (p: string): string => p.replace(/\\/g, '/').replace(/\/+$/, '')
 const baseName = (p: string): string => norm(p).split('/').pop() || p
@@ -199,7 +202,7 @@ const publish = async ($: $, state?: SessionStatus['state']): Promise<void> => {
         startedAt: t?.startedAt,
         endedAt: t?.endedAt,
         ctxPct: use ? Math.min(100, Math.round((use.ctx / use.max) * 100)) : undefined,
-        tokens: use?.tokens,
+        tokens: use?.ctx,
       }
     }),
     flow: l.flow,
@@ -239,7 +242,10 @@ const applyAnswers = async ($: $): Promise<void> => {
     }
     return next
   })
-  for (const text of prompts) await $.prompt.submit({ text, asUser: true })
+  for (const text of prompts) {
+    ownPrompts.add(text)
+    await $.prompt.submit({ text, asUser: true })
+  }
   await publish($)
 }
 
@@ -348,6 +354,11 @@ const gather = async ($: $): Promise<void> => {
     if (!s || s.v !== 1) continue
     const age = now - s.heartbeat
     if (s.state === 'ended' ? age > ENDED_KEEP_MS : age > STALE_MS) continue
+    // Another session wrote it: a request's texts are drawn only as the strings they should be.
+    const str = (v: unknown): string | undefined => (typeof v === 'string' ? v : undefined)
+    s.requests = (Array.isArray(s.requests) ? s.requests : [])
+      .filter(r => r && typeof r.id === 'string')
+      .map(r => ({ ...r, tool: str(r.tool), command: str(r.command), rule: str(r.rule), text: str(r.text), summary: str(r.summary), decision: str(r.decision) }))
     // A session idle while its subagents work is still at work.
     if (s.state === 'idle' && s.agents.some(a => a.status === 'running')) s.state = 'running'
     all.push(s)
@@ -517,18 +528,22 @@ export const register: Register = (on, options) => {
     if (!e.agentId) {
       isBusy = true
       wrap = null
-      // A new turn supersedes what the session asked or reported last time, whether the answer came
-      // from the pane or was typed in the session itself. Permissions stay: only the pane grants them.
-      await retire($, r => r.kind === 'questions' || r.kind === 'choice' || r.kind === 'report')
+      turnStartedAt = Date.now()
     }
     return next(e)
   })
 
-  // What the person types in the session answers what the session waits on there: a protected
-  // command it asked for is retired, and asked again, as a new card, if the session tries it again.
+  // What the person types in the session answers what the session waits on there: its questions,
+  // choice and report, and a protected command it asked for (asked again, as a new card, if the session
+  // tries it again). Not a slash command, a turn a notification or another session started, nor the
+  // mod's own answer messages. A card the pane already answered stays until its answer is applied.
   on('prompt.submit', async ($, e, next) => {
     const kind = e.origin?.kind
-    if (!e.isMeta && (kind === 'composer' || kind === 'sdk' || kind === 'bridge')) await retire($, r => r.kind === 'permission')
+    if (ownPrompts.delete(e.text)) return next(e)
+    if (!e.isMeta && !e.command && (kind === 'composer' || kind === 'sdk' || kind === 'bridge')) {
+      const answered = new Set(((await readJson<Answer[]>($, `${base}/answers/${sessionId}.json`)) ?? []).map(a => a.requestId))
+      await retire($, r => (r.kind === 'permission' || r.kind === 'questions' || r.kind === 'choice' || r.kind === 'report') && !answered.has(r.id))
+    }
     return next(e)
   }).catch(($, e, next) => next(e))
 
@@ -538,14 +553,18 @@ export const register: Register = (on, options) => {
     await retire($, r => r.kind === 'ask' && r.agentId === e.agentId)
     if (e.agentId) return done
     isBusy = false
-    if (forward && !e.isAborted) {
+    if (forward && !e.isAborted && e.answer.trim()) {
+      // A turn that ends saying something new supersedes what the session asked or reported before it
+      // (its answer may have come through another session); a choice asked during this turn stays.
+      const asked = (r: MonitorRequest) => r.kind === 'questions' || r.kind === 'choice' || r.kind === 'report'
+      await retire($, r => asked(r) && r.createdAt < turnStartedAt)
       const m = QUESTIONS_HEADING.exec(e.answer)
       if (m) {
         const rest = e.answer.slice(m.index + m[0].length)
         const end = rest.search(/^#{1,3}\s/m)
         const text = (end >= 0 ? rest.slice(0, end) : rest).trim()
         if (text) await addRequest($, { id: newId(), kind: 'questions', createdAt: Date.now(), text })
-      } else if (e.answer.trim() && !(await read($, local)).requests.length) {
+      } else if (!(await read($, local)).requests.length) {
         // A report with no questions section: shown, marked when it waits for a go-ahead. One that
         // ends a turn waiting on a card already in the pane would only repeat it.
         const text = e.answer.trim()
@@ -589,7 +608,7 @@ export const register: Register = (on, options) => {
       const ctx = (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0) + (u.output_tokens || 0)
       // Haiku 4.5 and the Claude 3 models have a 200K window; the rest 1M.
       const max = /haiku-4|claude-3/i.test(u.model || e.model || '') ? 200_000 : 1_000_000
-      agentUse.set(e.agentId, { ctx, max, tokens: (agentUse.get(e.agentId)?.tokens ?? 0) + ctx })
+      agentUse.set(e.agentId, { ctx, max })
     }
     return result
   })
@@ -972,7 +991,7 @@ export const register: Register = (on, options) => {
       const meta = [prettyModel(s.model), s.effort ? (S.effort[s.effort] ?? s.effort) : '', s.contextPct !== undefined ? `ctx ${fmtPct(s.contextPct)}` : '']
         .filter(Boolean)
         .join(' · ')
-      const ask = s.requests[0]
+      const ask = s.requests.find(r => r.kind !== 'report' || r.awaits)
       const asks =
         // The command itself is on its card in the inbox, above: the session's card only says so.
         ask?.kind === 'permission' || ask?.kind === 'ask'

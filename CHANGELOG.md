@@ -2,12 +2,13 @@
 
 ## 0.5.0 — 2026-11-03
 
-- **Reports reach the pane.** A session that ends its turn with a report and no `## Questions for you` section now shows it in the inbox: one line (the desktop wrap-up's question or recap, else the report's first paragraph), the whole report and a reply box on demand, and a dismiss. A report that waits for a go-ahead (the wrap-up asked one, or the text asks for confirmation) is marked as such, gets a one-click **Go ahead**, and makes the session count as waiting. The session's next turn retires it.
-- **Permission cards answered in the session leave the pane.** An app permission answered at the session's own dialog goes once the call runs or the turn ends; a protected command goes once you type in the session itself (asked again, as a new card, if the session tries it again). A closed session's requests leave the inbox.
+- **Reports reach the pane.** A session that ends its turn with a report and no `## Questions for you` section now shows it in the inbox: one line (the desktop wrap-up's question or recap, else the report's first paragraph), the whole report and a reply box on demand, and a dismiss. A report that waits for a go-ahead (the wrap-up asked one, or the text asks for confirmation) is marked as such, gets a one-click **Go ahead**, and makes the session count as waiting. Reports are written to the local shared folder like the rest of the status.
+- **Cards answered in the session leave the pane.** An app permission answered at the session's own dialog goes once the call runs or the turn ends. Questions, choices, reports and protected commands go once you type in the session itself (not a slash command, not a turn a notification or another session started; a protected command is asked again, as a new card, if the session tries it again); a card the pane already answered is applied first, never dropped. A session's next closing message supersedes what it asked or reported before, so an answer relayed by another session clears the card too. A closed session's requests leave the inbox.
+- **Robustness**: a request's texts read from another session's status file are drawn only as strings; a session's card names the first request that actually waits on you.
 - **savvy-progress steps show up.** Workers' step bars and the orchestrator's flow stayed empty: the mod read the tools' arguments from `input`, where the engine puts them beside `tool`.
 - **Open a session from the pane.** A session's card, and each inbox card, has an **Open** button that brings that session up in the desktop app, through the app's own deep link.
 - **A permission is written out once**, on its inbox card: the waiting session's card just says it waits for one.
-- **A session stands apart from its subagents**, as in the mockup: its header is a shaded band with larger type, and each subagent is an inset, ruled-off row in smaller type, with its context, tokens and elapsed time.
+- **A session stands apart from its subagents**, as in the mockup: its header is a shaded band with larger type, and each subagent is an inset, ruled-off row in smaller type, with its context (as a share and in tokens) and elapsed time.
 
 ## 0.4.0 — 2026-11-03
 
