@@ -16,10 +16,10 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderChildren, RenderNode } from 'claude-code'
 
-import type { Answer, AnswerKind, Board, ChoiceQuestion, Local, MonitorRequest, PaneUi, PlanItem, Queues, SessionStatus } from '../types'
+import type { AgentRow, Answer, AnswerKind, Board, ChoiceOption, ChoiceQuestion, Local, MonitorRequest, PaneUi, PlanItem, Queues, SessionStatus } from '../types'
 import { CRAB_H, TIER_COLOR, TIER_MODEL, crabSvg, hatFor, tierOf } from './crab'
 import { QUESTIONS_HEADING, asksGoAhead, pickStrings, type Strings } from './i18n'
-import { lineCount, viewOf } from './request'
+import { lineCount, viewOf, visible } from './request'
 import { compileRules, criticalIn, matchRule, type Rule, type RulesFile } from './rules'
 
 const PANE = 'coordinator-monitor'
@@ -29,7 +29,7 @@ const FAST_MS = 1000
 const STALE_MS = 15 * 60 * 1000
 const ENDED_KEEP_MS = 60 * 60 * 1000
 /** Published in every status, so the pane can flag a session still running an older copy. Keep in step with plugin.json. */
-const MOD_VERSION = '0.6.0'
+const MOD_VERSION = '0.6.1'
 const SHELL_TOOLS = new Set(['Bash', 'PowerShell'])
 const STEP_TOOL = 'mcp__savvy-progress__step'
 const FLOW_TOOL = 'mcp__savvy-progress__progress'
@@ -243,7 +243,7 @@ const applyAnswers = async ($: $): Promise<void> => {
     a => !l.applied.includes(a.requestId) && !holding.has(a.requestId) && l.requests.some(r => r.id === a.requestId && r.kind !== 'ask'),
   )
   if (!fresh.length) return
-  const prompts: string[] = []
+  const prompts: { text: string; agentId?: string }[] = []
   const notes: string[] = []
   await update($, local, cur => {
     const next: Local = { ...cur, requests: [...cur.requests], grantsOnce: [...cur.grantsOnce], grantsSession: [...cur.grantsSession], applied: [...cur.applied] }
@@ -254,29 +254,43 @@ const applyAnswers = async ($: $): Promise<void> => {
       next.applied = [...next.applied, a.requestId].slice(-300)
       // Fenced: the command is the session's text, sent on in the person's voice.
       const cmd = fence(req.command ?? '')
+      const to = req.agentId
       if (a.kind === 'approve-once') {
         next.grantsOnce.push(grantKey(req))
-        prompts.push(S.approvedMsg(cmd, true))
+        prompts.push({ text: S.approvedMsg(cmd, true), agentId: to })
       } else if (a.kind === 'approve-session') {
         next.grantsSession.push(grantKey(req))
-        prompts.push(S.approvedMsg(cmd, false))
+        prompts.push({ text: S.approvedMsg(cmd, false), agentId: to })
       } else if (a.kind === 'deny') {
-        prompts.push(S.deniedMsg(cmd))
+        prompts.push({ text: S.deniedMsg(cmd), agentId: to })
       } else if (a.kind === 'read') {
         // A note, not a prompt: it starts no turn, so nothing answers it and no report follows it.
         notes.push(S.readMsg(fmtTime(req.createdAt)))
       } else if (a.text?.trim()) {
-        prompts.push(req.kind === 'report' ? S.reportReplyMsg(a.text.trim()) : S.answerMsg(a.text.trim()))
+        prompts.push({ text: req.kind === 'report' ? S.reportReplyMsg(a.text.trim()) : S.answerMsg(a.text.trim()), agentId: to })
       }
     }
     return next
   })
   for (const text of notes) await appendNote($, text)
-  for (const text of prompts) {
+  for (const p of prompts) {
+    // A subagent's request is answered to that agent. Only when it cannot be reached does the parent
+    // hear of it, told whose it is, so the parent does not run another agent's command as its own.
+    if (p.agentId) {
+      const sent = await $.session.send({ to: { agentId: p.agentId }, text: p.text }).catch(() => ({ isDelivered: false }))
+      if (sent.isDelivered) continue
+    }
+    const text = p.agentId ? S.forAgentMsg(await agentLabel($, p.agentId), p.text) : p.text
     ownPrompts.add(text)
     await $.prompt.submit({ text, asUser: true })
   }
   await publish($)
+}
+
+/** A subagent as its parent knows it: its id and the description it was started with, quoted. */
+const agentLabel = async ($: $, id: string): Promise<string> => {
+  const a = (await $.agent.list().catch(() => [])).find(x => x.id === id)
+  return JSON.stringify(visible(a?.description ? `${id} (${a.description})` : id))
 }
 
 /** A row the model reads at its next request, in a running turn or the next one, without starting one. */
@@ -297,7 +311,9 @@ const askWhat = (input: unknown): string => {
   return Object.keys(rest).length === 1 && typeof rest.command === 'string' ? rest.command : JSON.stringify(sortKeys(rest), null, 2)
 }
 const askKey = (tool: string, what: string): string => `ask\u0000${tool}\u0000${what}`
-const grantKey = (r: MonitorRequest): string => (r.kind === 'ask' ? askKey(r.tool ?? '', r.command ?? '') : (r.command ?? ''))
+/** A grant belongs to whoever asked: a subagent's serves that agent alone, never its parent or another agent. */
+const scoped = (agentId: string | undefined, key: string): string => (agentId ? `agent\u0000${agentId}\u0000${key}` : key)
+const grantKey = (r: MonitorRequest): string => scoped(r.agentId, r.kind === 'ask' ? askKey(r.tool ?? '', r.command ?? '') : (r.command ?? ''))
 
 // How long an app ask waits for the pane before the app's own dialog takes it (a process waits ten minutes at most).
 const ASK_WAIT_MS = 9 * 60_000
@@ -476,17 +492,48 @@ const gather = async ($: $): Promise<void> => {
     if (!s || s.v !== 1) continue
     const age = now - s.heartbeat
     if (s.state === 'ended' ? age > ENDED_KEEP_MS : age > STALE_MS) continue
-    // Another session wrote it: a request's texts are drawn only as the strings they should be.
+    // Another session wrote it: its texts are drawn only as the strings they should be, every hidden
+    // character as a code. The command stays as written: the card reads it, then draws it the same way.
     const str = (v: unknown): string | undefined => (typeof v === 'string' ? v : undefined)
-    s.requests = (Array.isArray(s.requests) ? s.requests : [])
-      .filter(r => r && typeof r.id === 'string')
-      .map(r => ({ ...r, tool: str(r.tool), command: str(r.command), rule: str(r.rule), text: str(r.text), summary: str(r.summary), decision: str(r.decision), explain: str(r.explain) }))
-    s.plan = (Array.isArray(s.plan) ? s.plan : [])
+    const txt = (v: unknown): string | undefined => (typeof v === 'string' ? visible(v) : undefined)
+    const arr = <T,>(v: unknown): T[] => (Array.isArray(v) ? (v as T[]) : [])
+    s.requests = arr<MonitorRequest>(s.requests)
+      // An id ends up in keys, answers and notes: the mod makes them short and plain, so nothing else is one.
+      .filter(r => r && typeof r.id === 'string' && /^[\w-]{1,40}$/.test(r.id))
+      .map(r => ({
+        ...r,
+        tool: txt(r.tool),
+        command: str(r.command),
+        rule: txt(r.rule),
+        text: txt(r.text),
+        summary: txt(r.summary),
+        decision: txt(r.decision),
+        explain: txt(r.explain),
+        agentId: str(r.agentId),
+        questions: arr<ChoiceQuestion>(r.questions)
+          .filter(q => q && typeof q === 'object')
+          .map(q => ({
+            header: txt(q.header),
+            question: txt(q.question) ?? '',
+            multiSelect: !!q.multiSelect,
+            options: arr<ChoiceOption>(q.options)
+              .filter(o => o && typeof o === 'object')
+              .map(o => ({ label: txt(o.label) ?? '', description: txt(o.description) })),
+          })),
+      }))
+    s.plan = arr<PlanItem>(s.plan)
       .filter(p => p && typeof p.text === 'string')
-      .map(p => ({ text: p.text, status: p.status === 'completed' || p.status === 'in_progress' ? p.status : 'pending' }))
-    s.queue = own(queues, s.sessionId)
+      .map(p => ({ text: visible(p.text), status: p.status === 'completed' || p.status === 'in_progress' ? p.status : 'pending' }))
+    s.queue = own(queues, s.sessionId)?.map(visible)
+    s.agents = arr<AgentRow>(s.agents)
+      .filter(a => a && typeof a.id === 'string')
+      .map(a => ({ ...a, type: txt(a.type) ?? '', description: txt(a.description) ?? '', status: str(a.status) ?? '', stepNote: txt(a.stepNote) }))
+    s.flow = s.flow && typeof s.flow === 'object' ? { ...s.flow, title: txt(s.flow.title) ?? '', phase: txt(s.flow.phase) } : null
+    s.title = txt(s.title) ?? s.sessionId
+    s.folder = txt(s.folder)
+    s.model = txt(s.model) ?? ''
     if (!STATES.has(s.state)) s.state = 'idle'
-    s.effort = str(s.effort)
+    s.effort = txt(s.effort)
     // A session idle while its subagents work is still at work.
     if (s.state === 'idle' && s.agents.some(a => a.status === 'running')) s.state = 'running'
     all.push(s)
@@ -498,7 +545,7 @@ const gather = async ($: $): Promise<void> => {
     const m = desk.get(s.sessionId)
     if (m?.title?.trim() && m.title.trim() !== s.title) {
       s.folder ??= s.title
-      s.title = m.title.trim()
+      s.title = visible(m.title.trim())
     }
     if (!s.effort && m?.effort) s.effort = m.effort
     s.localId = m?.localId
@@ -522,7 +569,9 @@ const answer = async ($: $, target: SessionStatus, req: MonitorRequest, kind: An
   await update($, paneUi, u => ({ ...u, sent: [...u.sent, req.id].slice(-300) }))
   await postAnswer($, target, { requestId: req.id, at: Date.now(), kind, text })
   // The session the pane sits in (the coordinator) keeps a record of every answer, read at its next request.
-  if (target.sessionId !== sessionId) await appendNote($, S.answeredMsg(fmtTime(Date.now()), target.title, askedOf(req), answerOf(kind, text)))
+  // It carries nothing the other session wrote but its title, quoted: no question, no report text.
+  // A dismiss tells no one, so it leaves no record either.
+  if (target.sessionId !== sessionId && kind !== 'dismiss') await appendNote($, answeredNote(target, req.id, kind, text))
   $.ui.toast(S.sentToast(target.title))
   // Read again now: the session's next status shows the card gone sooner than the next tick would.
   void gather($)
@@ -561,20 +610,9 @@ const changeQueue = async ($: $, a: QueueArgs): Promise<string> => {
   return `${s.title}: ${list.length ? list.map((t, n) => `${n + 1}. ${t}`).join('\n') : 'nothing queued'}`
 }
 
-/** What a request asked, cut to a glance, for the coordinator's record: the session's own words, fenced as data. */
-const askedOf = (r: MonitorRequest): string => {
-  const what =
-    r.kind === 'permission' || r.kind === 'ask'
-      ? `${r.tool ?? 'Bash'}: ${r.command ?? ''}`
-      : r.kind === 'choice'
-        ? (r.questions ?? []).map(q => `${q.question} [${q.options.map(o => o.label).join(' / ')}]`).join('\n')
-        : r.kind === 'report'
-          ? r.decision || r.summary || r.text || ''
-          : r.text || ''
-  return fence(what.length > 600 ? `${what.slice(0, 600)}…` : what)
-}
-const answerOf = (kind: AnswerKind, text?: string): string =>
-  kind === 'answer' ? fence(text ?? '') : (S.answerKind[kind] ?? kind)
+/** The coordinator's record of one answer: the session's title as a quoted string, the request id, the person's answer. */
+const answeredNote = (s: SessionStatus, id: string, kind: AnswerKind, text?: string): string =>
+  S.answeredMsg(fmtTime(Date.now()), JSON.stringify(visible(s.title)), id, kind === 'answer' ? fence(text ?? '') : (S.answerKind[kind] ?? kind))
 
 /** The planned tasks a session shows, in the person's order: its own plan's pending ones, then the queue's. */
 const plannedOf = (s: SessionStatus, order: string[] = []): PlanItem[] => {
@@ -594,8 +632,10 @@ const movePlanned = async ($: $, s: SessionStatus, i: number, to: number): Promi
   const list = items.map(p => p.text)
   await update($, paneUi, u => ({ ...u, order: { ...u.order, [s.sessionId]: list } }))
   const text = items.map((p, n) => `${n + 1}. ${p.text}${p.from === 'queue' ? ` ${S.queuedMark}` : ''}`).join('\n')
-  await postAnswer($, s, { requestId: `order-${newId()}`, at: Date.now(), kind: 'order', text })
-  if (s.sessionId !== sessionId) await appendNote($, S.answeredMsg(fmtTime(Date.now()), s.title, fence(S.planned), fence(text)))
+  const id = `order-${newId()}`
+  await postAnswer($, s, { requestId: id, at: Date.now(), kind: 'order', text })
+  // Not the list: its tasks are the session's own words.
+  if (s.sessionId !== sessionId) await appendNote($, answeredNote(s, id, 'order'))
 }
 
 const newer = (a: string, b: string): boolean => a.localeCompare(b, undefined, { numeric: true }) > 0
@@ -930,7 +970,9 @@ export const register: Register = (on, options) => {
   // The coordinator's queue per session. The mod writes it: no session may write the bus itself.
   // Calls run one at a time, so tasks queued in parallel all land.
   on('tool.call', { tool: QUEUE_TOOL }, async ($, e) => {
-    const run = queueChain.then(() => changeQueue($, e as unknown as QueueArgs))
+    // The tool is registered in the coordinator alone; a call from anywhere else changes nothing.
+    if (!isCoordinator) return { result: 'Only the coordinator session can change the queue.' }
+    const run =queueChain.then(() => changeQueue($, e as unknown as QueueArgs))
     queueChain = run.catch(() => undefined)
     return { result: await run }
   }).catch(() => ({ result: 'coordinator-monitor could not change the queue' }))
@@ -957,7 +999,7 @@ export const register: Register = (on, options) => {
     if (!forward) return next(e)
     const what = askWhat(e.tool_input)
     if (what.length > ASK_MAX) return next(e)
-    const key = askKey(e.tool_name, what)
+    const key = scoped(e.agent_id, askKey(e.tool_name, what))
     if ((await read($, local)).grantsSession.includes(key)) return { decision: { behavior: 'allow' } }
     if (!(await coordinatorLive($))) return next(e)
     const id = newId()
@@ -991,9 +1033,10 @@ export const register: Register = (on, options) => {
     const rule = command && matchRule(rules, command)
     if (!rule) return next(e)
     const l = await read($, local)
-    if (l.grantsSession.includes(command)) return { decision: 'allow', reason: 'approved for this session from the coordinator pane' }
-    if (await takeOnce($, command)) return { decision: 'allow', reason: 'approved once from the coordinator pane' }
-    const pending = l.requests.find(r => r.kind === 'permission' && r.command === command)
+    const key = scoped(e.agentId, command)
+    if (l.grantsSession.includes(key)) return { decision: 'allow', reason: 'approved for this session from the coordinator pane' }
+    if (await takeOnce($, key)) return { decision: 'allow', reason: 'approved once from the coordinator pane' }
+    const pending = l.requests.find(r => r.kind === 'permission' && r.command === command && r.agentId === e.agentId)
     const id = pending?.id ?? newId()
     if (!pending) {
       const crit = criticalIn(critical, command)
@@ -1013,8 +1056,8 @@ export const register: Register = (on, options) => {
             ...cur,
             requests: cur.requests.filter(r => r.id !== id),
             applied: [...cur.applied, id].slice(-300),
-            grantsSession: a.kind === 'approve-session' ? [...cur.grantsSession, command] : cur.grantsSession,
-            grantsOnce: a.kind === 'approve-once' && isGone ? [...cur.grantsOnce, command] : cur.grantsOnce,
+            grantsSession: a.kind === 'approve-session' ? [...cur.grantsSession, key] : cur.grantsSession,
+            grantsOnce: a.kind === 'approve-once' && isGone ? [...cur.grantsOnce, key] : cur.grantsOnce,
           }))
           await publish($)
           return a.kind === 'deny'
@@ -1189,11 +1232,12 @@ export const register: Register = (on, options) => {
       }
       if (r.kind === 'permission' || r.kind === 'ask') {
         const what = r.command ?? ''
-        const raw = <Code key={`raw-${r.id}`} source={what} language={what.startsWith('{') ? 'json' : r.tool === 'PowerShell' ? 'powershell' : 'bash'} />
-        // A large request, or a file it writes, leads with what it does; the request itself stays a press away.
-        const view = viewOf(what)
-        const isSummed = !!view && (isLarge(what) || view.kind !== 'shell')
-        const isRawOpen = !!u.open?.[`${r.id}:raw`]
+        // Characters that hide or reorder text are drawn as codes, here and in the summary.
+        const raw = <Code key={`raw-${r.id}`} source={visible(what)} wrap="wrap" language={what.startsWith('{') ? 'json' : r.tool === 'PowerShell' ? 'powershell' : 'bash'} />
+        // A large request, or a file it writes, gets a reading aid on top: its steps as the asking tool's
+        // shell reads them, or the file's path and code. None where the split is not certain.
+        const view = viewOf(r.tool ?? 'Bash', what)
+        const isAided = !!view && (isLarge(what) || view.kind !== 'shell')
         const HEAD_LINES = 12
         const summary: RenderChildren = !view ? null : view.kind === 'shell' ? (
           <Box flexDirection="column" gap="xs">
@@ -1205,29 +1249,25 @@ export const register: Register = (on, options) => {
                 <Box key={`risk-${r.id}-${k}`}>{tag(S.risk[k] ?? k, RISK_COLOR[k] ?? BLUE)}</Box>
               ))}
             </Box>
-            {view.steps.slice(0, 15).map((st, i) => (
-              <Text key={`st-${r.id}-${i}`} size="footnote" wrap="truncate-end">
+            {/* Every step, whole: a cut one could hide what runs after the cut. */}
+            {view.steps.map((st, i) => (
+              <Text key={`st-${r.id}-${i}`} size="footnote" wrap="wrap">
                 <Text color="subtle">{`${i + 1}. `}</Text>
-                {st.length > 160 ? `${st.slice(0, 160)}…` : st}
+                {visible(st)}
               </Text>
             ))}
-            {view.steps.length > 15 ? (
-              <Text size="caption" color="subtle">
-                {`+${view.steps.length - 15}`}
-              </Text>
-            ) : null}
           </Box>
         ) : (
           <Box flexDirection="column" gap="xs">
             <Text size="footnote">
               <Text color="subtle">{`${view.kind === 'write' ? S.writes : S.edits} `}</Text>
-              <Text weight="semibold">{view.path}</Text>
+              <Text weight="semibold">{visible(view.path)}</Text>
               <Text color="subtle">{view.kind === 'write' ? ` · ${S.lines(lineCount(view.content))}` : view.isEveryMatch ? ` ${S.everyMatch}` : ''}</Text>
             </Text>
             {view.kind === 'write' ? (
-              <Code key={`body-${r.id}`} source={view.content.split('\n').slice(0, HEAD_LINES).join('\n')} path={view.path} startLine={1} />
+              <Code key={`body-${r.id}`} source={visible(view.content.split('\n').slice(0, HEAD_LINES).join('\n'))} path={view.path} startLine={1} />
             ) : (
-              <Code key={`body-${r.id}`} source={view.diff} format="diff" path={view.path} />
+              <Code key={`body-${r.id}`} source={visible(view.diff)} format="diff" path={view.path} />
             )}
             {view.kind === 'write' && lineCount(view.content) > HEAD_LINES ? (
               <Text size="caption" color="subtle">
@@ -1239,12 +1279,16 @@ export const register: Register = (on, options) => {
         return shell(
           <Box flexDirection="column" gap="sm">
             {head(S.permission, `${s.title} · ${r.tool ?? 'Bash'}`)}
-            {isSummed ? summary : raw}
-            {isSummed ? (
-              <Text size="caption" color="subtle">
-                {S.partialSummary}
-              </Text>
+            {/* A reading aid above the request, never in its place: the request itself is what is approved. */}
+            {isAided ? (
+              <Box flexDirection="column" gap="xs" padding="sm" borderStyle="round" borderColor={isTerm ? undefined : '#FFFFFF1F'} borderDimColor={isTerm}>
+                <Text size="caption" color="subtle">
+                  {S.readingAid}
+                </Text>
+                {summary}
+              </Box>
             ) : null}
+            {/* Written from the request itself, as unverified as the aid. */}
             {r.explain ? (
               <Box flexDirection="column" gap="xs" padding="sm" borderStyle="round" borderColor={isTerm ? undefined : '#7F77DD66'} borderDimColor={isTerm} backgroundColor={fill('#7F77DD14')}>
                 <Text size="caption" weight="semibold" color="#B3ADF0">
@@ -1256,23 +1300,14 @@ export const register: Register = (on, options) => {
                 </Text>
               </Box>
             ) : null}
-            {isSummed ? (
-              <Box flexDirection="column" gap="xs">
-                <Box flexDirection="row" gap="sm" alignItems="center" justifyContent="space-between">
-                  <Text size="caption" color="subtle">
-                    {S.commandSize(lineCount(what), what.length)}
-                  </Text>
-                  <Button
-                    key={`raw-${r.id}-b`}
-                    plain
-                    dimColor
-                    label={isRawOpen ? `▾ ${S.hideCommand}` : `▸ ${S.showCommand}`}
-                    onPress={() => void update($, paneUi, cur => ({ ...cur, open: { ...cur.open, [`${r.id}:raw`]: !isRawOpen } }))}
-                  />
-                </Box>
-                {isRawOpen ? raw : null}
-              </Box>
-            ) : null}
+            {/* The whole request, always shown, wrapped, never cut. */}
+            <Box flexDirection="column" gap="xs">
+              {/* Always: its size gives away a tail that blank lines or a comment push out of sight. */}
+              <Text size="caption" color="subtle">
+                {`${S.fullRequest} · ${view?.kind === 'shell' ? `${S.steps(view.steps.length)} · ` : ''}${S.commandSize(lineCount(what), what.length)}`}
+              </Text>
+              {raw}
+            </Box>
             {r.rule ? (
               <Text size="footnote" color={r.rule.includes('·') ? 'warning' : 'subtle'}>
                 {r.rule.includes('·') ? `${r.rule} — ${S.critical}` : r.rule}
