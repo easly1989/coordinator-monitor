@@ -541,8 +541,12 @@ describe('a session reporting', () => {
 
     await $.command.run({ command: 'agents-monitor', args: '' } as never)
     // The coordinator queues a task for the session by its title; the pane shows it among the planned.
-    const q = (await $.tool.call({ tool: 'mcp__coordinator-monitor__queue', action: 'add', session: 'project', text: 'Benchmark the parser' } as never)) as { result?: string }
-    expect(q.result).toMatch(/1\. Benchmark the parser/)
+    // Two queued at once both land; a name that matches nothing changes nothing.
+    const queue = (args: object) => $.tool.call({ tool: 'mcp__coordinator-monitor__queue', ...args } as never) as Promise<{ result?: string }>
+    await Promise.all([queue({ action: 'add', session: 'project', text: 'Benchmark the parser' }), queue({ action: 'add', session: 'proj', text: 'Profile the cache' })])
+    expect((await queue({ action: 'list', session: 'project' })).result).toMatch(/1\. Benchmark the parser\n2\. Profile the cache/)
+    expect((await queue({ action: 'add', session: 'nowhere', text: 'x' })).result).toMatch(/No session/)
+    expect((await queue({ action: 'remove', session: 'project', text: 'Profile' })).result).not.toMatch(/Profile/)
     await $.command.run({ command: 'agents-monitor', args: '' } as never)
     const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
     expect((await ui.find({ key: 'tasks-me' }))?.text).toMatch(/TASKS · 1 in progress · 3 planned · ✓ 1 done/)
@@ -555,8 +559,12 @@ describe('a session reporting', () => {
     const before = prompts.length
     await ui.press({ key: 'down-me-0' })
     await settle()
-    expect(notes.at(-1)).toMatch(/1\. Cut the release\\n2\. Update the docs\\n3\. Benchmark the parser/)
+    expect(notes.at(-1)).toMatch(/1\. Cut the release\\n2\. Update the docs\\n3\. Benchmark the parser \(queued by the coordinator\)/)
     expect(prompts.length).toBe(before)
+    // A move that moves nothing tells nobody.
+    await ui.press({ key: 'up-me-0' })
+    await settle()
+    expect(notes.length).toBe(1)
     expect((await ui.find({ key: 'pl-me-0' }))?.text).toMatch(/Cut the release/)
     // A new plan keeps the order for the tasks it still has.
     await $.tool.call({ tool: 'mcp__ccd_turn__update_plan', done: [2], start: 3 } as never)

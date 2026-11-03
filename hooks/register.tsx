@@ -230,8 +230,13 @@ const applyAnswers = async ($: $): Promise<void> => {
   const l = await read($, local)
   // The person's order for the planned tasks: a note the model reads at its next request, no turn of its own.
   for (const a of answers.filter(x => x.kind === 'order' && x.text && !l.applied.includes(x.requestId))) {
-    await update($, local, cur => ({ ...cur, applied: [...cur.applied, a.requestId].slice(-300) }))
-    await appendNote($, S.orderMsg(a.text ?? ''))
+    // Claimed atomically: the pane's own call and the tick may both get here.
+    let isMine = false
+    await update($, local, cur => {
+      isMine = !cur.applied.includes(a.requestId)
+      return isMine ? { ...cur, applied: [...cur.applied, a.requestId].slice(-300) } : cur
+    })
+    if (isMine) await appendNote($, S.orderMsg(a.text ?? ''))
   }
   // An app ask, and a protected command held in its call, are answered by the hook that waits on them.
   const fresh = answers.filter(
@@ -449,14 +454,19 @@ const openSession = async ($: $, localId: string): Promise<boolean> => {
 // The pane's side: gather every session, write answers.
 
 const queuesPath = (): string => `${base}/queues.json`
-const readQueues = async ($: $): Promise<Queues> => {
+/** The queues as stored; `null` when the file is there but unreadable, so nothing writes over it. */
+const readQueues = async ($: $): Promise<Queues | null> => {
   const q = await readJson<Queues>($, queuesPath())
-  return q && typeof q === 'object' ? Object.fromEntries(Object.entries(q).map(([k, v]) => [k, Array.isArray(v) ? v.filter(x => typeof x === 'string') : []])) : {}
+  if (!q || typeof q !== 'object' || Array.isArray(q)) return (await $.fs.exists(queuesPath()).catch(() => false)) ? null : {}
+  return Object.fromEntries(Object.entries(q).map(([k, v]) => [k, Array.isArray(v) ? v.filter(x => typeof x === 'string') : []]))
 }
+/** `o[k]` for a key read from another session's file: an own property only, never `constructor` and kin. */
+const own = <T,>(o: Record<string, T> | undefined, k: string): T | undefined => (o && Object.hasOwn(o, k) ? o[k] : undefined)
+const STATES = new Set<string>(['running', 'idle', 'waiting', 'ended'])
 
 const gather = async ($: $): Promise<void> => {
   const entries = await $.fs.list(`${base}/sessions`).catch(() => [])
-  const queues = await readQueues($)
+  const queues = (await readQueues($)) ?? {}
   const now = Date.now()
   const all: SessionStatus[] = []
   for (const entry of entries) {
@@ -474,7 +484,9 @@ const gather = async ($: $): Promise<void> => {
     s.plan = (Array.isArray(s.plan) ? s.plan : [])
       .filter(p => p && typeof p.text === 'string')
       .map(p => ({ text: p.text, status: p.status === 'completed' || p.status === 'in_progress' ? p.status : 'pending' }))
-    s.queue = queues[s.sessionId]
+    s.queue = own(queues, s.sessionId)
+    if (!STATES.has(s.state)) s.state = 'idle'
+    s.effort = str(s.effort)
     // A session idle while its subagents work is still at work.
     if (s.state === 'idle' && s.agents.some(a => a.status === 'running')) s.state = 'running'
     all.push(s)
@@ -516,6 +528,39 @@ const answer = async ($: $, target: SessionStatus, req: MonitorRequest, kind: An
   void gather($)
 }
 
+type QueueArgs = { action?: string; session?: string; text?: string }
+let queueChain: Promise<unknown> = Promise.resolve()
+
+/**
+ * The coordinator's `queue` tool. A session is named by its id or exact title; a part of a title only
+ * when one live session other than the coordinator has it, else the candidates are listed back.
+ */
+const changeQueue = async ($: $, a: QueueArgs): Promise<string> => {
+  const q = String(a.session ?? '').trim().toLowerCase()
+  const all = (await read($, board)).sessions
+  const live = all.filter(x => !x.isCoordinator && x.state !== 'ended')
+  const exact = all.find(x => x.sessionId === a.session || x.localId === a.session) ?? all.find(x => x.title.toLowerCase() === q)
+  const partial = q ? live.filter(x => x.title.toLowerCase().includes(q)) : []
+  const s = exact ?? (partial.length === 1 ? partial[0] : undefined)
+  if (!s) return partial.length > 1 ? S.queueAmbiguous(a.session ?? '', partial.map(x => `«${x.title}»`).join(', ')) : `No session in the pane matches "${a.session ?? ''}".`
+  const queues = await readQueues($)
+  if (!queues) return S.queueBroken
+  const list = [...(own(queues, s.sessionId) ?? [])]
+  const text = String(a.text ?? '').replace(/\s+/g, ' ').trim().slice(0, 200)
+  if (a.action === 'add' && text) list.push(text)
+  if (a.action === 'remove') {
+    const hits = list.filter(t => text && t.toLowerCase().includes(text.toLowerCase()))
+    const i = list.indexOf(text) >= 0 ? list.indexOf(text) : hits.length === 1 ? list.indexOf(hits[0] ?? '') : -1
+    if (i < 0) return hits.length > 1 ? S.queueAmbiguous(text, hits.map(t => `"${t}"`).join(', ')) : `"${text}" is not queued for ${s.title}.`
+    list.splice(i, 1)
+  }
+  if (a.action === 'add' || a.action === 'remove') {
+    await $.fs.write(queuesPath(), JSON.stringify({ ...queues, [s.sessionId]: list }))
+    void gather($)
+  }
+  return `${s.title}: ${list.length ? list.map((t, n) => `${n + 1}. ${t}`).join('\n') : 'nothing queued'}`
+}
+
 /** What a request asked, cut to a glance, for the coordinator's record: the session's own words, fenced as data. */
 const askedOf = (r: MonitorRequest): string => {
   const what =
@@ -534,18 +579,21 @@ const answerOf = (kind: AnswerKind, text?: string): string =>
 /** The planned tasks a session shows, in the person's order: its own plan's pending ones, then the queue's. */
 const plannedOf = (s: SessionStatus, order: string[] = []): PlanItem[] => {
   const items: PlanItem[] = [...(s.plan ?? []).filter(p => p.status === 'pending'), ...(s.queue ?? []).map(text => ({ text, status: 'pending' as const, from: 'queue' as const }))]
-  const at = (p: PlanItem) => (order.includes(p.text) ? order.indexOf(p.text) : order.length + items.indexOf(p))
-  return items.sort((a, b) => at(a) - at(b))
+  // shortcut: the order is kept by text, so two tasks with the same text keep their own order between them.
+  const at = new Map(items.map((p, n) => [p, order.includes(p.text) ? order.indexOf(p.text) : order.length + n]))
+  return items.sort((a, b) => (at.get(a) ?? 0) - (at.get(b) ?? 0))
 }
 
 /** Moves planned task `i` of session `s` to `to`, keeps the order, and tells the session. */
 const movePlanned = async ($: $, s: SessionStatus, i: number, to: number): Promise<void> => {
-  const list = plannedOf(s, (await read($, paneUi)).order?.[s.sessionId]).map(p => p.text)
-  const [moved] = list.splice(i, 1)
-  if (moved === undefined) return
-  list.splice(Math.max(0, Math.min(list.length, to)), 0, moved)
+  const items = plannedOf(s, own((await read($, paneUi)).order, s.sessionId))
+  const at = Math.max(0, Math.min(items.length - 1, to))
+  if (at === i || !items[i]) return
+  const [moved] = items.splice(i, 1)
+  if (moved) items.splice(at, 0, moved)
+  const list = items.map(p => p.text)
   await update($, paneUi, u => ({ ...u, order: { ...u.order, [s.sessionId]: list } }))
-  const text = list.map((t, n) => `${n + 1}. ${t}`).join('\n')
+  const text = items.map((p, n) => `${n + 1}. ${p.text}${p.from === 'queue' ? ` ${S.queuedMark}` : ''}`).join('\n')
   await postAnswer($, s, { requestId: `order-${newId()}`, at: Date.now(), kind: 'order', text })
   if (s.sessionId !== sessionId) await appendNote($, S.answeredMsg(fmtTime(Date.now()), s.title, fence(S.planned), fence(text)))
 }
@@ -738,6 +786,13 @@ export const register: Register = (on, options) => {
     if (ownPrompts.delete(e.text)) return next(e)
     if (!e.isMeta && !e.command && (kind === 'composer' || kind === 'sdk' || kind === 'bridge')) {
       const answered = new Set(((await readJson<Answer[]>($, `${base}/answers/${sessionId}.json`)) ?? []).map(a => a.requestId))
+      // A protected command held in its call stops waiting too: the person is answering here.
+      const held = (await read($, local)).requests.filter(r => r.kind === 'permission' && holding.has(r.id) && !answered.has(r.id))
+      if (held.length) {
+        const path = `${base}/answers/${sessionId}.json`
+        const prev = (await readJson<Answer[]>($, path)) ?? []
+        await $.fs.write(path, JSON.stringify([...prev, ...held.map(r => ({ requestId: r.id, at: Date.now(), kind: 'dismiss' as const }))]))
+      }
       await retire($, r => (r.kind === 'permission' || r.kind === 'questions' || r.kind === 'choice' || r.kind === 'report') && !answered.has(r.id))
     }
     return next(e)
@@ -873,28 +928,11 @@ export const register: Register = (on, options) => {
   }).catch(($, e, next) => next(e))
 
   // The coordinator's queue per session. The mod writes it: no session may write the bus itself.
+  // Calls run one at a time, so tasks queued in parallel all land.
   on('tool.call', { tool: QUEUE_TOOL }, async ($, e) => {
-    const a = e as unknown as { action?: string; session?: string; text?: string }
-    const q = String(a.session ?? '').trim().toLowerCase()
-    const all = (await read($, board)).sessions
-    const s = q
-      ? (all.find(x => x.sessionId === a.session || x.localId === a.session) ?? all.find(x => x.title.toLowerCase() === q) ?? all.find(x => x.title.toLowerCase().includes(q)))
-      : undefined
-    if (!s) return { result: `No session in the pane matches "${a.session ?? ''}".` }
-    const queues = await readQueues($)
-    const list = [...(queues[s.sessionId] ?? [])]
-    const text = String(a.text ?? '').replace(/\s+/g, ' ').trim().slice(0, 200)
-    if (a.action === 'add' && text) list.push(text)
-    if (a.action === 'remove') {
-      const i = list.indexOf(text) >= 0 ? list.indexOf(text) : list.findIndex(t => text && t.toLowerCase().includes(text.toLowerCase()))
-      if (i < 0) return { result: `"${text}" is not queued for ${s.title}.` }
-      list.splice(i, 1)
-    }
-    if (a.action === 'add' || a.action === 'remove') {
-      await $.fs.write(queuesPath(), JSON.stringify({ ...queues, [s.sessionId]: list }))
-      void gather($)
-    }
-    return { result: `${s.title}: ${list.length ? list.map((t, n) => `${n + 1}. ${t}`).join('\n') : 'nothing queued'}` }
+    const run = queueChain.then(() => changeQueue($, e as unknown as QueueArgs))
+    queueChain = run.catch(() => undefined)
+    return { result: await run }
   }).catch(() => ({ result: 'coordinator-monitor could not change the queue' }))
 
   // Multiple-choice questions go to the pane instead of a dialog nobody watches.
@@ -959,29 +997,32 @@ export const register: Register = (on, options) => {
     const id = pending?.id ?? newId()
     if (!pending) {
       const crit = criticalIn(critical, command)
-      await addRequest($, { id, kind: 'permission', createdAt: Date.now(), tool: e.tool, command, rule: crit ? `${rule.label} · ${crit}` : rule.label, agentId: e.agentId })
-      void explainLater($, id, e.tool, command)
       // With a coordinator there, the call waits a while for its answer, as at the app's dialog: an
       // approval then runs it at once, with no new turn. Unanswered, it is refused and waits as before.
-      if (await coordinatorLive($)) {
-        holding.add(id)
-        try {
-          const a = await waitAnswer($, id, HOLD_MS)
-          if (a?.kind === 'approve-once' || a?.kind === 'approve-session' || a?.kind === 'deny') {
-            await update($, local, cur => ({
-              ...cur,
-              requests: cur.requests.filter(r => r.id !== id),
-              applied: [...cur.applied, id].slice(-300),
-              grantsSession: a.kind === 'approve-session' ? [...cur.grantsSession, command] : cur.grantsSession,
-            }))
-            await publish($)
-            return a.kind === 'deny'
-              ? { decision: 'deny', reason: S.deniedMsg(fence(command)) }
-              : { decision: 'allow', reason: 'approved from the coordinator pane' }
-          }
-        } finally {
-          holding.delete(id)
+      // Held before the card exists, so no tick applies an early answer as well.
+      const isHeld = await coordinatorLive($)
+      if (isHeld) holding.add(id)
+      try {
+        await addRequest($, { id, kind: 'permission', createdAt: Date.now(), tool: e.tool, command, rule: crit ? `${rule.label} · ${crit}` : rule.label, agentId: e.agentId })
+        void explainLater($, id, e.tool, command)
+        const a = isHeld ? await waitAnswer($, id, HOLD_MS) : undefined
+        if (a?.kind === 'approve-once' || a?.kind === 'approve-session' || a?.kind === 'deny') {
+          // A call interrupted meanwhile runs nothing: an approval for it is kept for the next try.
+          const isGone = !!next.signal?.aborted
+          await update($, local, cur => ({
+            ...cur,
+            requests: cur.requests.filter(r => r.id !== id),
+            applied: [...cur.applied, id].slice(-300),
+            grantsSession: a.kind === 'approve-session' ? [...cur.grantsSession, command] : cur.grantsSession,
+            grantsOnce: a.kind === 'approve-once' && isGone ? [...cur.grantsOnce, command] : cur.grantsOnce,
+          }))
+          await publish($)
+          return a.kind === 'deny'
+            ? { decision: 'deny', reason: S.deniedMsg(fence(command)) }
+            : { decision: 'allow', reason: 'approved from the coordinator pane' }
         }
+      } finally {
+        holding.delete(id)
       }
     }
     return { decision: 'deny', reason: S.waitApproval(rule.label, id) }
@@ -1181,7 +1222,7 @@ export const register: Register = (on, options) => {
             <Text size="footnote">
               <Text color="subtle">{`${view.kind === 'write' ? S.writes : S.edits} `}</Text>
               <Text weight="semibold">{view.path}</Text>
-              <Text color="subtle">{view.kind === 'write' ? ` · ${S.lines(lineCount(view.content))}` : ''}</Text>
+              <Text color="subtle">{view.kind === 'write' ? ` · ${S.lines(lineCount(view.content))}` : view.isEveryMatch ? ` ${S.everyMatch}` : ''}</Text>
             </Text>
             {view.kind === 'write' ? (
               <Code key={`body-${r.id}`} source={view.content.split('\n').slice(0, HEAD_LINES).join('\n')} path={view.path} startLine={1} />
@@ -1199,6 +1240,11 @@ export const register: Register = (on, options) => {
           <Box flexDirection="column" gap="sm">
             {head(S.permission, `${s.title} · ${r.tool ?? 'Bash'}`)}
             {isSummed ? summary : raw}
+            {isSummed ? (
+              <Text size="caption" color="subtle">
+                {S.partialSummary}
+              </Text>
+            ) : null}
             {r.explain ? (
               <Box flexDirection="column" gap="xs" padding="sm" borderStyle="round" borderColor={isTerm ? undefined : '#7F77DD66'} borderDimColor={isTerm} backgroundColor={fill('#7F77DD14')}>
                 <Text size="caption" weight="semibold" color="#B3ADF0">
@@ -1396,7 +1442,7 @@ export const register: Register = (on, options) => {
     const sessionBlock = (s: SessionStatus): RenderNode => {
       const isCol = !!u.collapsed[s.sessionId]
       const who = [s.isCoordinator ? S.coordinator : '', s.sessionId === sessionId ? S.thisSession : ''].filter(Boolean).join(' · ')
-      const meta = [prettyModel(s.model), s.effort ? (S.effort[s.effort] ?? s.effort) : '', s.contextPct !== undefined ? `ctx ${fmtPct(s.contextPct)}` : '']
+      const meta = [prettyModel(s.model), s.effort ? (own(S.effort, s.effort) ?? s.effort) : '', s.contextPct !== undefined ? `ctx ${fmtPct(s.contextPct)}` : '']
         .filter(Boolean)
         .join(' · ')
       const ask = s.requests.find(r => r.kind !== 'report' || r.awaits)
@@ -1429,7 +1475,7 @@ export const register: Register = (on, options) => {
       const done = plan.filter(p => p.status === 'completed').length
       const total = plan.length + (s.queue?.length ?? 0)
       const now = plan.filter(p => p.status === 'in_progress')
-      const planned = plannedOf(s, u.order?.[id])
+      const planned = plannedOf(s, own(u.order, id))
       const isFolded = !!u.tasksFolded?.[id]
       // Move controls show under the pointer where there is one; always where there is none.
       const hasHover = !isTerm && e.surface !== 'mobile'

@@ -5,7 +5,7 @@
 export type RequestView =
   | { kind: 'shell'; steps: string[]; risks: string[] }
   | { kind: 'write'; path: string; content: string }
-  | { kind: 'edit'; path: string; diff: string }
+  | { kind: 'edit'; path: string; diff: string; isEveryMatch?: boolean }
 
 /** A command line split at `&&`, `||`, `;`, `|` and newlines outside quotes and `$( … )`. */
 export const stepsOf = (cmd: string): string[] => {
@@ -70,7 +70,7 @@ export const viewOf = (what: string): RequestView | null => {
     const old = input.old_string.split('\n')
     const neu = input.new_string.split('\n')
     const diff = [`@@ -1,${old.length} +1,${neu.length} @@`, ...old.map(l => `-${l}`), ...neu.map(l => `+${l}`)].join('\n')
-    return { kind: 'edit', path, diff }
+    return input.replace_all === true ? { kind: 'edit', path, diff, isEveryMatch: true } : { kind: 'edit', path, diff }
   }
   return null
 }

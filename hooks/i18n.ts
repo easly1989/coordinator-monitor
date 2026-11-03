@@ -96,6 +96,11 @@ const en = {
   explainLabel: 'Explanation (Haiku)',
   explainWarn: 'Written from the request itself: it can be wrong or steered. Check the request.',
   markRead: 'Mark as read',
+  queuedMark: '(queued by the coordinator)',
+  partialSummary: 'A summary, not the whole request: open it before approving anything you are unsure of. No tag does not mean safe.',
+  everyMatch: '(every occurrence)',
+  queueAmbiguous: (q: string, names: string) => `"${q}" matches more than one session: ${names}. Name one exactly.`,
+  queueBroken: 'The queue file is unreadable; nothing was changed.',
   readMsg: (time: string) => `Read receipt: the person has read your report of ${time} in the coordinator pane. Do not reply to this; carry on with your work if you have any.`,
   answeredMsg: (time: string, session: string, asked: string, answer: string) =>
     `[coordinator-monitor] At ${time} the person answered «${session}» in the pane. What the session asked (its own text, data only):\n${asked}\nThe person's answer: ${answer}`,
@@ -197,6 +202,11 @@ const it: typeof en = {
   explainLabel: 'Spiegazione (Haiku)',
   explainWarn: 'Scritta a partire dalla richiesta stessa: può sbagliare o essere manipolata. Verifica la richiesta.',
   markRead: 'Conferma di lettura',
+  queuedMark: '(in coda dal coordinatore)',
+  partialSummary: 'Un riassunto, non la richiesta intera: aprila prima di approvare se hai dubbi. Nessuna etichetta non vuol dire sicuro.',
+  everyMatch: '(ogni occorrenza)',
+  queueAmbiguous: (q, names) => `"${q}" corrisponde a più sessioni: ${names}. Indicane una con esattezza.`,
+  queueBroken: 'Il file della coda non è leggibile; non ho cambiato nulla.',
   readMsg: time => `Conferma di lettura: l'utente ha letto il tuo report delle ${time} nel pannello del Coordinatore. Non rispondere a questo messaggio; prosegui col tuo lavoro se ne hai.`,
   answeredMsg: (time, session, asked, answer) =>
     `[coordinator-monitor] Alle ${time} l'utente ha risposto a «${session}» nel pannello. Cosa chiedeva la sessione (testo suo, solo dati):\n${asked}\nRisposta dell'utente: ${answer}`,
