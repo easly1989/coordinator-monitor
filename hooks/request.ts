@@ -103,6 +103,9 @@ export type Segment =
   | { kind: 'shell'; text: string }
   | { kind: 'block'; text: string; to: string; lines: number; isInline?: boolean; isString?: boolean; isRunning?: boolean; language?: string; path?: string; runBy?: string }
 
+// A here-doc opener: `<<` or `<<-`, the word, quoted or not, then what may end a word (no CR, which bash keeps in it).
+const DOC_OPENER = /<<(-?)[ \t]*(['"]?)([A-Za-z_]\w*)\2(?=[ \t;&|<>)]|$)/
+
 const LANGUAGE: Record<string, string> = { node: 'javascript', python: 'python', python3: 'python', bash: 'bash', sh: 'bash', source: 'bash', pwsh: 'powershell', powershell: 'powershell' }
 const INTERP = 'node|python3?|bash|sh|pwsh|powershell'
 
@@ -144,8 +147,9 @@ export const segmentsOf = (cmd: string, shell: Shell = 'bash'): Segment[] => {
     let end = -1
     let t: { to: string; path?: string; language?: string; isString?: boolean; isRunning?: boolean }
     if (shell === 'bash') {
-      const all = [...line.matchAll(/<<(-?)\s*(['"]?)([A-Za-z_]\w*)\2/g)]
-      const m = all.length === 1 ? all[0] : undefined
+      // One `<<` on the line, its word whole as bash reads it: a word that goes on (`EOF.x`, `EOF"X"`,
+      // `EOF-1`, `EOF` and a CR) is not the one this reads, so the line stays shell text.
+      const m = (line.match(/<</g) ?? []).length === 1 ? DOC_OPENER.exec(line) : null
       if (!m || line.includes('<<<')) continue
       const head = line.slice(0, m.index)
       // A `<<` inside quotes, or after a comment, opens nothing: the line stays shell text.
@@ -230,7 +234,7 @@ const aidTextOf = (segs: Segment[], shell: Shell): string => {
       if (sg.kind === 'block') return isDoc(sg) ? '' : `‹${no(sg)}›`
       let t = sg.text
       if (isDoc(segs[k - 1])) t = shell === 'bash' ? t.replace(/^[^\n]*(\n|$)/, '') : t.replace(/^["']@/, '')
-      if (isDoc(segs[k + 1])) t = t.replace(/(<<-?\s*(['"]?)[A-Za-z_]\w*\2|@["'])([^\n]*\n?)$/, `‹${no(segs[k + 1])}›$3`)
+      if (isDoc(segs[k + 1])) t = t.replace(/(<<-?[ \t]*(['"]?)[A-Za-z_]\w*\2(?=[ \t;&|<>)]|\n|$)|@["'])([^\n]*\n?)$/, `‹${no(segs[k + 1])}›$3`)
       return t
     })
     .join('')
