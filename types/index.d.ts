@@ -14,6 +14,9 @@ export type AgentRow = {
   tokens?: number
 }
 
+/** One task of a session: from its own plan (update_plan, TodoWrite), or queued for it by the coordinator. */
+export type PlanItem = { text: string; status: 'pending' | 'in_progress' | 'completed'; from?: 'queue' }
+
 export type ChoiceOption = { label: string; description?: string }
 
 export type ChoiceQuestion = {
@@ -48,6 +51,8 @@ export type MonitorRequest = {
   decision?: string
   /** report: the session waits for the person's go-ahead before it carries on. */
   awaits?: boolean
+  /** permission, ask: a model's plain-language gloss of a large request, when the person turned that on. */
+  explain?: string
 }
 
 export type RateLimit = { kind: string; percentUsed: number; resetsAt?: string }
@@ -78,12 +83,20 @@ export type SessionStatus = {
   agents: AgentRow[]
   flow: FlowInfo | null
   requests: MonitorRequest[]
+  /** The session's own task list, as its plan tool last left it; absent before 0.6. */
+  plan?: PlanItem[]
   /** The desktop app's id for the session (`local_…`), added by the pane: it opens the session. */
   localId?: string
+  /** What the coordinator queued for it, added by the pane. */
+  queue?: string[]
 }
 
-/** `dismiss` drops a request without telling the session anything. */
-export type AnswerKind = 'approve-once' | 'approve-session' | 'deny' | 'answer' | 'dismiss'
+/**
+ * `dismiss` drops a request without telling the session anything; `read` drops a report and tells the
+ * session it was read. `order` names no request: its text is the planned tasks in the order the
+ * person set, for the session to follow.
+ */
+export type AnswerKind = 'approve-once' | 'approve-session' | 'deny' | 'answer' | 'dismiss' | 'read' | 'order'
 
 export type Answer = { requestId: string; at: number; kind: AnswerKind; text?: string }
 
@@ -95,6 +108,7 @@ export type Local = {
   grantsSession: string[]
   steps: Record<string, { done: number; total: number; note?: string }>
   flow: FlowInfo | null
+  plan?: PlanItem[]
   /** The requests this session is done with: answered from the pane, or retired. */
   applied: string[]
   /** The coordinator's version this session last reloaded its plugins to follow. */
@@ -106,9 +120,18 @@ export type PaneUi = {
   collapsed: Record<string, boolean>
   picks: Record<string, number[]>
   sent: string[]
-  /** Reports drawn whole rather than as their one-line summary. */
+  /** Reports drawn whole rather than as their one-line summary; a permission's full command (`<id>:raw`). */
   open?: Record<string, boolean>
+  /** Sessions held in place, in the person's order, above the rest. */
+  locked?: string[]
+  /** Each session's planned tasks, by text, in the order the person set. */
+  order?: Record<string, string[]>
+  /** Sessions whose task list is folded. */
+  tasksFolded?: Record<string, boolean>
 }
+
+/** What the coordinator queued per session, by session id: the mod writes it, the pane reads it. */
+export type Queues = Record<string, string[]>
 
 declare module 'claude-code' {
   interface PluginState {
