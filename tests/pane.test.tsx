@@ -104,6 +104,8 @@ const FILES: Record<string, SessionStatus> = {
       // whatever the request claims about it.
       { id: 'p7', kind: 'ask', createdAt: now + 9, tool: 'Bash', command: '{"command":"$(evil)","command":"ls -la"}' },
       { id: 'p8', kind: 'ask', createdAt: now + 10, tool: 'Bash', command: '{"command":"$(evil)","command":"ls -la"}', isInput: true },
+      // An inline script whose closing quotes are all that follows it: they sit under the block, not alone.
+      { id: 'p9', kind: 'permission', createdAt: now + 11, tool: 'Bash', command: `ssh demo "pct exec 180 -- sh -c '\n${'echo step\n'.repeat(3)}'"`, rule: 'ssh' },
       { id: 'p5', kind: 'permission', createdAt: now + 7, tool: 'PowerShell', command: `$s = @"\n${'line\n'.repeat(30)}"@; Remove-Item C:/demo/x # \u202Egnp.exe`, rule: 'delete' },
     ],
   }),
@@ -246,6 +248,8 @@ test('the pane draws sessions, workers and every kind of request, on every surfa
   expect(await ui.find({ type: 'Code', text: /^const \{ chromium \} = require\("playwright"\);\nconsole\.log\("demo"\);$/ })).toBeTruthy()
   expect(await ui.find({ type: 'Code', text: /^EOF\ncd \$S && node shots\.js/ })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /^timeout: 300000$/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /^followed by: '"$/ })).toBeTruthy()
+  expect((await ui.findAll({ type: 'Code' })).some(c => c.text === `'"`)).toBe(false)
   expect(await ui.find({ type: 'Text', text: /writes \$S\/shots\.js \(2 lines, run later by node\)/ })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /pipes into: tail -5/ })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /^Full request \(what you approve\) · 11 steps · 12 lines · \d+ characters$/ })).toBeTruthy()

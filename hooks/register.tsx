@@ -1280,17 +1280,29 @@ export const register: Register = (on, options) => {
         // A shell command is drawn in its parts, every character of it: shell text, and each block it
         // hands on whole (a here-doc, a here-string, a long inline script) under a label saying where it goes.
         // Characters that hide or reorder text are drawn as codes, here and in the aid.
+        const segs = isShell ? segmentsOf(cmd, shellKind) : []
+        // A tiny shell remnant right after a block (`'"`, `EOF`) is drawn under that block, not in a box of its own.
+        const tailOf = (k: number): string | null => {
+          const next = segs[k + 1]
+          const text = next?.kind === 'shell' ? next.text.replace(/\n$/, '') : ''
+          return segs[k]?.kind === 'block' && text.trim() && text.length < 10 && !/[\r\n]/.test(text) ? text : null
+        }
         const raw = isShell ? (
           <Box flexDirection="column" gap="xs">
-            {segmentsOf(cmd, shellKind).map((sg, k) =>
+            {segs.map((sg, k) =>
               sg.kind === 'shell' ? (
-                sg.text.trim() ? <Code key={`raw-${r.id}-${k}`} source={visible(sg.text.replace(/\n$/, ''))} wrap="wrap" language={shellKind} /> : null
+                sg.text.trim() && !tailOf(k - 1) ? <Code key={`raw-${r.id}-${k}`} source={visible(sg.text.replace(/\n$/, ''))} wrap="wrap" language={shellKind} /> : null
               ) : (
                 <Box key={`blk-${r.id}-${k}`} flexDirection="column" gap="xs" paddingLeft="sm" borderStyle="round" borderColor={isTerm ? undefined : CARD_LINE} borderDimColor={isTerm}>
                   <Text size="caption" color="subtle">
                     {visible(S.blockLabel(sg.isInline ? 'inline' : sg.isString ? 'string' : sg.path ? 'file' : 'input', sg.to, sg.lines, sg.runBy, sg.isRunning))}
                   </Text>
                   <Code key={`raw-${r.id}-${k}`} source={visible(sg.text.replace(/\n$/, ''))} wrap="wrap" language={sg.language} path={sg.path} startLine={1} />
+                  {tailOf(k) !== null ? (
+                    <Text size="caption" color="subtle">
+                      {visible(S.followedBy(tailOf(k) ?? ''))}
+                    </Text>
+                  ) : null}
                 </Box>
               ),
             )}
