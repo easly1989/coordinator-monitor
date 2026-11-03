@@ -54,9 +54,9 @@ const en = {
   rulesBroken: (path: string) => `coordinator-monitor: ${path} is not valid JSON; only the default rules apply.`,
   // what the model reads
   waitApproval: (label: string, id: string) =>
-    `This command is protected (${label}) and needs the person's approval, requested in the coordinator pane (request ${id}). Do not retry it and do not work around it: end your turn now and say what you are waiting for. The answer arrives as a new message.`,
+    `This command is protected (${label}) and needs the person's approval, requested in the coordinator pane (request ${id}). Do not retry it and do not work around it: end your turn now and say what you are waiting for. The person already sees this request as a card: do not ask for it again among your questions. The answer arrives as a new message.`,
   questionForwarded: (id: string) =>
-    `Your question was forwarded to the person through the coordinator pane (request ${id}). End your turn now without guessing the answer; it arrives as a new message.`,
+    `Your question was forwarded to the person through the coordinator pane (request ${id}). End your turn now without guessing the answer and without asking it again among your questions; it arrives as a new message.`,
   approvedMsg: (cmd: string, once: boolean) =>
     `Approved from the coordinator pane${once ? ' (this one time)' : ' (for the rest of this session)'}: you may now run\n\n${cmd}`,
   deniedMsg: (cmd: string) => `Denied from the coordinator pane: do not run\n\n${cmd}\n\nFind another way or explain what you need.`,
@@ -120,9 +120,9 @@ const it: typeof en = {
   paneOpened: 'Pannello Agenti aperto.',
   rulesBroken: path => `coordinator-monitor: ${path} non è un JSON valido; valgono solo le regole predefinite.`,
   waitApproval: (label, id) =>
-    `Questo comando è protetto (${label}) e richiede l'approvazione dell'utente, chiesta nel pannello del Coordinatore (richiesta ${id}). Non riprovarlo e non aggirarlo: chiudi il turno ora e di' cosa stai aspettando. La risposta arriverà come nuovo messaggio.`,
+    `Questo comando è protetto (${label}) e richiede l'approvazione dell'utente, chiesta nel pannello del Coordinatore (richiesta ${id}). Non riprovarlo e non aggirarlo: chiudi il turno ora e di' cosa stai aspettando. L'utente vede già questa richiesta come scheda: non chiederla di nuovo tra le tue domande. La risposta arriverà come nuovo messaggio.`,
   questionForwarded: id =>
-    `La tua domanda è stata inoltrata all'utente tramite il pannello del Coordinatore (richiesta ${id}). Chiudi il turno ora senza indovinare la risposta: arriverà come nuovo messaggio.`,
+    `La tua domanda è stata inoltrata all'utente tramite il pannello del Coordinatore (richiesta ${id}). Chiudi il turno ora senza indovinare la risposta e senza ripeterla tra le tue domande: arriverà come nuovo messaggio.`,
   approvedMsg: (cmd, once) => `Approvato dal pannello del Coordinatore${once ? ' (solo questa volta)' : ' (per il resto della sessione)'}: ora puoi eseguire\n\n${cmd}`,
   deniedMsg: cmd => `Negato dal pannello del Coordinatore: non eseguire\n\n${cmd}\n\nTrova un'altra strada o spiega cosa ti serve.`,
   answerMsg: text => `Risposta alle tue domande, inviata dal pannello del Coordinatore:\n\n${text}`,

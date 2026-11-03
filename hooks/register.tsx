@@ -26,7 +26,7 @@ const TICK_MS = 3000
 const STALE_MS = 15 * 60 * 1000
 const ENDED_KEEP_MS = 60 * 60 * 1000
 /** Published in every status, so the pane can flag a session still running an older copy. Keep in step with plugin.json. */
-const MOD_VERSION = '0.5.0'
+const MOD_VERSION = '0.5.1'
 const SHELL_TOOLS = new Set(['Bash', 'PowerShell'])
 const STEP_TOOL = 'mcp__savvy-progress__step'
 const FLOW_TOOL = 'mcp__savvy-progress__progress'
@@ -285,6 +285,39 @@ const fence = (s: string): string => {
   return `${f}\n${s}\n${f}`
 }
 
+/** A questions section's numbered items ("1. …" with the lines under it), and whatever leads them. */
+const itemsOf = (text: string): { lead: string; items: { n: number; text: string }[] } => {
+  const lead: string[] = []
+  const items: { n: number; text: string }[] = []
+  for (const line of text.split('\n')) {
+    const m = /^\s{0,3}(\d+)[.)]\s/.exec(line)
+    const last = items.at(-1)
+    if (m) items.push({ n: Number(m[1]), text: line })
+    else if (last) last.text += `\n${line}`
+    else lead.push(line)
+  }
+  return { lead: lead.join('\n'), items }
+}
+
+/**
+ * The answers an item offers as bullets opening on a bold label ("- **Not now:** …"), which the desktop
+ * draws as buttons. Two at least: a lone bold bullet ("**Warning:** …") is a remark, not a choice.
+ */
+const optionsOf = (item: string): string[] => {
+  const labels = [...item.matchAll(/^\s*[-*•]\s+\*\*(.+?)\*\*/gm)]
+    .map(m => (m[1] ?? '').replace(/:\s*$/, '').trim().slice(0, 120))
+    .filter(Boolean)
+    .slice(0, 8)
+  return labels.length >= 2 ? labels : []
+}
+
+/** The requests this session raised itself, open or done with: a closing message pointing at one repeats its card. */
+const ownIds = (l: Local): Set<string> => new Set([...l.applied, ...l.requests.filter(r => r.kind !== 'questions' && r.kind !== 'report').map(r => r.id)])
+const ASK_VERB = /\b(approv|confirm|conferm|answer|rispond|accept|accett)\w*/i
+/** Whether `text` asks the person to answer one of `ids` ("approve request <id>"), not merely mentions one. */
+const asksOwn = (text: string, ids: Set<string>): boolean =>
+  [...text.matchAll(/\b[a-z0-9]{8,16}\b/g)].some(m => ids.has(m[0]) && ASK_VERB.test(text.slice(Math.max(0, m.index - 100), m.index).split(/[.!?\n]/).pop() ?? ''))
+
 /** Takes one approve-once grant, atomically: two calls racing for one grant get it once. */
 const takeOnce = async ($: $, key: string): Promise<boolean> => {
   let took = false
@@ -322,7 +355,8 @@ const addRequest = async ($: $, req: MonitorRequest): Promise<void> => {
 /** Drops the requests `gone` picks, once the session has moved past them, and republishes. */
 const retire = async ($: $, gone: (r: MonitorRequest) => boolean): Promise<void> => {
   if (!(await read($, local)).requests.some(gone)) return
-  await update($, local, cur => ({ ...cur, requests: cur.requests.filter(r => !gone(r)) }))
+  // Kept as done with, so a later message naming one is known to point at a settled card.
+  await update($, local, cur => ({ ...cur, requests: cur.requests.filter(r => !gone(r)), applied: [...cur.applied, ...cur.requests.filter(gone).map(r => r.id)].slice(-300) }))
   void publish($)
 }
 
@@ -559,14 +593,23 @@ export const register: Register = (on, options) => {
       const asked = (r: MonitorRequest) => r.kind === 'questions' || r.kind === 'choice' || r.kind === 'report'
       await retire($, r => asked(r) && r.createdAt < turnStartedAt)
       const m = QUESTIONS_HEADING.exec(e.answer)
+      const own = ownIds(await read($, local))
       if (m) {
         const rest = e.answer.slice(m.index + m[0].length)
         const end = rest.search(/^#{1,3}\s/m)
-        const text = (end >= 0 ? rest.slice(0, end) : rest).trim()
+        const raw = (end >= 0 ? rest.slice(0, end) : rest).trim()
+        // An item asking the person to answer one of this session's own cards (approve request <id>)
+        // only repeats that card, and would outlive its answer: left out, and with it a section of only those.
+        // A section with no numbered list is judged line by line.
+        const { lead, items } = itemsOf(raw)
+        const units = items.length ? items : raw.split('\n').map(line => ({ n: 0, text: line }))
+        const kept = units.filter(i => !asksOwn(i.text, own))
+        const text = kept.some(i => i.text.trim()) ? [items.length ? lead : '', ...kept.map(i => i.text)].join('\n').trim() : ''
         if (text) await addRequest($, { id: newId(), kind: 'questions', createdAt: Date.now(), text })
       } else if (!(await read($, local)).requests.length) {
         // A report with no questions section: shown, marked when it waits for a go-ahead. One that
-        // ends a turn waiting on a card already in the pane would only repeat it.
+        // ends a turn waiting on a card already in the pane would only repeat it, as would one that
+        // asks for one of this session's own cards, answered or not.
         const text = e.answer.trim()
         const decision = wrap?.ask?.trim() || undefined
         await addRequest($, {
@@ -576,7 +619,7 @@ export const register: Register = (on, options) => {
           text: text.length > REPORT_MAX ? `${text.slice(0, REPORT_MAX)}…` : text,
           summary: wrap?.recap?.trim() || undefined,
           decision,
-          awaits: !!decision || asksGoAhead(text),
+          awaits: !asksOwn(decision ?? text, own) && (!!decision || asksGoAhead(text)),
         })
       }
     }
@@ -911,23 +954,28 @@ export const register: Register = (on, options) => {
                     <Box
                       key={`${r.id}-${qi}-${oi}`}
                       flexDirection="column"
-                      paddingX="md"
-                      paddingY="sm"
+                      // Thin: the Button inside is the press target, the padding around it is not.
+                      paddingX="sm"
+                      paddingY="xs"
                       borderStyle="round"
                       borderColor={isOn ? (isTerm ? 'warning' : AMBER) : isTerm ? undefined : CARD_LINE}
                       borderDimColor={!isOn && isTerm}
                       backgroundColor={fill(isOn ? AMBER_TINT : CARD)}
                       hover={isTerm ? undefined : { borderColor: AMBER_LINE }}
                     >
+                      {/* A Box takes no press: the Button holds both lines, so either one picks the option. */}
                       <Button key={`${r.id}-${qi}-${oi}-b`} plain onPress={toggle(qi, oi, !!q.multiSelect)}>
                         {isTerm ? (isOn ? '● ' : '○ ') : ''}
                         <Text weight="semibold">{o.label}</Text>
+                        {o.description ? '\n' : ''}
+                        {o.description ? (
+                          <Text size="footnote" color="subtle">
+                            {o.description}
+                          </Text>
+                        ) : (
+                          ''
+                        )}
                       </Button>
-                      {o.description ? (
-                        <Text size="footnote" color="subtle">
-                          {o.description}
-                        </Text>
-                      ) : null}
                     </Box>
                   )
                 })}
@@ -948,21 +996,56 @@ export const register: Register = (on, options) => {
           </Box>,
         )
       }
+      // An item's bold-label bullets are its answers, as buttons: one item answers on a press, several
+      // are picked one by one and sent together, each with its item's number.
+      const { items } = itemsOf(r.text ?? '')
+      // Picks keyed by the item's place: a section may repeat a number.
+      const offers = items.map((i, at) => ({ at, n: i.n, options: optionsOf(i.text) })).filter(o => o.options.length)
+      const isMulti = items.length > 1
+      const pickOf = (at: number): number | undefined => u.picks[`${r.id}:${at}`]?.[0]
+      const composeQ = (other: string): string =>
+        [...offers.map(o => {
+          const oi = pickOf(o.at)
+          return oi === undefined ? '' : `${o.n}. ${o.options[oi]}`
+        }), other.trim()].filter(Boolean).join('\n')
+      const reply = (text: string) => text && void answer($, s, r, 'answer', text)
       return shell(
         <Box flexDirection="column" gap="sm">
           {head(S.questions, s.title)}
           <Box flexDirection="column" padding="sm" backgroundColor={fill(CARD)}>
             {Markdown ? <Markdown key={`md-${r.id}`} text={r.text ?? ''} /> : <Text>{r.text ?? ''}</Text>}
           </Box>
+          {offers.map(o => (
+            <Box key={`${r.id}-o${o.at}`} flexDirection="row" flexWrap="wrap" gap="sm" alignItems="center">
+              {isMulti ? (
+                <Text size="caption" color="subtle">
+                  {`${o.n}.`}
+                </Text>
+              ) : null}
+              {o.options.map((label, oi) => (
+                <Button
+                  key={`opt-${r.id}-${o.at}-${oi}`}
+                  variant={pickOf(o.at) === oi ? 'primary' : 'secondary'}
+                  label={label}
+                  onPress={() =>
+                    isMulti
+                      ? void update($, paneUi, cur => ({ ...cur, picks: { ...cur.picks, [`${r.id}:${o.at}`]: cur.picks[`${r.id}:${o.at}`]?.[0] === oi ? [] : [oi] } }))
+                      : reply(label)
+                  }
+                />
+              ))}
+            </Box>
+          ))}
           {Input ? (
             <Box flexDirection="column" gap="xs">
               <Text size="caption" color="subtle">
-                {S.replyLabel}
+                {offers.length ? S.other : S.replyLabel}
               </Text>
-              {field(<Input key={`reply-${r.id}`} placeholder={S.replyHere} rows={3} submitLabel={S.send} onSubmit={value => value.trim() && void answer($, s, r, 'answer', value)} />)}
+              {field(<Input key={`reply-${r.id}`} placeholder={S.replyHere} rows={3} submitLabel={S.send} onSubmit={value => reply(isMulti ? composeQ(value) : value.trim())} />)}
             </Box>
           ) : null}
           <Box flexDirection="row" gap="sm">
+            {isMulti && offers.length ? <Button key={`send-${r.id}`} variant="primary" label={S.send} onPress={() => reply(composeQ(''))} /> : null}
             <Button key={`dismiss-${r.id}`} variant="secondary" label={S.dismiss} onPress={() => void answer($, s, r, 'dismiss')} />
           </Box>
         </Box>,

@@ -95,6 +95,7 @@ export type Local = {
   grantsSession: string[]
   steps: Record<string, { done: number; total: number; note?: string }>
   flow: FlowInfo | null
+  /** The requests this session is done with: answered from the pane, or retired. */
   applied: string[]
   /** The coordinator's version this session last reloaded its plugins to follow. */
   reloadTried?: string

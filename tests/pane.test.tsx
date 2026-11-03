@@ -141,13 +141,15 @@ test('the pane draws sessions, workers and every kind of request, on every surfa
   expect(mine.title).toBe('Coordinatore')
   expect(mine.folder).toBe('coordinator')
   expect(mine.effort).toBe('high')
-  expect(mine.version).toBe('0.5.0')
+  expect(mine.version).toBe('0.5.1')
 
   for (const surface of ['terminal', 'desktop', 'vscode', 'mobile'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface })
     expect(await ui.find({ type: 'Text', text: /HomeLab · Bash/ })).toBeTruthy()
     expect(await ui.find({ type: 'Text', text: /Migrate schema/ })).toBeTruthy()
     expect(await ui.find({ type: 'Text', text: /Update the console/ })).toBeTruthy()
+    // A choice's whole option is its press target: the title and the line under it.
+    expect((await ui.find({ key: 'c1-0-0-b' }))?.text).toMatch(/Update the console\s*with gcloud/)
     expect(await ui.find({ type: 'Text', text: /62%/ })).toBeTruthy()
     expect(await ui.find({ type: 'Text', text: /\$1\.50/ })).toBeTruthy()
     expect(await ui.find({ type: 'Text', text: /Opus 5\.5 · extra/ })).toBeTruthy()
@@ -384,6 +386,92 @@ describe('a session reporting', () => {
     await settle()
     expect(prompts.some(t => t.includes('npm publish'))).toBe(true)
     expect(mine().requests.map(r => r.command)).toEqual(['gh release create v1'])
+    await ui.unmount()
+  })
+
+  test('a closing message asking for one of the session own cards repeats nothing, before or after its answer', async ($, on) => {
+    const { mine, settle, prompts } = setup(on)
+    on('tool.check', () => ({ decision: 'allow' }) as never)
+    on('ui.open', () => ({ value: { isPlaced: true } }))
+    await $.session.start({ cwd: '/repos/project', surface: 'desktop', isInteractive: true })
+    await $.tool.check({ tool: 'Bash', input: { command: 'gh pr merge 176' }, tool_use_id: 'u1' } as never)
+    await settle()
+    const id = mine().requests[0]?.id ?? ''
+    expect(id).not.toBe('')
+
+    // The session asks for the card in prose next to a real question: only the real one stays.
+    await $.turn.start({ turnId: 't1' } as never)
+    await $.turn.complete({ turnId: 't1', answer: `Waiting.\n\n## Domande per te\n\n1. Approvi nel pannello la richiesta ${id} (merge di PR #176)?\n2. Which port?`, isAborted: false } as never)
+    await settle()
+    expect(mine().requests.map(r => r.kind)).toEqual(['permission', 'questions'])
+    expect(mine().requests[1]?.text).toBe('2. Which port?')
+
+    // A section asking only for the card adds nothing; one with no numbered list is judged line by line.
+    await $.turn.start({ turnId: 't2' } as never)
+    await $.turn.complete({ turnId: 't2', answer: `## Questions for you\n\n1. Approve request ${id} in the pane?`, isAborted: false } as never)
+    await settle()
+    expect(mine().requests.map(r => r.kind)).toEqual(['permission'])
+    await $.turn.start({ turnId: 't2b' } as never)
+    await $.turn.complete({ turnId: 't2b', answer: `## Questions for you\n\n- Approve request ${id} in the pane?\n- Which branch?`, isAborted: false } as never)
+    await settle()
+    expect(mine().requests.map(r => r.text ?? r.kind)).toEqual(['permission', '- Which branch?'])
+
+    // Approved from the pane; a closing message still asking for it does not wait on the person.
+    await $.command.run({ command: 'agents-monitor', args: '' } as never)
+    const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+    await ui.press({ key: `once-${id}` })
+    await settle()
+    expect(prompts.some(t => t.includes('gh pr merge 176'))).toBe(true)
+    await $.turn.start({ turnId: 't3' } as never)
+    await $.turn.complete({ turnId: 't3', answer: `Attendo che tu approvi la richiesta ${id}.`, isAborted: false } as never)
+    await settle()
+    expect(mine().requests.map(r => [r.kind, r.awaits])).toEqual([['report', false]])
+    expect(mine().state).toBe('idle')
+    await $.turn.start({ turnId: 't4' } as never)
+    await $.turn.complete({ turnId: 't4', answer: `## Domande per te\n\n1. Approvi la richiesta ${id}?`, isAborted: false } as never)
+    await settle()
+    expect(mine().requests).toEqual([])
+    // Naming the request as history is no ask for it: a real go-ahead still waits.
+    await $.turn.start({ turnId: 't5' } as never)
+    await $.turn.complete({ turnId: 't5', answer: `La richiesta ${id} è stata approvata e il merge è fatto. Faccio anche il push del tag?`, isAborted: false } as never)
+    await settle()
+    expect(mine().requests.map(r => [r.kind, r.awaits])).toEqual([['report', true]])
+    await ui.unmount()
+  })
+
+  test('the answers a question offers as bold bullets are buttons in the pane', async ($, on) => {
+    const { mine, settle, prompts } = setup(on)
+    on('ui.open', () => ({ value: { isPlaced: true } }))
+    await $.session.start({ cwd: '/repos/project', surface: 'desktop', isInteractive: true })
+    const merge = '1. Merge #319, then #320?\n   - **Done, clean up:** remove both worktrees and branches.\n   - **Not now:** leave everything as is.'
+    await $.turn.start({ turnId: 't1' } as never)
+    await $.turn.complete({ turnId: 't1', answer: `## Questions for you\n\n${merge}`, isAborted: false } as never)
+    await settle()
+    await $.command.run({ command: 'agents-monitor', args: '' } as never)
+    let ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+    const [q] = mine().requests
+    // One item: a press answers it with the label alone; the free-text box stays.
+    expect(await ui.find({ key: `reply-${q?.id}` })).toBeTruthy()
+    await ui.press({ key: `opt-${q?.id}-0-0` })
+    await settle()
+    expect(prompts.at(-1)).toMatch(/\n\nDone, clean up$/)
+    await ui.unmount()
+
+    // Several items: picked one by one, sent together with their numbers.
+    await $.turn.start({ turnId: 't2' } as never)
+    await $.turn.complete({ turnId: 't2', answer: `## Questions for you\n\n${merge}\n2. Which tag?\n   - **v1.2.0**\n   - **v2.0.0:** breaking`, isAborted: false } as never)
+    await settle()
+    ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+    const [q2] = mine().requests
+    // A second press on a pick takes it back.
+    await ui.press({ key: `opt-${q2?.id}-0-0` })
+    await ui.press({ key: `opt-${q2?.id}-0-0` })
+    await ui.press({ key: `opt-${q2?.id}-0-1` })
+    await ui.press({ key: `opt-${q2?.id}-1-1` })
+    expect(mine().requests.length).toBe(1)
+    await ui.press({ key: `send-${q2?.id}` })
+    await settle()
+    expect(prompts.at(-1)).toMatch(/\n\n1\. Not now\n2\. v2\.0\.0$/)
     await ui.unmount()
   })
 })
