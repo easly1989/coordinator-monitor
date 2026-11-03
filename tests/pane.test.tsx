@@ -404,11 +404,15 @@ describe('a session reporting', () => {
     expect(mine().requests.map(r => r.kind)).toEqual(['permission', 'questions'])
     expect(mine().requests[1]?.text).toBe('2. Which port?')
 
-    // A section asking only for the card adds nothing.
+    // A section asking only for the card adds nothing; one with no numbered list is judged line by line.
     await $.turn.start({ turnId: 't2' } as never)
     await $.turn.complete({ turnId: 't2', answer: `## Questions for you\n\n1. Approve request ${id} in the pane?`, isAborted: false } as never)
     await settle()
     expect(mine().requests.map(r => r.kind)).toEqual(['permission'])
+    await $.turn.start({ turnId: 't2b' } as never)
+    await $.turn.complete({ turnId: 't2b', answer: `## Questions for you\n\n- Approve request ${id} in the pane?\n- Which branch?`, isAborted: false } as never)
+    await settle()
+    expect(mine().requests.map(r => r.text ?? r.kind)).toEqual(['permission', '- Which branch?'])
 
     // Approved from the pane; a closing message still asking for it does not wait on the person.
     await $.command.run({ command: 'agents-monitor', args: '' } as never)
@@ -417,7 +421,7 @@ describe('a session reporting', () => {
     await settle()
     expect(prompts.some(t => t.includes('gh pr merge 176'))).toBe(true)
     await $.turn.start({ turnId: 't3' } as never)
-    await $.turn.complete({ turnId: 't3', answer: `Ho chiesto la richiesta ${id}. Attendo la tua conferma.`, isAborted: false } as never)
+    await $.turn.complete({ turnId: 't3', answer: `Attendo che tu approvi la richiesta ${id}.`, isAborted: false } as never)
     await settle()
     expect(mine().requests.map(r => [r.kind, r.awaits])).toEqual([['report', false]])
     expect(mine().state).toBe('idle')
@@ -425,6 +429,11 @@ describe('a session reporting', () => {
     await $.turn.complete({ turnId: 't4', answer: `## Domande per te\n\n1. Approvi la richiesta ${id}?`, isAborted: false } as never)
     await settle()
     expect(mine().requests).toEqual([])
+    // Naming the request as history is no ask for it: a real go-ahead still waits.
+    await $.turn.start({ turnId: 't5' } as never)
+    await $.turn.complete({ turnId: 't5', answer: `La richiesta ${id} è stata approvata e il merge è fatto. Faccio anche il push del tag?`, isAborted: false } as never)
+    await settle()
+    expect(mine().requests.map(r => [r.kind, r.awaits])).toEqual([['report', true]])
     await ui.unmount()
   })
 
@@ -441,7 +450,7 @@ describe('a session reporting', () => {
     const [q] = mine().requests
     // One item: a press answers it with the label alone; the free-text box stays.
     expect(await ui.find({ key: `reply-${q?.id}` })).toBeTruthy()
-    await ui.press({ key: `opt-${q?.id}-1-0` })
+    await ui.press({ key: `opt-${q?.id}-0-0` })
     await settle()
     expect(prompts.at(-1)).toMatch(/\n\nDone, clean up$/)
     await ui.unmount()
@@ -452,8 +461,11 @@ describe('a session reporting', () => {
     await settle()
     ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
     const [q2] = mine().requests
+    // A second press on a pick takes it back.
+    await ui.press({ key: `opt-${q2?.id}-0-0` })
+    await ui.press({ key: `opt-${q2?.id}-0-0` })
+    await ui.press({ key: `opt-${q2?.id}-0-1` })
     await ui.press({ key: `opt-${q2?.id}-1-1` })
-    await ui.press({ key: `opt-${q2?.id}-2-1` })
     expect(mine().requests.length).toBe(1)
     await ui.press({ key: `send-${q2?.id}` })
     await settle()

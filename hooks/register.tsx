@@ -299,16 +299,24 @@ const itemsOf = (text: string): { lead: string; items: { n: number; text: string
   return { lead: lead.join('\n'), items }
 }
 
-/** The answers an item offers as bullets opening on a bold label ("- **Not now:** …"), which the desktop draws as buttons. */
-const optionsOf = (item: string): string[] =>
-  [...item.matchAll(/^\s*[-*•]\s+\*\*(.+?)\*\*/gm)]
-    .map(m => (m[1] ?? '').replace(/:\s*$/, '').trim().slice(0, 60))
+/**
+ * The answers an item offers as bullets opening on a bold label ("- **Not now:** …"), which the desktop
+ * draws as buttons. Two at least: a lone bold bullet ("**Warning:** …") is a remark, not a choice.
+ */
+const optionsOf = (item: string): string[] => {
+  const labels = [...item.matchAll(/^\s*[-*•]\s+\*\*(.+?)\*\*/gm)]
+    .map(m => (m[1] ?? '').replace(/:\s*$/, '').trim().slice(0, 120))
     .filter(Boolean)
     .slice(0, 8)
+  return labels.length >= 2 ? labels : []
+}
 
 /** The requests this session raised itself, open or done with: a closing message pointing at one repeats its card. */
 const ownIds = (l: Local): Set<string> => new Set([...l.applied, ...l.requests.filter(r => r.kind !== 'questions' && r.kind !== 'report').map(r => r.id)])
-const namesOwn = (text: string, ids: Set<string>): boolean => [...text.matchAll(/\b[a-z0-9]{8,16}\b/g)].some(m => ids.has(m[0]))
+const ASK_VERB = /\b(approv|confirm|conferm|answer|rispond|accept|accett)\w*/i
+/** Whether `text` asks the person to answer one of `ids` ("approve request <id>"), not merely mentions one. */
+const asksOwn = (text: string, ids: Set<string>): boolean =>
+  [...text.matchAll(/\b[a-z0-9]{8,16}\b/g)].some(m => ids.has(m[0]) && ASK_VERB.test(text.slice(Math.max(0, m.index - 100), m.index).split(/[.!?\n]/).pop() ?? ''))
 
 /** Takes one approve-once grant, atomically: two calls racing for one grant get it once. */
 const takeOnce = async ($: $, key: string): Promise<boolean> => {
@@ -592,9 +600,11 @@ export const register: Register = (on, options) => {
         const raw = (end >= 0 ? rest.slice(0, end) : rest).trim()
         // An item asking the person to answer one of this session's own cards (approve request <id>)
         // only repeats that card, and would outlive its answer: left out, and with it a section of only those.
+        // A section with no numbered list is judged line by line.
         const { lead, items } = itemsOf(raw)
-        const kept = (items.length ? items : [{ n: 0, text: raw }]).filter(i => !namesOwn(i.text, own))
-        const text = kept.length ? (items.length ? [lead, ...kept.map(i => i.text)].join('\n').trim() : raw) : ''
+        const units = items.length ? items : raw.split('\n').map(line => ({ n: 0, text: line }))
+        const kept = units.filter(i => !asksOwn(i.text, own))
+        const text = kept.some(i => i.text.trim()) ? [items.length ? lead : '', ...kept.map(i => i.text)].join('\n').trim() : ''
         if (text) await addRequest($, { id: newId(), kind: 'questions', createdAt: Date.now(), text })
       } else if (!(await read($, local)).requests.length) {
         // A report with no questions section: shown, marked when it waits for a go-ahead. One that
@@ -609,7 +619,7 @@ export const register: Register = (on, options) => {
           text: text.length > REPORT_MAX ? `${text.slice(0, REPORT_MAX)}…` : text,
           summary: wrap?.recap?.trim() || undefined,
           decision,
-          awaits: !namesOwn(decision ?? text, own) && (!!decision || asksGoAhead(text)),
+          awaits: !asksOwn(decision ?? text, own) && (!!decision || asksGoAhead(text)),
         })
       }
     }
@@ -984,14 +994,15 @@ export const register: Register = (on, options) => {
       // An item's bold-label bullets are its answers, as buttons: one item answers on a press, several
       // are picked one by one and sent together, each with its item's number.
       const { items } = itemsOf(r.text ?? '')
-      const offers = items.map(i => ({ n: i.n, options: optionsOf(i.text) })).filter(o => o.options.length)
+      // Picks keyed by the item's place: a section may repeat a number.
+      const offers = items.map((i, at) => ({ at, n: i.n, options: optionsOf(i.text) })).filter(o => o.options.length)
       const isMulti = items.length > 1
-      const picked = (n: number): string | undefined => {
-        const oi = u.picks[`${r.id}:${n}`]?.[0]
-        return oi === undefined ? undefined : offers.find(o => o.n === n)?.options[oi]
-      }
+      const pickOf = (at: number): number | undefined => u.picks[`${r.id}:${at}`]?.[0]
       const composeQ = (other: string): string =>
-        [...offers.map(o => picked(o.n) && `${o.n}. ${picked(o.n)}`), other.trim()].filter(Boolean).join('\n')
+        [...offers.map(o => {
+          const oi = pickOf(o.at)
+          return oi === undefined ? '' : `${o.n}. ${o.options[oi]}`
+        }), other.trim()].filter(Boolean).join('\n')
       const reply = (text: string) => text && void answer($, s, r, 'answer', text)
       return shell(
         <Box flexDirection="column" gap="sm">
@@ -1000,7 +1011,7 @@ export const register: Register = (on, options) => {
             {Markdown ? <Markdown key={`md-${r.id}`} text={r.text ?? ''} /> : <Text>{r.text ?? ''}</Text>}
           </Box>
           {offers.map(o => (
-            <Box key={`${r.id}-o${o.n}`} flexDirection="row" flexWrap="wrap" gap="sm" alignItems="center">
+            <Box key={`${r.id}-o${o.at}`} flexDirection="row" flexWrap="wrap" gap="sm" alignItems="center">
               {isMulti ? (
                 <Text size="caption" color="subtle">
                   {`${o.n}.`}
@@ -1008,11 +1019,13 @@ export const register: Register = (on, options) => {
               ) : null}
               {o.options.map((label, oi) => (
                 <Button
-                  key={`opt-${r.id}-${o.n}-${oi}`}
-                  variant={picked(o.n) === label ? 'primary' : 'secondary'}
+                  key={`opt-${r.id}-${o.at}-${oi}`}
+                  variant={pickOf(o.at) === oi ? 'primary' : 'secondary'}
                   label={label}
                   onPress={() =>
-                    isMulti ? void update($, paneUi, cur => ({ ...cur, picks: { ...cur.picks, [`${r.id}:${o.n}`]: [oi] } })) : reply(label)
+                    isMulti
+                      ? void update($, paneUi, cur => ({ ...cur, picks: { ...cur.picks, [`${r.id}:${o.at}`]: cur.picks[`${r.id}:${o.at}`]?.[0] === oi ? [] : [oi] } }))
+                      : reply(label)
                   }
                 />
               ))}
