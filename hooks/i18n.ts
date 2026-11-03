@@ -81,8 +81,8 @@ const en = {
   othersGroup: 'OTHERS · by activity',
   steps: (n: number) => `${n} steps`,
   fullRequest: 'Full request (what you approve)',
-  blockLabel: (kind: 'file' | 'input' | 'inline' | 'string', to: string, lines: number, runBy?: string) =>
-    `${kind === 'file' ? `→ file ${to}` : kind === 'inline' ? `inline ${to} script` : kind === 'string' ? `here-string ${to}`.trim() : `→ input of ${to}`} · ${lines} ${lines === 1 ? 'line' : 'lines'}${runBy ? ` · run later by ${runBy}` : ''}`,
+  blockLabel: (kind: 'file' | 'input' | 'inline' | 'string', to: string, lines: number, runBy?: string, isRunning?: boolean) =>
+    `${kind === 'file' ? `→ file ${to}` : kind === 'inline' ? `inline ${to} script` : kind === 'string' ? `here-string ${to}`.trim() : `→ input of ${to}`} · ${lines} ${lines === 1 ? 'line' : 'lines'}${isRunning ? ' · runs the $( ) in it now' : ''}${runBy ? ` · run later by ${runBy}` : ''}`,
   commandSize: (lines: number, chars: number) => `${lines} lines · ${chars} characters`,
   writes: 'Writes',
   edits: 'Edits',
@@ -184,8 +184,8 @@ const it: typeof en = {
   othersGroup: 'ALTRE · per attività',
   steps: n => `${n} passi`,
   fullRequest: 'Richiesta completa (quello che approvi)',
-  blockLabel: (kind, to, lines, runBy) =>
-    `${kind === 'file' ? `→ file ${to}` : kind === 'inline' ? `script ${to} in linea` : kind === 'string' ? `here-string ${to}`.trim() : `→ input di ${to}`} · ${lines} ${lines === 1 ? 'riga' : 'righe'}${runBy ? ` · eseguito poi da ${runBy}` : ''}`,
+  blockLabel: (kind, to, lines, runBy, isRunning) =>
+    `${kind === 'file' ? `→ file ${to}` : kind === 'inline' ? `script ${to} in linea` : kind === 'string' ? `here-string ${to}`.trim() : `→ input di ${to}`} · ${lines} ${lines === 1 ? 'riga' : 'righe'}${isRunning ? ' · esegue subito i $( ) che contiene' : ''}${runBy ? ` · eseguito poi da ${runBy}` : ''}`,
   commandSize: (lines, chars) => `${lines} righe · ${chars} caratteri`,
   writes: 'Scrive',
   edits: 'Modifica',

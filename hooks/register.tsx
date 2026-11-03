@@ -300,11 +300,12 @@ const appendNote = async ($: $, text: string): Promise<void> => {
   await $.session.append({ message: { type: 'user', content: [{ type: 'text', text }] } }).catch(() => undefined)
 }
 
-/** `text` as a JSON object, or `null`. */
-const jsonObject = (text: string): Record<string, unknown> | null => {
+/** `text` as the object `askWhat` wrote it from, or `null` when it is anything else, written as it would be. */
+const ownJson = (text: string): Record<string, unknown> | null => {
   try {
     const v: unknown = JSON.parse(text)
-    return v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : null
+    const isOwn = !!v && typeof v === 'object' && !Array.isArray(v) && JSON.stringify(sortKeys(v), null, 2) === text
+    return isOwn ? (v as Record<string, unknown>) : null
   } catch {
     return null
   }
@@ -317,10 +318,19 @@ const ASK_MAX = 8000
 const sortKeys = (v: unknown): unknown =>
   Array.isArray(v) ? v.map(sortKeys) : v && typeof v === 'object' ? Object.fromEntries(Object.keys(v).sort().map(k => [k, sortKeys((v as Record<string, unknown>)[k])])) : v
 
+const askFields = (input: unknown): Record<string, unknown> => {
+  const { description: _, ...rest } = (input && typeof input === 'object' ? input : { input }) as Record<string, unknown>
+  return rest
+}
+/** Whether an ask is a bare command: it is then shown as is, never read as the JSON it may look like. */
+const isBareAsk = (input: unknown): boolean => {
+  const rest = askFields(input)
+  return Object.keys(rest).length === 1 && typeof rest.command === 'string'
+}
 /** What an app permission ask is about, in full: a bare command as is, else every field but the description. */
 const askWhat = (input: unknown): string => {
-  const { description: _, ...rest } = (input && typeof input === 'object' ? input : { input }) as Record<string, unknown>
-  return Object.keys(rest).length === 1 && typeof rest.command === 'string' ? rest.command : JSON.stringify(sortKeys(rest), null, 2)
+  const rest = askFields(input)
+  return isBareAsk(input) ? String(rest.command) : JSON.stringify(sortKeys(rest), null, 2)
 }
 const askKey = (tool: string, what: string): string => `ask\u0000${tool}\u0000${what}`
 /** A grant belongs to whoever asked: a subagent's serves that agent alone, never its parent or another agent. */
@@ -525,6 +535,7 @@ const gather = async ($: $): Promise<void> => {
         summary: txt(r.summary),
         decision: txt(r.decision),
         explain: txt(r.explain),
+        isInput: r.isInput === true,
         agentId: str(r.agentId),
         questions: arr<ChoiceQuestion>(r.questions)
           .filter(q => q && typeof q === 'object')
@@ -1019,7 +1030,7 @@ export const register: Register = (on, options) => {
     if ((await read($, local)).grantsSession.includes(key)) return { decision: { behavior: 'allow' } }
     if (!(await coordinatorLive($))) return next(e)
     const id = newId()
-    await addRequest($, { id, kind: 'ask', createdAt: Date.now(), tool: e.tool_name, command: what, rule: S.appPermission, agentId: e.agent_id })
+    await addRequest($, { id, kind: 'ask', createdAt: Date.now(), tool: e.tool_name, command: what, isInput: !isBareAsk(e.tool_input), rule: S.appPermission, agentId: e.agent_id })
     void explainLater($, id, e.tool_name, what)
     const a = await waitAnswer($, id)
     await update($, local, cur => ({
@@ -1260,7 +1271,9 @@ export const register: Register = (on, options) => {
         const shellKind = tool === 'PowerShell' ? 'powershell' : 'bash'
         // An app ask holds a shell tool's whole input as JSON: the command reads as itself, its other
         // fields as lines under it. Decoding the JSON is exact, so nothing of what is approved changes.
-        const input = (tool === 'Bash' || tool === 'PowerShell') && what.startsWith('{') ? jsonObject(what) : null
+        // Only JSON the mod wrote itself is decoded: a bare command that looks like JSON (two `command`
+        // keys, say) is a command, and is shown as one.
+        const input = r.kind === 'ask' && r.isInput && (tool === 'Bash' || tool === 'PowerShell') ? ownJson(what) : null
         const cmd = typeof input?.command === 'string' ? input.command : what
         const fields = typeof input?.command === 'string' ? Object.entries(input).filter(([k]) => k !== 'command') : []
         const isShell = (tool === 'Bash' || tool === 'PowerShell') && !cmd.startsWith('{')
@@ -1275,7 +1288,7 @@ export const register: Register = (on, options) => {
               ) : (
                 <Box key={`blk-${r.id}-${k}`} flexDirection="column" gap="xs" paddingLeft="sm" borderStyle="round" borderColor={isTerm ? undefined : CARD_LINE} borderDimColor={isTerm}>
                   <Text size="caption" color="subtle">
-                    {visible(S.blockLabel(sg.isInline ? 'inline' : sg.isString ? 'string' : sg.path ? 'file' : 'input', sg.to, sg.lines, sg.runBy))}
+                    {visible(S.blockLabel(sg.isInline ? 'inline' : sg.isString ? 'string' : sg.path ? 'file' : 'input', sg.to, sg.lines, sg.runBy, sg.isRunning))}
                   </Text>
                   <Code key={`raw-${r.id}-${k}`} source={visible(sg.text.replace(/\n$/, ''))} wrap="wrap" language={sg.language} path={sg.path} startLine={1} />
                 </Box>

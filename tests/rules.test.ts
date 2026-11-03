@@ -4,23 +4,23 @@ import { DEFAULT_RULES, matchRule } from '../hooks/rules'
 
 const label = (cmd: string) => matchRule(DEFAULT_RULES, cmd)?.label
 
-test('a here-doc handed to a command that only stores it is not matched; one that can run is', () => {
-  // Stored: a test file, a commit message, a PR body.
-  expect(label("cat > tests/x.test.ts <<'EOF'\nexpect(run('gh pr merge 7')).toBe(1)\nEOF")).toBe(undefined)
-  expect(label("cat > f <<-EOF\n\tgh pr merge 7\n\tEOF")).toBe(undefined)
-  expect(label("cd repo && git commit -F - <<'EOF'\nUndo the git merge of main\nEOF")).toBe(undefined)
-  expect(label('gh pr create --title "x" --body-file - <<\'EOF\'\nThen gh pr merge 7.\nEOF')).toBe(undefined)
-  // What follows the body still counts, as does the line that opens it.
-  expect(label("cat > f <<'EOF'\nnotes\nEOF\ngh pr merge 7")).toBe('merge')
-  expect(label("gh pr merge 7 && cat > f <<'EOF'\nnotes\nEOF")).toBe('merge')
-  // Fed to a shell or an interpreter, the text can run: matched whole.
-  expect(label("python - <<'EOF'\nos.system('gh pr merge 7')\nEOF")).toBe('merge')
-  expect(label("bash <<'EOF'\ngh pr merge 7\nEOF")).toBe('merge')
-  expect(label("cat <<'EOF' | bash\ngh pr merge 7\nEOF")).toBe('merge')
-  expect(label("bash -c 'source /dev/stdin; cat ' <<'EOF'\ngh pr merge 7\nEOF")).toBe('merge')
-  expect(label("cat > $(mktemp) <<'EOF'\ngh pr merge 7\nEOF")).toBe('merge')
-  expect(label('node -e "run(\'gh pr merge 7\')"')).toBe('merge')
-  // A body with no end line, or an end line that is not exactly the word, is matched whole.
-  expect(label("cat > f <<'EOF'\ngh pr merge 7")).toBe('merge')
-  expect(label("cat > f <<'EOF'\ngh pr merge 7\n EOF")).toBe('merge')
+test('a rule matches the whole text: no here-doc, quote or script hides a protected command', () => {
+  for (const cmd of [
+    // A quote in the line, so the here-doc looks like it goes to cat.
+    "cat ''; bash <<B\ngh pr merge 7\nB",
+    // Two here-docs on one line.
+    "cat > a <<A; bash <<B\nnotes\nA\ngh pr merge 7\nB",
+    // One nested inside another that ends after it.
+    "bash <<A\ncat > f <<B\nx\nB\ngh pr merge 7\nA",
+    // An unquoted body: its $( ) runs while the file is written.
+    'cat > f <<EOF\n$(gh pr merge 7)\nEOF',
+    // A script written, then run.
+    "cat > s.sh <<'EOF'\ngh pr merge 7\nEOF\nbash s.sh",
+    // An end line with a CR, which bash does not take as the end.
+    "cat > f <<'EOF'\nx\nEOF\r\ngh pr merge 7\nEOF",
+    // Inline scripts and plain stored text alike.
+    `python -c "import os; os.system('gh pr merge 7')"`,
+    "cat > tests/x.test.ts <<'EOF'\nexpect(run('gh pr merge 7')).toBe(1)\nEOF",
+  ])
+    expect(label(cmd)).toBe('merge')
 })

@@ -43,6 +43,24 @@ test('a request cuts into its shell text and the blocks it hands on, which toget
   expect(segmentsOf("cat > f <<'EOF'\nno end").map(sg => sg.kind)).toEqual(['shell'])
 })
 
+test('a block says what runs: substitutions in an unquoted body, a pipe after the end line, a sourced file', () => {
+  const blockOf = (cmd: string) => segmentsOf(cmd).find(sg => sg.kind === 'block')
+  // An unquoted word: the body's $( ) runs as the file is written.
+  expect(blockOf('cat > cfg.json <<EOF\n{"at": "$(date)"}\nEOF')).toMatchObject({ to: 'cfg.json', isRunning: true })
+  expect(blockOf("cat > cfg.json <<'EOF'\n$(date)\nEOF")).not.toMatchObject({ isRunning: true })
+  const view = viewOf('Bash', 'cat > cfg.json <<EOF\n$(date)\nEOF')
+  expect(view?.kind === 'shell' ? view.steps[0] : '').toBe('writes cfg.json (1 line, runs the $( ) in it now)')
+  // Its line ends in a pipe that goes on after the end line: the body goes to that program, not a file.
+  expect(blockOf('tee f <<EOF |\necho hi\nEOF\nbash')).toMatchObject({ to: 'bash', language: 'bash' })
+  expect(blockOf('tee f <<EOF |\necho hi\nEOF\nbash')).not.toMatchObject({ path: 'f' })
+  expect(blockOf("cat > f <<'EOF' || echo failed\nx\nEOF")).toMatchObject({ to: 'f', path: 'f' })
+  // A file the shell sources later.
+  expect(blockOf("cat > env.sh <<'EOF'\nexport A=1\nEOF\n. ./env.sh")).toMatchObject({ runBy: 'source' })
+  // A `<<` inside quotes opens nothing; an end word with a CR after it is not the end.
+  expect(segmentsOf('echo "<<EOF"\nx\nEOF').map(sg => sg.kind)).toEqual(['shell'])
+  expect(blockOf("cat > f <<'EOF'\nx\nEOF\r\nmore\nEOF")?.text).toBe('x\nEOF\r\nmore\n')
+})
+
 test('the reading aid says each step in plain words, a here-doc as the file it writes', () => {
   expect(viewOf('Bash', HEREDOCS)).toEqual({
     kind: 'shell',

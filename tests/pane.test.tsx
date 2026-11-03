@@ -99,7 +99,11 @@ const FILES: Record<string, SessionStatus> = {
       { id: 'p4', kind: 'ask', createdAt: now + 6, tool: 'Write', command: JSON.stringify({ content: 'print(1)\n'.repeat(30), file_path: 'C:/repos/demo/run.py' }, null, 2), explain: 'Writes a demo script.' },
       // A large command whose split is not certain (a here-string), with a hidden reversal: no summary, the
       // whole command shown, the reversal as a code.
-      { id: 'p6', kind: 'ask', createdAt: now + 8, tool: 'Bash', command: HEREDOC_ASK },
+      { id: 'p6', kind: 'ask', createdAt: now + 8, tool: 'Bash', command: HEREDOC_ASK, isInput: true },
+      // A bare command that looks like JSON with two `command` keys: it is a command, never decoded,
+      // whatever the request claims about it.
+      { id: 'p7', kind: 'ask', createdAt: now + 9, tool: 'Bash', command: '{"command":"$(evil)","command":"ls -la"}' },
+      { id: 'p8', kind: 'ask', createdAt: now + 10, tool: 'Bash', command: '{"command":"$(evil)","command":"ls -la"}', isInput: true },
       { id: 'p5', kind: 'permission', createdAt: now + 7, tool: 'PowerShell', command: `$s = @"\n${'line\n'.repeat(30)}"@; Remove-Item C:/demo/x # \u202Egnp.exe`, rule: 'delete' },
     ],
   }),
@@ -237,7 +241,7 @@ test('the pane draws sessions, workers and every kind of request, on every surfa
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   // An app ask's JSON is read as what it is: the command itself, its here-doc a labelled block, the
   // other fields as lines, a reading aid in plain words above. No JSON escapes are left to read.
-  expect(await ui.find({ type: 'Code', text: /"command":/ })).toBeFalsy()
+  expect(await ui.find({ type: 'Code', text: /"command": "S=/ })).toBeFalsy()
   expect(await ui.find({ type: 'Text', text: /^→ file \$S\/shots\.js · 2 lines · run later by node$/ })).toBeTruthy()
   expect(await ui.find({ type: 'Code', text: /^const \{ chromium \} = require\("playwright"\);\nconsole\.log\("demo"\);$/ })).toBeTruthy()
   expect(await ui.find({ type: 'Code', text: /^EOF\ncd \$S && node shots\.js/ })).toBeTruthy()
@@ -245,6 +249,9 @@ test('the pane draws sessions, workers and every kind of request, on every surfa
   expect(await ui.find({ type: 'Text', text: /writes \$S\/shots\.js \(2 lines, run later by node\)/ })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /pipes into: tail -5/ })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /^Full request \(what you approve\) · 11 steps · 12 lines · \d+ characters$/ })).toBeTruthy()
+  // The duplicate-key command shows as itself on both cards: no `ls -la` stands in for what runs.
+  expect((await ui.findAll({ type: 'Code', text: /^\{"command":"\$\(evil\)","command":"ls -la"\}$/ })).length).toBe(2)
+  expect((await ui.findAll({ type: 'Code' })).some(c => c.text === 'ls -la')).toBe(false)
   // Each card shows its request's short id; a press copies the whole id.
   expect((await ui.find({ key: 'id-p4' }))?.text).toBe('#p4')
   await ui.press({ key: 'id-p4' })

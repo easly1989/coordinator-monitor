@@ -101,15 +101,21 @@ const splitSteps = (cmd: string, shell: Shell): { text: string; isPiped: boolean
  */
 export type Segment =
   | { kind: 'shell'; text: string }
-  | { kind: 'block'; text: string; to: string; lines: number; isInline?: boolean; isString?: boolean; language?: string; path?: string; runBy?: string }
+  | { kind: 'block'; text: string; to: string; lines: number; isInline?: boolean; isString?: boolean; isRunning?: boolean; language?: string; path?: string; runBy?: string }
 
-const LANGUAGE: Record<string, string> = { node: 'javascript', python: 'python', python3: 'python', bash: 'bash', sh: 'bash', pwsh: 'powershell', powershell: 'powershell' }
+const LANGUAGE: Record<string, string> = { node: 'javascript', python: 'python', python3: 'python', bash: 'bash', sh: 'bash', source: 'bash', pwsh: 'powershell', powershell: 'powershell' }
 const INTERP = 'node|python3?|bash|sh|pwsh|powershell'
 
-/** Where a here-doc opened between `head` and `after` goes: a program it is piped to, a file, else the command that reads it. */
-const targetOf = (head: string, after: string): { to: string; path?: string; language?: string } => {
-  const piped = new RegExp(`^\\s*\\|\\s*(${INTERP})\\b`, 'i').exec(after)?.[1]?.toLowerCase()
-  if (piped) return { to: piped, language: LANGUAGE[piped] }
+/**
+ * Where a here-doc opened between `head` and `after` goes: a program it is piped to (on its line, or on
+ * the line after its end, when its line ends in `|`), a file, else the command that reads it.
+ */
+const targetOf = (head: string, after: string, next: string): { to: string; path?: string; language?: string } => {
+  const pipe = /(?<![\|>])\|(?!\|)(.*)$/.exec(after)
+  if (pipe) {
+    const to = ((pipe[1] ?? '').trim() || next.trim()).split(/[\s;&|]/)[0]?.replace(/\.exe$/i, '').toLowerCase() || 'the next command'
+    return { to, language: LANGUAGE[to] }
+  }
   const part = head.split(/&&|\|\||[;&|]/).pop()?.trim() ?? ''
   const file = /^(?:cat|tee)\b.*?>{0,2}\s*([^\s;&|<>]+)$/.exec(part) ?? (/^(?:cat|tee)\b/.test(part) ? /^\s*>{1,2}\s*([^\s;&|<>]+)/.exec(after) : null)
   if (file?.[1] && !file[1].startsWith('-') && !/^(cat|tee)$/.test(file[1])) return { to: file[1], path: file[1] }
@@ -136,14 +142,22 @@ export const segmentsOf = (cmd: string, shell: Shell = 'bash'): Segment[] => {
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i] ?? ''
     let end = -1
-    let t: { to: string; path?: string; language?: string; isString?: boolean }
+    let t: { to: string; path?: string; language?: string; isString?: boolean; isRunning?: boolean }
     if (shell === 'bash') {
       const all = [...line.matchAll(/<<(-?)\s*(['"]?)([A-Za-z_]\w*)\2/g)]
       const m = all.length === 1 ? all[0] : undefined
       if (!m || line.includes('<<<')) continue
+      const head = line.slice(0, m.index)
+      // A `<<` inside quotes, or after a comment, opens nothing: the line stays shell text.
+      if (head.trim() && !stepsOf(head, 'bash')) continue
       const word = m[3] ?? ''
-      end = lines.findIndex((l, j) => j > i && (m[1] === '-' ? l.replace(/^\t+/, '') : l).replace(/\r$/, '') === word)
-      t = targetOf(line.slice(0, m.index), line.slice((m.index ?? 0) + m[0].length))
+      // Exactly the word, as bash wants it: `EOF` with a CR after it is not the end.
+      end = lines.findIndex((l, j) => j > i && (m[1] === '-' ? l.replace(/^\t+/, '') : l) === word)
+      if (end < 0) continue
+      t = targetOf(head, line.slice((m.index ?? 0) + m[0].length), lines[end + 1] ?? '')
+      // An unquoted word: the shell runs each `$( )` and backtick in the body as it reads it.
+      const body = lines.slice(i + 1, end).join('\n')
+      if (!m[2] && /\$\(|`/.test(body)) t.isRunning = true
     } else {
       const m = /@(["'])\s*$/.exec(line)
       if (!m) continue
@@ -158,9 +172,10 @@ export const segmentsOf = (cmd: string, shell: Shell = 'bash'): Segment[] => {
     const body = cmd.slice(bodyStart, bodyEnd)
     // A file the command runs later: what it holds is code, whatever it was written as.
     const base = t.path?.split(/[\\/]/).pop() ?? ''
-    const runBy = base
-      ? new RegExp(`(?:^|[\\s;&|(])(${INTERP})(?:\\.exe)?\\s+[^;&|\\n]*${base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'i').exec(cmd.slice(bodyEnd))?.[1]?.toLowerCase()
+    const by = base
+      ? new RegExp(`(?:^|[\\s;&|(])(${INTERP}|source|\\.)(?:\\.exe)?\\s+[^;&|\\n]*${base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'i').exec(cmd.slice(bodyEnd))?.[1]?.toLowerCase()
       : undefined
+    const runBy = by === '.' ? 'source' : by
     out.push({ kind: 'block', text: body, lines: lineCount(body.replace(/\n$/, '')), ...t, ...(runBy ? { runBy, language: t.language ?? LANGUAGE[runBy] } : {}) })
     from = bodyEnd
     i = end - 1
@@ -229,12 +244,14 @@ export const describeStep = (step: string, blocks: Segment[]): string => {
   }
   const size = (k: string | undefined) => {
     const b = block(k)
-    return b ? ` (${b.lines} ${b.lines === 1 ? 'line' : 'lines'}${b.runBy ? `, run later by ${b.runBy}` : ''})` : ''
+    return b ? ` (${b.lines} ${b.lines === 1 ? 'line' : 'lines'}${b.isRunning ? ', runs the $( ) in it now' : ''}${b.runBy ? `, run later by ${b.runBy}` : ''})` : ''
   }
   const env = /^((?:[A-Za-z_]\w*=\S*\s+)+)(\S.*)$/.exec(step)
   if (env?.[1] && env[2]) return `${describeStep(env[2], blocks)} (with ${env[1].trim()})`
-  let m = /^(?:cat|tee)\b.*‹(\d+)›/.exec(step)
-  if (m) return `writes ${block(m[1])?.to ?? 'a file'}${size(m[1])}`
+  let m = /^(?:\.|source)\s+(\S+)(.*)$/.exec(step)
+  if (m) return `runs ${m[1]} in this shell${m[2]?.trim() ? `: ${m[2].trim()}` : ''}`
+  m = /^(?:cat|tee)\b.*‹(\d+)›/.exec(step)
+  if (m) return block(m[1])?.path ? `writes ${block(m[1])?.to}${size(m[1])}` : `feeds the block below to ${block(m[1])?.to ?? 'the next command'}${size(m[1])}`
   m = /^([A-Za-z_]\w*)=/.exec(step)
   if (m) return `sets ${m[1]}`
   m = new RegExp(`^(${INTERP})(?:\\.exe)?\\s+(?:-c|-e|-Command)\\s+(["'])‹(\\d+)›\\2(.*)$`, 'i').exec(step)
