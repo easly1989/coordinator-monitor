@@ -43,6 +43,8 @@ export type RulesFile = {
   critical?: string[]
   /** Model labels per savvy tier, when your savvy agents run other models: { "light": "Haiku · low" }. */
   tierModels?: Record<string, string>
+  /** A session's hat by a word of its name, `{ "planora": "crown" }`; see HAT_NAMES in crab.ts. */
+  hats?: Record<string, string>
 }
 
 export const compileRules = (file: RulesFile | null): { rules: Rule[]; critical: string[] } => {

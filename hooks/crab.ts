@@ -110,6 +110,36 @@ const COSTUMES: Record<string, (f: Fill, t: string) => void> = {
   other: f => body(f),
 }
 
+// A session's own crab wears a hat: themed by a word of its name, else picked by the name's hash.
+const HATS: Record<string, (f: Fill) => void> = {
+  tophat: f => { f(10, 1, 10, 7, '#26262B'); f(10, 6, 10, 2, CLAY); f(7, 8, 16, 2, '#26262B') },
+  beanie: f => { f(14, 0, 1, 4, '#8E929A'); f(13, 0, 3, 1, '#3FB950'); f(9, 4, 12, 2, '#378ADD'); f(8, 6, 14, 2, '#378ADD'); f(7, 8, 16, 2, '#2563A8') },
+  beret: f => { f(9, 5, 14, 2, '#C2417A'); f(7, 7, 17, 3, '#C2417A'); f(15, 3, 2, 2, '#C2417A') },
+  wizard: f => {
+    f(14, 0, 3, 2, '#7F77DD'); f(13, 2, 5, 2, '#7F77DD'); f(12, 4, 7, 2, '#7F77DD'); f(11, 6, 9, 2, '#7F77DD')
+    f(15, 3, 1, 1, '#F5C542'); f(13, 6, 1, 1, '#F5C542'); f(6, 8, 19, 2, '#5A52B5')
+  },
+  captain: f => { f(9, 4, 12, 4, '#F4F3EE'); f(9, 7, 12, 1, '#26262B'); f(14, 5, 2, 2, '#F5C542'); f(7, 8, 16, 2, '#26262B') },
+  crown: f => { f(8, 4, 2, 2, '#F5C542'); f(14, 3, 2, 3, '#F5C542'); f(20, 4, 2, 2, '#F5C542'); f(8, 6, 14, 4, '#F5C542'); f(14, 7, 2, 2, '#E5534B') },
+}
+export const HAT_NAMES = Object.keys(HATS)
+const HAT_WORDS: [RegExp, string][] = [
+  [/home ?lab|server|infra|proxmox|vps|network/i, 'beanie'],
+  [/web|site|blog|\.io\b|page/i, 'beret'],
+  [/spec|plugin|research|design|wizard/i, 'wizard'],
+  [/coordinat|monitor|claude-env/i, 'captain'],
+  [/plan|calendar|agenda/i, 'tophat'],
+]
+
+/** The hat for a session: `custom` (rules.json, by a word of the name) first, then the built-in themes, then a hash. */
+export const hatFor = (name: string, custom: Record<string, string> = {}): string => {
+  for (const [word, hat] of Object.entries(custom)) if (HATS[hat] && name.toLowerCase().includes(word.toLowerCase())) return hat
+  for (const [re, hat] of HAT_WORDS) if (re.test(name)) return hat
+  let h = 0
+  for (const ch of name) h = (h * 31 + (ch.codePointAt(0) ?? 0)) >>> 0
+  return HAT_NAMES[h % HAT_NAMES.length] ?? 'tophat'
+}
+
 const CSS = `<style>
 .run .la{animation:st .5s steps(1) infinite}.run .lb{animation:st .5s steps(1) infinite -.25s}
 .run .bd{animation:bob .5s steps(1) infinite -.125s}
@@ -137,7 +167,7 @@ const CSS = `<style>
 </style>`
 
 /** One crab as a standalone SVG, `size` CSS pixels wide. */
-export const crabSvg = (costume: string, opts: { isWalking?: boolean; isDim?: boolean; size?: number } = {}): string => {
+export const crabSvg = (costume: string, opts: { isWalking?: boolean; isDim?: boolean; size?: number; hat?: string } = {}): string => {
   const size = opts.size ?? 34
   const scale = size / BOX_W
   const groups = new Map<string, string[]>([['bd', []]])
@@ -147,6 +177,7 @@ export const crabSvg = (costume: string, opts: { isWalking?: boolean; isDim?: bo
   }
   const draw = COSTUMES[costume] ?? COSTUMES.other
   draw?.(f, TIER_COLOR[costume] ?? '#888780')
+  if (opts.hat) HATS[opts.hat]?.(f)
   const group = (cls: string) => `<g class="${cls}">${(groups.get(cls) ?? []).join('')}</g>`
   const props = [...groups.keys()].filter(k => k !== 'bd' && k !== 'la' && k !== 'lb')
   const inner = `<g class="bd">${(groups.get('bd') ?? []).join('')}${props.map(group).join('')}</g>${group('la')}${group('lb')}`

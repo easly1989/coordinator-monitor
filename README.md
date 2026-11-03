@@ -22,8 +22,11 @@ It is a Claude Code **mod** (function hooks, the early-access plugin API). Made 
 
 - **Every local session in one place.** Each session that runs the mod publishes its status (state, model, effort, context, subagents) to a shared folder; the pane reads them all. Sessions show under their sidebar names, waiting ones first: the session's header on a shaded band, each subagent an inset row beneath it with its context, tokens and elapsed time. One whose subagents are still working counts as active. The coordinator itself is left out of the list (its chat is beside the pane), though anything it waits on still reaches the inbox.
 - **Open any session.** The **Open** button on a session's card brings it up in the desktop app.
+- **Each session's tasks and progress.** A session's card lists what it is doing and what it has planned, as its own task list has them (the desktop's plan, the CLI's todo list), plus what the coordinator queued for it; a bar shows its tasks done out of all it has to do. Reorder the planned ones with ▲ ▼ ⤒ (under the pointer on the desktop, always on the terminal): the session is told the new order. Nothing in the pane removes a task: ask the coordinator or the session. The list folds away per session.
+- **Lock a session in place.** 🔒 on a session's card keeps it in a group at the top, in your order, so it stops moving as sessions start and stop working. Each session's crab wears a hat of its own, picked from its name.
 - **savvy-flow aware.** With [savvy-flow](https://github.com/johnnyvizz/claude-kit/tree/main/plugins/savvy-flow) and [savvy-progress](https://github.com/johnnyvizz/claude-kit/tree/main/plugins/savvy-progress) installed, workers show up with their tier crab (astronaut, detective, engineer, chef, racer), model and effort, and the steps they report. Without them, any subagent is listed.
-- **Protected commands wait for you.** Merges, pushes to `main`, deploys and service restarts never run without your approval, whatever the session's permission mode. The session is told to stop and wait; you approve once, for the session, or deny, from the pane.
+- **Protected commands wait for you.** Merges, pushes to `main`, deploys and service restarts never run without your approval, whatever the session's permission mode. While a coordinator runs, the command waits in its call for two minutes, as at a dialog: approved from the pane, it runs at once. Unanswered by then, the session is told to stop and wait, and your answer reaches it as a new message.
+- **Large requests read at a glance.** A long shell command is split into its steps, with tags for what they can do (network, runs code, deletes, writes files); a file write shows its path and the code itself, an edit its diff. The full request is one click away. Optionally (`explainRequests`), Haiku adds a sentence or two in plain words, labelled as unverified.
 - **The app's permission prompts come to you too.** While a coordinator session is running, a session whose app would ask for a permission sends the ask to the pane and holds there, as it would at the dialog; approve it once, for the session, or deny it, and the session carries on. With no answer in nine minutes, or no coordinator running, the app's own dialog asks. The coordinator keeps its own dialog: you are in its chat.
 - **Questions come to you.** A session's multiple-choice question (the dialog with options) is forwarded to the pane with every option and a free answer field. Open questions a session ends its turn with, under a `## Questions for you` heading, are shown too, with a reply box.
 - **Reports come to you.** A session that ends its turn with a report and no questions section shows it in the inbox as one line, the whole report a click away, with a reply box. One that waits for your go-ahead (its desktop wrap-up asks, or its text asks for confirmation) is marked, and **Go ahead** answers it.
@@ -81,6 +84,7 @@ The key under `pluginConfigs` is the mod's source id, which depends on how it is
         "language": "auto",
         "coordinatorFolder": "coordinator",
         "forwardQuestions": "on",
+        "explainRequests": "off",
         "busDir": ""
       }
     }
@@ -93,6 +97,7 @@ The key under `pluginConfigs` is the mod's source id, which depends on how it is
 | `language` | `auto` | `en` or `it`; `auto` follows Claude Code's `language` setting, then the locale. |
 | `coordinatorFolder` | empty | Folder name of the coordinator session: the pane opens there by itself. |
 | `forwardQuestions` | `on` | `off` keeps questions in their session's own dialog. |
+| `explainRequests` | `off` | `on` asks Haiku for a short plain-language explanation of each large permission request (a small cost on your plan; written from the request itself, so it can be wrong or steered). |
 | `busDir` | `~/.claude/coordinator-monitor` | The shared folder sessions publish to. |
 
 ### Protected commands
@@ -106,11 +111,14 @@ Add your own, or mark services as critical so their requests stand out, in `<bus
   "replaceDefaults": false,
   "rules": [{ "label": "restart", "pattern": "\\bpm2\\s+restart\\b" }],
   "critical": ["jellyfin", "homeassistant"],
-  "tierModels": { "light": "Haiku · low", "medium": "Sonnet · medium" }
+  "tierModels": { "light": "Haiku · low", "medium": "Sonnet · medium" },
+  "hats": { "planora": "crown" }
 }
 ```
 
-`tierModels` relabels the savvy tiers when your copies of the savvy agents run other models than upstream.
+`tierModels` relabels the savvy tiers when your copies of the savvy agents run other models than upstream. `hats` picks a session's hat by a word of its name: `tophat`, `beanie`, `beret`, `wizard`, `captain` or `crown`.
+
+The coordinator session gets a tool, `queue`, to list, add or remove a session's planned tasks; the pane shows them as "from the coordinator". The mod writes them to `<busDir>/queues.json`.
 
 The rules are a guard against a session doing something you wanted to supervise, not a sandbox: a command written to dodge a pattern is not caught. Keep your normal permission settings.
 

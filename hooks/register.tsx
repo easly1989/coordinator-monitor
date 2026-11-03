@@ -16,20 +16,27 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderChildren, RenderNode } from 'claude-code'
 
-import type { Answer, AnswerKind, Board, ChoiceQuestion, Local, MonitorRequest, PaneUi, SessionStatus } from '../types'
-import { CRAB_H, TIER_COLOR, TIER_MODEL, crabSvg, tierOf } from './crab'
+import type { Answer, AnswerKind, Board, ChoiceQuestion, Local, MonitorRequest, PaneUi, PlanItem, Queues, SessionStatus } from '../types'
+import { CRAB_H, TIER_COLOR, TIER_MODEL, crabSvg, hatFor, tierOf } from './crab'
 import { QUESTIONS_HEADING, asksGoAhead, pickStrings, type Strings } from './i18n'
+import { lineCount, viewOf } from './request'
 import { compileRules, criticalIn, matchRule, type Rule, type RulesFile } from './rules'
 
 const PANE = 'coordinator-monitor'
 const TICK_MS = 3000
+// While a card waits, the session looks for its answer this often.
+const FAST_MS = 1000
 const STALE_MS = 15 * 60 * 1000
 const ENDED_KEEP_MS = 60 * 60 * 1000
 /** Published in every status, so the pane can flag a session still running an older copy. Keep in step with plugin.json. */
-const MOD_VERSION = '0.5.1'
+const MOD_VERSION = '0.6.0'
 const SHELL_TOOLS = new Set(['Bash', 'PowerShell'])
 const STEP_TOOL = 'mcp__savvy-progress__step'
 const FLOW_TOOL = 'mcp__savvy-progress__progress'
+// The desktop app's task list, and the CLI's.
+const PLAN_TOOL = 'mcp__ccd_turn__update_plan'
+// The coordinator's tool for what it queues per session.
+const QUEUE_TOOL = 'mcp__coordinator-monitor__queue'
 // The desktop app's end-of-turn box: its recap and its one question.
 const WRAP_TOOL = 'mcp__ccd_turn__wrap_up'
 // Past this a report keeps its head: the pane is a glance, the session has the rest.
@@ -66,6 +73,11 @@ let tierModels: Record<string, string> = { ...TIER_MODEL }
 let forward = true
 let ticking = false
 let lastFollow = 0
+let lastFull = 0
+let hats: Record<string, string> = {}
+let explainOn = false
+// Protected commands whose tool call waits on the pane's answer: that wait applies it, not the tick.
+const holding = new Set<string>()
 let home = '.'
 // The desktop app's own record of this session: its sidebar title and effort.
 let label = ''
@@ -207,6 +219,7 @@ const publish = async ($: $, state?: SessionStatus['state']): Promise<void> => {
     }),
     flow: l.flow,
     requests: l.requests,
+    plan: l.plan,
   }
   await $.fs.write(`${base}/sessions/${sessionId}.json`, JSON.stringify(status))
 }
@@ -215,8 +228,15 @@ const applyAnswers = async ($: $): Promise<void> => {
   const answers = await readJson<Answer[]>($, `${base}/answers/${sessionId}.json`)
   if (!answers?.length) return
   const l = await read($, local)
-  // An app ask is answered by the hook that waits on it, not here.
-  const fresh = answers.filter(a => !l.applied.includes(a.requestId) && l.requests.some(r => r.id === a.requestId && r.kind !== 'ask'))
+  // The person's order for the planned tasks: a note the model reads at its next request, no turn of its own.
+  for (const a of answers.filter(x => x.kind === 'order' && x.text && !l.applied.includes(x.requestId))) {
+    await update($, local, cur => ({ ...cur, applied: [...cur.applied, a.requestId].slice(-300) }))
+    await $.session.append({ message: { type: 'user', content: [{ type: 'text', text: S.orderMsg(a.text ?? '') }] } }).catch(() => undefined)
+  }
+  // An app ask, and a protected command held in its call, are answered by the hook that waits on them.
+  const fresh = answers.filter(
+    a => !l.applied.includes(a.requestId) && !holding.has(a.requestId) && l.requests.some(r => r.id === a.requestId && r.kind !== 'ask'),
+  )
   if (!fresh.length) return
   const prompts: string[] = []
   await update($, local, cur => {
@@ -264,18 +284,20 @@ const grantKey = (r: MonitorRequest): string => (r.kind === 'ask' ? askKey(r.too
 
 // How long an app ask waits for the pane before the app's own dialog takes it (a process waits ten minutes at most).
 const ASK_WAIT_MS = 9 * 60_000
+// How long a protected command's call waits for the pane before it is refused and the session waits by turns.
+const HOLD_MS = 2 * 60_000
 
 /**
  * Waits until the pane answers request `id`, outside the hook's 10 s budget: a host process watches
  * this session's answers file, and a `$` call in flight never counts against the hook.
  * shortcut: the watcher outlives a session interrupted meanwhile, up to ASK_WAIT_MS; harmless, it only reads.
  */
-const waitAnswer = async ($: $, id: string): Promise<Answer | undefined> => {
+const waitAnswer = async ($: $, id: string, timeoutMs = ASK_WAIT_MS): Promise<Answer | undefined> => {
   const path = `${base}/answers/${sessionId}.json`
   const argv = /^[a-z]:/i.test(home)
     ? ['powershell', '-NoProfile', '-NonInteractive', '-Command', "while (-not ((Test-Path -LiteralPath $env:CM_FILE) -and ((Get-Content -LiteralPath $env:CM_FILE -Raw) + '').Contains($env:CM_ID))) { Start-Sleep -Milliseconds 400 }"]
     : ['sh', '-c', 'until grep -qF "$CM_ID" "$CM_FILE" 2>/dev/null; do sleep 0.4; done']
-  await $.process.run(argv, { env: { CM_FILE: path, CM_ID: id }, timeoutMs: ASK_WAIT_MS }).catch(() => undefined)
+  await $.process.run(argv, { env: { CM_FILE: path, CM_ID: id }, timeoutMs }).catch(() => undefined)
   return (await readJson<Answer[]>($, path))?.find(a => a.requestId === id)
 }
 
@@ -318,6 +340,27 @@ const ASK_VERB = /\b(approv|confirm|conferm|answer|rispond|accept|accett)\w*/i
 const asksOwn = (text: string, ids: Set<string>): boolean =>
   [...text.matchAll(/\b[a-z0-9]{8,16}\b/g)].some(m => ids.has(m[0]) && ASK_VERB.test(text.slice(Math.max(0, m.index - 100), m.index).split(/[.!?\n]/).pop() ?? ''))
 
+type PlanArgs = { items?: { content?: unknown; status?: unknown }[]; advance?: boolean; done?: number[]; start?: number }
+const planStatus = (s: unknown): PlanItem['status'] => (s === 'completed' || s === 'in_progress' ? s : 'pending')
+
+/** The task list after one plan call: a whole list replaces it; `advance`, `done` and `start` (1-based) move it on. */
+const nextPlan = (cur: PlanItem[], a: PlanArgs): PlanItem[] => {
+  const items = Array.isArray(a.items)
+    ? a.items.filter(x => x && typeof x.content === 'string').map(x => ({ text: String(x.content), status: planStatus(x.status) }))
+    : cur.map(p => ({ ...p }))
+  const set = (i: number, status: PlanItem['status']) => {
+    const it = items[i]
+    if (it) it.status = status
+  }
+  if (a.advance) {
+    set(items.findIndex(p => p.status === 'in_progress'), 'completed')
+    set(items.findIndex(p => p.status === 'pending'), 'in_progress')
+  }
+  for (const n of Array.isArray(a.done) ? a.done : []) set(n - 1, 'completed')
+  if (typeof a.start === 'number') set(a.start - 1, 'in_progress')
+  return items.slice(0, 50)
+}
+
 /** Takes one approve-once grant, atomically: two calls racing for one grant get it once. */
 const takeOnce = async ($: $, key: string): Promise<boolean> => {
   let took = false
@@ -352,6 +395,22 @@ const addRequest = async ($: $, req: MonitorRequest): Promise<void> => {
   await publish($)
 }
 
+/** A request too long to take in at a glance: its card leads with a summary. */
+const isLarge = (what: string): boolean => what.length > 400 || what.split('\n').length > 8
+
+/**
+ * Asks a small model for a plain-language gloss of a large request, when the person turned that on
+ * (`explainRequests`). The text it reads is the request itself, so the card labels it as unverified.
+ */
+const explainLater = async ($: $, id: string, tool: string, what: string): Promise<void> => {
+  if (!explainOn || !isLarge(what)) return
+  const r = await $.model.complete({ model: 'haiku', maxTokens: 200, prompt: S.explainPrompt(tool, what.slice(0, 20_000)) }).catch(() => null)
+  const text = r?.isAnswered ? r.text.trim().slice(0, 600) : ''
+  if (!text) return
+  await update($, local, cur => ({ ...cur, requests: cur.requests.map(x => (x.id === id ? { ...x, explain: text } : x)) }))
+  void publish($)
+}
+
 /** Drops the requests `gone` picks, once the session has moved past them, and republishes. */
 const retire = async ($: $, gone: (r: MonitorRequest) => boolean): Promise<void> => {
   if (!(await read($, local)).requests.some(gone)) return
@@ -377,8 +436,15 @@ const openSession = async ($: $, localId: string): Promise<boolean> => {
 // ---------------------------------------------------------------------------
 // The pane's side: gather every session, write answers.
 
+const queuesPath = (): string => `${base}/queues.json`
+const readQueues = async ($: $): Promise<Queues> => {
+  const q = await readJson<Queues>($, queuesPath())
+  return q && typeof q === 'object' ? Object.fromEntries(Object.entries(q).map(([k, v]) => [k, Array.isArray(v) ? v.filter(x => typeof x === 'string') : []])) : {}
+}
+
 const gather = async ($: $): Promise<void> => {
   const entries = await $.fs.list(`${base}/sessions`).catch(() => [])
+  const queues = await readQueues($)
   const now = Date.now()
   const all: SessionStatus[] = []
   for (const entry of entries) {
@@ -392,7 +458,11 @@ const gather = async ($: $): Promise<void> => {
     const str = (v: unknown): string | undefined => (typeof v === 'string' ? v : undefined)
     s.requests = (Array.isArray(s.requests) ? s.requests : [])
       .filter(r => r && typeof r.id === 'string')
-      .map(r => ({ ...r, tool: str(r.tool), command: str(r.command), rule: str(r.rule), text: str(r.text), summary: str(r.summary), decision: str(r.decision) }))
+      .map(r => ({ ...r, tool: str(r.tool), command: str(r.command), rule: str(r.rule), text: str(r.text), summary: str(r.summary), decision: str(r.decision), explain: str(r.explain) }))
+    s.plan = (Array.isArray(s.plan) ? s.plan : [])
+      .filter(p => p && typeof p.text === 'string')
+      .map(p => ({ text: p.text, status: p.status === 'completed' || p.status === 'in_progress' ? p.status : 'pending' }))
+    s.queue = queues[s.sessionId]
     // A session idle while its subagents work is still at work.
     if (s.state === 'idle' && s.agents.some(a => a.status === 'running')) s.state = 'running'
     all.push(s)
@@ -413,15 +483,40 @@ const gather = async ($: $): Promise<void> => {
   await update($, board, () => ({ sessions: all, updatedAt: now }))
 }
 
-const answer = async ($: $, target: SessionStatus, req: MonitorRequest, kind: AnswerKind, text?: string): Promise<void> => {
+/** Adds `a` to the session's answers file, keeping what is still waiting to be picked up. */
+const postAnswer = async ($: $, target: SessionStatus, a: Answer): Promise<void> => {
   const path = `${base}/answers/${target.sessionId}.json`
   const live = new Set(target.requests.map(r => r.id))
   const prev = (await readJson<Answer[]>($, path)) ?? []
-  const kept = prev.filter(a => live.has(a.requestId) && a.requestId !== req.id)
-  await $.fs.write(path, JSON.stringify([...kept, { requestId: req.id, at: Date.now(), kind, text }]))
-  await update($, paneUi, u => ({ ...u, sent: [...u.sent, req.id].slice(-300) }))
-  $.ui.toast(S.sentToast(target.title))
+  // An order names no request: it stays a minute, time enough for the session's tick.
+  const kept = prev.filter(x => (live.has(x.requestId) || (x.kind === 'order' && Date.now() - x.at < 60_000)) && x.requestId !== a.requestId)
+  await $.fs.write(path, JSON.stringify([...kept, a]))
   if (target.sessionId === sessionId) await applyAnswers($)
+}
+
+const answer = async ($: $, target: SessionStatus, req: MonitorRequest, kind: AnswerKind, text?: string): Promise<void> => {
+  await update($, paneUi, u => ({ ...u, sent: [...u.sent, req.id].slice(-300) }))
+  await postAnswer($, target, { requestId: req.id, at: Date.now(), kind, text })
+  $.ui.toast(S.sentToast(target.title))
+  // Read again now: the session's next status shows the card gone sooner than the next tick would.
+  void gather($)
+}
+
+/** The planned tasks a session shows, in the person's order: its own plan's pending ones, then the queue's. */
+const plannedOf = (s: SessionStatus, order: string[] = []): PlanItem[] => {
+  const items: PlanItem[] = [...(s.plan ?? []).filter(p => p.status === 'pending'), ...(s.queue ?? []).map(text => ({ text, status: 'pending' as const, from: 'queue' as const }))]
+  const at = (p: PlanItem) => (order.includes(p.text) ? order.indexOf(p.text) : order.length + items.indexOf(p))
+  return items.sort((a, b) => at(a) - at(b))
+}
+
+/** Moves planned task `i` of session `s` to `to`, keeps the order, and tells the session. */
+const movePlanned = async ($: $, s: SessionStatus, i: number, to: number): Promise<void> => {
+  const list = plannedOf(s, (await read($, paneUi)).order?.[s.sessionId]).map(p => p.text)
+  const [moved] = list.splice(i, 1)
+  if (moved === undefined) return
+  list.splice(Math.max(0, Math.min(list.length, to)), 0, moved)
+  await update($, paneUi, u => ({ ...u, order: { ...u.order, [s.sessionId]: list } }))
+  await postAnswer($, s, { requestId: `order-${newId()}`, at: Date.now(), kind: 'order', text: list.map((t, n) => `${n + 1}. ${t}`).join('\n') })
 }
 
 const newer = (a: string, b: string): boolean => a.localeCompare(b, undefined, { numeric: true }) > 0
@@ -447,7 +542,12 @@ const tick = async ($: $): Promise<void> => {
   if (ticking) return
   ticking = true
   try {
+    // Every second only the answers are looked for, and only while a card waits; the rest every three.
+    const isDue = Date.now() - lastFull >= TICK_MS - 100
+    if (!isDue && !(await read($, local)).requests.length) return
     await applyAnswers($)
+    if (!isDue) return
+    lastFull = Date.now()
     const me = (await desktopIndex($).catch(() => new Map<string, DesktopMeta>())).get(sessionId)
     label = me?.title?.trim() ?? ''
     effort = me?.effort ?? ''
@@ -485,8 +585,19 @@ const bar = (ratio: number, width: number): string => {
 // Wide markup and no width prop: the surface clamps it to the slot, and `none` stretches it to fit.
 const barSvg = (ratio: number, color: string): string =>
   `<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="4" viewBox="0 0 1000 4" preserveAspectRatio="none">` +
-  `<rect width="1000" height="4" fill="#8080804D"/>` +
-  `<rect width="${Math.round(clamp01(ratio) * 1000)}" height="4" fill="${color}"/></svg>`
+  `<rect width="1000" height="4" rx="5" ry="2" fill="#8080804D"/>` +
+  `<rect width="${Math.round(clamp01(ratio) * 1000)}" height="4" rx="5" ry="2" fill="${color}"/></svg>`
+const xml = (s: string): string => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+/** A rounded label: its text pressed to the width it is given, so no font's metrics can overflow it. */
+const pillSvg = (label: string, bg: string, fg: string): string => {
+  const textW = Math.round([...label].reduce((w, ch) => w + (/[A-Z0-9À-Ý]/.test(ch) ? 7.2 : 6.2), 0))
+  const w = textW + 16
+  return (
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="18" viewBox="0 0 ${w} 18">` +
+    `<rect width="${w}" height="18" rx="9" fill="${bg}"/>` +
+    `<text x="8" y="12.5" textLength="${textW}" lengthAdjust="spacingAndGlyphs" font-family="system-ui,Segoe UI,sans-serif" font-size="11" font-weight="600" fill="${fg}">${xml(label)}</text></svg>`
+  )
+}
 /** "claude-opus-5-5" reads "Opus 5.5". */
 const prettyModel = (id: string): string => {
   const m = /^claude-([a-z]+)-(\d+)(?:-(\d+))?/.exec(id)
@@ -512,6 +623,7 @@ const HEAD = '#80808024'
 const BLUE = '#5B8DEF'
 const BLUE_TINT = '#5B8DEF33'
 const ON_AMBER = '#1F1E1D'
+const RISK_COLOR: Record<string, string> = { net: '#5B8DEF', exec: '#E5534B', del: '#E5534B', write: '#E8A33D' }
 
 export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
@@ -535,9 +647,28 @@ export const register: Register = (on, options) => {
     rules = compiled.rules
     critical = compiled.critical
     tierModels = { ...TIER_MODEL, ...(rulesFile?.tierModels ?? {}) }
+    hats = rulesFile?.hats ?? {}
+    explainOn = (options.explainRequests as string | undefined) === 'on'
 
     await $.command.register({ name: 'agents-monitor', description: 'Open the pane with every local session, its subagents and what waits for you' })
-    $.clock.every(TICK_MS, () => void tick($))
+    // Only the coordinator queues work for the sessions.
+    if (isCoordinator)
+      await $.tool.register({
+        name: 'queue',
+        description:
+          "Lists, adds or removes a session's planned tasks in the coordinator pane (its 'Planned' list). Use it when you hand a session work for later, and to remove a task only when the person asks.",
+        inputSchema: {
+          type: 'object',
+          properties: {
+            action: { type: 'string', enum: ['list', 'add', 'remove'] },
+            session: { type: 'string', description: "The session's title as the pane shows it, or its id" },
+            text: { type: 'string', description: 'add, remove: the task, one line' },
+          },
+          required: ['action', 'session'],
+        },
+        isDeferred: false,
+      }).catch(() => undefined)
+    $.clock.every(FAST_MS, () => void tick($))
     void tick($)
     if (isCoordinator) {
       const opened = await $.ui.open({ id: PANE, title: S.pane })
@@ -629,7 +760,12 @@ export const register: Register = (on, options) => {
   })
 
   on('tool.call', { tool: WRAP_TOOL }, async ($, e, next) => {
-    if (!e.agentId) wrap = { recap: typeof e.recap === 'string' ? e.recap : undefined, ask: typeof e.ask === 'string' ? e.ask : undefined }
+    if (!e.agentId) {
+      wrap = { recap: typeof e.recap === 'string' ? e.recap : undefined, ask: typeof e.ask === 'string' ? e.ask : undefined }
+      // The wrap-up checks the desktop's task list off.
+      await update($, local, cur => (cur.plan?.length ? { ...cur, plan: cur.plan.map(p => ({ ...p, status: 'completed' as const })) } : cur))
+      await publish($)
+    }
     return next(e)
   }).catch(($, e, next) => next(e))
 
@@ -685,6 +821,51 @@ export const register: Register = (on, options) => {
     return ran
   }).catch(($, e, next) => next(e))
 
+  // The session's task list, as the desktop's update_plan and the CLI's TodoWrite leave it: the main loop's alone.
+  on('tool.call', { tool: PLAN_TOOL }, async ($, e, next) => {
+    const ran = await next(e)
+    if (!e.agentId) {
+      await update($, local, cur => ({ ...cur, plan: nextPlan(cur.plan ?? [], e as unknown as PlanArgs) }))
+      await publish($)
+    }
+    return ran
+  }).catch(($, e, next) => next(e))
+
+  on('tool.call', { tool: 'TodoWrite' }, async ($, e, next) => {
+    const ran = await next(e)
+    const todos = (e as unknown as { todos?: { content?: unknown; status?: unknown }[] }).todos
+    if (!e.agentId && Array.isArray(todos)) {
+      await update($, local, cur => ({ ...cur, plan: nextPlan(cur.plan ?? [], { items: todos }) }))
+      await publish($)
+    }
+    return ran
+  }).catch(($, e, next) => next(e))
+
+  // The coordinator's queue per session. The mod writes it: no session may write the bus itself.
+  on('tool.call', { tool: QUEUE_TOOL }, async ($, e) => {
+    const a = e as unknown as { action?: string; session?: string; text?: string }
+    const q = String(a.session ?? '').trim().toLowerCase()
+    const all = (await read($, board)).sessions
+    const s = q
+      ? (all.find(x => x.sessionId === a.session || x.localId === a.session) ?? all.find(x => x.title.toLowerCase() === q) ?? all.find(x => x.title.toLowerCase().includes(q)))
+      : undefined
+    if (!s) return { result: `No session in the pane matches "${a.session ?? ''}".` }
+    const queues = await readQueues($)
+    const list = [...(queues[s.sessionId] ?? [])]
+    const text = String(a.text ?? '').replace(/\s+/g, ' ').trim().slice(0, 200)
+    if (a.action === 'add' && text) list.push(text)
+    if (a.action === 'remove') {
+      const i = list.indexOf(text) >= 0 ? list.indexOf(text) : list.findIndex(t => text && t.toLowerCase().includes(text.toLowerCase()))
+      if (i < 0) return { result: `"${text}" is not queued for ${s.title}.` }
+      list.splice(i, 1)
+    }
+    if (a.action === 'add' || a.action === 'remove') {
+      await $.fs.write(queuesPath(), JSON.stringify({ ...queues, [s.sessionId]: list }))
+      void gather($)
+    }
+    return { result: `${s.title}: ${list.length ? list.map((t, n) => `${n + 1}. ${t}`).join('\n') : 'nothing queued'}` }
+  }).catch(() => ({ result: 'coordinator-monitor could not change the queue' }))
+
   // Multiple-choice questions go to the pane instead of a dialog nobody watches.
   on('tool.call', { tool: 'AskUserQuestion' }, async ($, e, next) => {
     if (!forward) return next(e)
@@ -712,6 +893,7 @@ export const register: Register = (on, options) => {
     if (!(await coordinatorLive($))) return next(e)
     const id = newId()
     await addRequest($, { id, kind: 'ask', createdAt: Date.now(), tool: e.tool_name, command: what, rule: S.appPermission, agentId: e.agent_id })
+    void explainLater($, id, e.tool_name, what)
     const a = await waitAnswer($, id)
     await update($, local, cur => ({
       ...cur,
@@ -747,6 +929,29 @@ export const register: Register = (on, options) => {
     if (!pending) {
       const crit = criticalIn(critical, command)
       await addRequest($, { id, kind: 'permission', createdAt: Date.now(), tool: e.tool, command, rule: crit ? `${rule.label} · ${crit}` : rule.label, agentId: e.agentId })
+      void explainLater($, id, e.tool, command)
+      // With a coordinator there, the call waits a while for its answer, as at the app's dialog: an
+      // approval then runs it at once, with no new turn. Unanswered, it is refused and waits as before.
+      if (await coordinatorLive($)) {
+        holding.add(id)
+        try {
+          const a = await waitAnswer($, id, HOLD_MS)
+          if (a?.kind === 'approve-once' || a?.kind === 'approve-session' || a?.kind === 'deny') {
+            await update($, local, cur => ({
+              ...cur,
+              requests: cur.requests.filter(r => r.id !== id),
+              applied: [...cur.applied, id].slice(-300),
+              grantsSession: a.kind === 'approve-session' ? [...cur.grantsSession, command] : cur.grantsSession,
+            }))
+            await publish($)
+            return a.kind === 'deny'
+              ? { decision: 'deny', reason: S.deniedMsg(fence(command)) }
+              : { decision: 'allow', reason: 'approved from the coordinator pane' }
+          }
+        } finally {
+          holding.delete(id)
+        }
+      }
     }
     return { decision: 'deny', reason: S.waitApproval(rule.label, id) }
   }).catch(() => ({ decision: 'deny', reason: 'coordinator-monitor could not check this protected command' }))
@@ -766,18 +971,26 @@ export const register: Register = (on, options) => {
     // Fills only where the surface blends them.
     const fill = (c: string): string | undefined => (isTerm ? undefined : c)
 
-    const crab = (costume: string, alt: string, walking: boolean, dim = false, size = 30): RenderChildren =>
-      Svg ? <Svg source={crabSvg(costume, { isWalking: walking, isDim: dim, size })} alt={alt} width={size} height={CRAB_H(size)} /> : null
+    const crab = (costume: string, alt: string, walking: boolean, dim = false, size = 30, hat?: string): RenderChildren =>
+      Svg ? <Svg source={crabSvg(costume, { isWalking: walking, isDim: dim, size, hat })} alt={alt} width={size} height={CRAB_H(size)} /> : null
     const meter = (ratio: number, color: string, alt: string): RenderChildren =>
       Svg ? <Svg source={barSvg(ratio, color)} alt={alt} height={4} /> : <Text color={color}>{bar(ratio, Math.max(10, Math.min(40, cols - 16)))}</Text>
+    // A rounded pill where the surface draws SVG; the terminal keeps its reversed text.
     const badge = (label: string, tone: 'amber' | 'blue' = 'amber'): RenderNode =>
-      tone === 'amber' ? (
-        <Text size="caption" weight="bold" color={isTerm ? 'warning' : ON_AMBER} backgroundColor={fill(AMBER)}>
+      Svg ? (
+        <Svg source={pillSvg(label, tone === 'amber' ? AMBER : BLUE_TINT, tone === 'amber' ? ON_AMBER : BLUE)} alt={label} height={18} />
+      ) : (
+        <Text size="caption" weight="bold" color={tone === 'amber' ? 'warning' : BLUE}>
           {` ${label} `}
         </Text>
+      )
+    // A small coloured label: a pill where SVG draws, coloured text on the terminal.
+    const tag = (label: string, color: string): RenderNode =>
+      Svg ? (
+        <Svg source={pillSvg(label, `${color}2E`, color)} alt={label} height={18} />
       ) : (
-        <Text size="caption" weight="semibold" color={BLUE} backgroundColor={fill(BLUE_TINT)}>
-          {` ${label} `}
+        <Text size="caption" color={color}>
+          {`[${label}]`}
         </Text>
       )
     // The desktop draws a field without chrome: frame it so it reads as one.
@@ -901,10 +1114,86 @@ export const register: Register = (on, options) => {
         )
       }
       if (r.kind === 'permission' || r.kind === 'ask') {
+        const what = r.command ?? ''
+        const raw = <Code key={`raw-${r.id}`} source={what} language={what.startsWith('{') ? 'json' : r.tool === 'PowerShell' ? 'powershell' : 'bash'} />
+        // A large request, or a file it writes, leads with what it does; the request itself stays a press away.
+        const view = viewOf(what)
+        const isSummed = !!view && (isLarge(what) || view.kind !== 'shell')
+        const isRawOpen = !!u.open?.[`${r.id}:raw`]
+        const HEAD_LINES = 12
+        const summary: RenderChildren = !view ? null : view.kind === 'shell' ? (
+          <Box flexDirection="column" gap="xs">
+            <Box flexDirection="row" flexWrap="wrap" gap="sm" alignItems="center">
+              <Text size="caption" color="subtle">
+                {S.steps(view.steps.length)}
+              </Text>
+              {view.risks.map(k => (
+                <Box key={`risk-${r.id}-${k}`}>{tag(S.risk[k] ?? k, RISK_COLOR[k] ?? BLUE)}</Box>
+              ))}
+            </Box>
+            {view.steps.slice(0, 15).map((st, i) => (
+              <Text key={`st-${r.id}-${i}`} size="footnote" wrap="truncate-end">
+                <Text color="subtle">{`${i + 1}. `}</Text>
+                {st.length > 160 ? `${st.slice(0, 160)}…` : st}
+              </Text>
+            ))}
+            {view.steps.length > 15 ? (
+              <Text size="caption" color="subtle">
+                {`+${view.steps.length - 15}`}
+              </Text>
+            ) : null}
+          </Box>
+        ) : (
+          <Box flexDirection="column" gap="xs">
+            <Text size="footnote">
+              <Text color="subtle">{`${view.kind === 'write' ? S.writes : S.edits} `}</Text>
+              <Text weight="semibold">{view.path}</Text>
+              <Text color="subtle">{view.kind === 'write' ? ` · ${S.lines(lineCount(view.content))}` : ''}</Text>
+            </Text>
+            {view.kind === 'write' ? (
+              <Code key={`body-${r.id}`} source={view.content.split('\n').slice(0, HEAD_LINES).join('\n')} path={view.path} startLine={1} />
+            ) : (
+              <Code key={`body-${r.id}`} source={view.diff} format="diff" path={view.path} />
+            )}
+            {view.kind === 'write' && lineCount(view.content) > HEAD_LINES ? (
+              <Text size="caption" color="subtle">
+                {S.firstLines(HEAD_LINES, lineCount(view.content))}
+              </Text>
+            ) : null}
+          </Box>
+        )
         return shell(
           <Box flexDirection="column" gap="sm">
             {head(S.permission, `${s.title} · ${r.tool ?? 'Bash'}`)}
-            <Code source={r.command ?? ''} language={r.command?.startsWith('{') ? 'json' : r.tool === 'PowerShell' ? 'powershell' : 'bash'} />
+            {isSummed ? summary : raw}
+            {r.explain ? (
+              <Box flexDirection="column" gap="xs" padding="sm" borderStyle="round" borderColor={isTerm ? undefined : '#7F77DD66'} borderDimColor={isTerm} backgroundColor={fill('#7F77DD14')}>
+                <Text size="caption" weight="semibold" color="#B3ADF0">
+                  {S.explainLabel}
+                </Text>
+                <Text size="footnote">{r.explain}</Text>
+                <Text size="caption" color="subtle">
+                  {S.explainWarn}
+                </Text>
+              </Box>
+            ) : null}
+            {isSummed ? (
+              <Box flexDirection="column" gap="xs">
+                <Box flexDirection="row" gap="sm" alignItems="center" justifyContent="space-between">
+                  <Text size="caption" color="subtle">
+                    {S.commandSize(lineCount(what), what.length)}
+                  </Text>
+                  <Button
+                    key={`raw-${r.id}-b`}
+                    plain
+                    dimColor
+                    label={isRawOpen ? `▾ ${S.hideCommand}` : `▸ ${S.showCommand}`}
+                    onPress={() => void update($, paneUi, cur => ({ ...cur, open: { ...cur.open, [`${r.id}:raw`]: !isRawOpen } }))}
+                  />
+                </Box>
+                {isRawOpen ? raw : null}
+              </Box>
+            ) : null}
             {r.rule ? (
               <Text size="footnote" color={r.rule.includes('·') ? 'warning' : 'subtle'}>
                 {r.rule.includes('·') ? `${r.rule} — ${S.critical}` : r.rule}
@@ -1055,6 +1344,9 @@ export const register: Register = (on, options) => {
     const shown = others.filter(s =>
       u.filter === 'waiting' ? s.state === 'waiting' : u.filter === 'active' ? s.state === 'running' || s.state === 'waiting' : true,
     )
+    // Locked sessions hold their place, in the person's order, above the rest, which sort by activity.
+    const locked = (u.locked ?? []).map(id => shown.find(s => s.sessionId === id)).filter((s): s is SessionStatus => !!s)
+    const loose = shown.filter(s => !u.locked?.includes(s.sessionId))
 
     const pill = (state: string): RenderNode | null =>
       state === 'waiting' ? badge(S.st.waiting ?? state) : state === 'running' ? badge(S.st.running ?? state, 'blue') : (
@@ -1088,40 +1380,144 @@ export const register: Register = (on, options) => {
                 : ''
       const flow = s.flow ? `${s.flow.title} · ${s.flow.done}/${s.flow.total}${s.flow.phase ? ` · ${s.flow.phase}` : ''}` : ''
       const costume = s.state === 'waiting' ? 'waiting' : 'other'
+      const id = s.sessionId
+      const isLocked = !!u.locked?.includes(id)
+      const toggleLock = () =>
+        void update($, paneUi, cur => ({ ...cur, locked: isLocked ? (cur.locked ?? []).filter(x => x !== id) : [...(cur.locked ?? []), id] }))
+      const lockUp = () =>
+        void update($, paneUi, cur => {
+          const l = [...(cur.locked ?? [])]
+          const i = l.indexOf(id)
+          if (i > 0) [l[i - 1], l[i]] = [l[i] ?? id, l[i - 1] ?? id]
+          return { ...cur, locked: l }
+        })
+      // The session's progress: its plan's done tasks over all it has to do, the queue's included.
+      const plan = s.plan ?? []
+      const done = plan.filter(p => p.status === 'completed').length
+      const total = plan.length + (s.queue?.length ?? 0)
+      const now = plan.filter(p => p.status === 'in_progress')
+      const planned = plannedOf(s, u.order?.[id])
+      const isFolded = !!u.tasksFolded?.[id]
+      // Move controls show under the pointer where there is one; always where there is none.
+      const hasHover = !isTerm && e.surface !== 'mobile'
+      const plannedRow = (p: PlanItem, i: number): RenderNode => (
+        <Box key={`pl-${id}-${i}`} flexDirection="row" gap="sm" alignItems="center" paddingX="sm" hover={hasHover ? { backgroundColor: '#80808026' } : undefined}>
+          <Text size="caption" color="subtle">
+            {`${i + 1}.`}
+          </Text>
+          <Box flexGrow={1} flexShrink={1}>
+            <Text size="footnote" wrap="truncate-end">
+              {p.text}
+            </Text>
+          </Box>
+          <Text size="caption" color="subtle">
+            {p.from === 'queue' ? S.fromQueue : S.fromSession}
+          </Text>
+          <Box flexDirection="row" gap="xs" display={hasHover ? 'none' : 'flex'} hover={hasHover ? { display: 'flex' } : undefined}>
+            <Button key={`top-${id}-${i}`} plain dimColor label={S.moveTop} onPress={() => void movePlanned($, s, i, 0)}>
+              ⤒
+            </Button>
+            <Button key={`up-${id}-${i}`} plain dimColor label={S.moveUp} onPress={() => void movePlanned($, s, i, i - 1)}>
+              ▲
+            </Button>
+            <Button key={`down-${id}-${i}`} plain dimColor label={S.moveDown} onPress={() => void movePlanned($, s, i, i + 1)}>
+              ▼
+            </Button>
+          </Box>
+        </Box>
+      )
       return (
-        <Box key={s.sessionId} flexDirection="column" borderStyle="round" borderColor={isTerm ? undefined : s.state === 'waiting' ? AMBER_LINE : CARD_LINE} borderDimColor={isTerm} backgroundColor={fill(CARD)}>
-          {/* The session's header: a band of its own, larger type, the session's figures on the right. */}
-          <Box flexDirection="row" gap="sm" alignItems="center" padding="md" backgroundColor={fill(HEAD)}>
-            {crab(costume, s.title, s.state === 'running', s.state === 'ended' || s.state === 'idle', 34)}
-            <Box flexDirection="column" flexGrow={1} flexShrink={1}>
-              <Text weight="bold">{s.title}</Text>
-              <Text size="footnote" color="subtle" wrap="truncate-end">
-                {flow || asks || who || s.folder || s.cwd}
-              </Text>
-              {/* Mods do not hot-reload: a session keeps the copy it loaded until /reload-plugins. */}
-              {s.state !== 'ended' && (s.version ?? '0').localeCompare(MOD_VERSION, undefined, { numeric: true }) < 0 ? (
-                <Text size="caption" color="warning" wrap="truncate-end">
-                  {S.oldMod(s.version ?? '< 0.3')}
+        // padding 0: the header's band reaches the card's edges.
+        <Box key={id} flexDirection="column" padding={0} borderStyle="round" borderColor={isTerm ? undefined : s.state === 'waiting' ? AMBER_LINE : CARD_LINE} borderDimColor={isTerm} backgroundColor={fill(CARD)}>
+          {/* The session's header: a band of its own, the session's figures beside its name, its progress under it. */}
+          <Box flexDirection="column" gap="xs" padding="md" backgroundColor={fill(HEAD)}>
+            <Box flexDirection="row" gap="sm" alignItems="center">
+              {crab(costume, s.title, s.state === 'running', s.state === 'ended' || s.state === 'idle', 34, hatFor(`${s.title} ${s.folder ?? ''}`, hats))}
+              <Box flexDirection="column" flexGrow={1} flexShrink={1}>
+                <Box flexDirection="row" gap="sm" alignItems="center">
+                  <Text weight="bold" wrap="truncate-end">
+                    {s.title}
+                  </Text>
+                  {pill(s.state)}
+                </Box>
+                <Text size="footnote" color="subtle" wrap="truncate-end">
+                  {flow || asks || who || s.folder || s.cwd}
                 </Text>
-              ) : null}
-            </Box>
-            <Box flexDirection="column" alignItems="flex-end" gap="xs">
-              {pill(s.state)}
+                {/* Mods do not hot-reload: a session keeps the copy it loaded until /reload-plugins. */}
+                {s.state !== 'ended' && (s.version ?? '0').localeCompare(MOD_VERSION, undefined, { numeric: true }) < 0 ? (
+                  <Text size="caption" color="warning" wrap="truncate-end">
+                    {S.oldMod(s.version ?? '< 0.3')}
+                  </Text>
+                ) : null}
+              </Box>
               <Text size="caption" color="subtle">
                 {meta}
               </Text>
+              {openButton(s, `open-${id}`)}
+              {isLocked && u.locked?.[0] !== id ? (
+                <Button key={`lockup-${id}`} plain dimColor label={S.moveUp} onPress={lockUp}>
+                  ▲
+                </Button>
+              ) : null}
+              <Button key={`lock-${id}`} plain dimColor={!isLocked} label={isLocked ? S.unlock : S.lock} onPress={toggleLock}>
+                {isLocked ? '🔒' : '🔓'}
+              </Button>
+              {s.agents.length ? (
+                <Button
+                  key={`c-${id}`}
+                  plain
+                  dimColor
+                  label={isCol ? `▸ ${s.agents.length}` : '▾'}
+                  onPress={() => void update($, paneUi, cur => ({ ...cur, collapsed: { ...cur.collapsed, [id]: !isCol } }))}
+                />
+              ) : null}
             </Box>
-            {openButton(s, `open-${s.sessionId}`)}
-            {s.agents.length ? (
-              <Button
-                key={`c-${s.sessionId}`}
-                plain
-                dimColor
-                label={isCol ? `▸ ${s.agents.length}` : '▾'}
-                onPress={() => void update($, paneUi, cur => ({ ...cur, collapsed: { ...cur.collapsed, [s.sessionId]: !isCol } }))}
-              />
+            {total ? (
+              <Box flexDirection="column" gap="xs">
+                {meter(done / total, BLUE, `${done}/${total}`)}
+                <Text size="caption" color="subtle">
+                  {S.progressOf(done, total)}
+                </Text>
+              </Box>
             ) : null}
           </Box>
+          {now.length || planned.length ? (
+            <Box flexDirection="column" gap="xs" paddingX="md" paddingY="sm">
+              <Button
+                key={`tasks-${id}`}
+                plain
+                dimColor
+                label={`${isFolded ? '▸' : '▾'} ${S.tasks} · ${S.tasksCount(now.length, planned.length)}${done ? ` · ${S.doneCount(done)}` : ''}`}
+                onPress={() => void update($, paneUi, cur => ({ ...cur, tasksFolded: { ...cur.tasksFolded, [id]: !isFolded } }))}
+              />
+              {!isFolded && now.length ? (
+                <Text size="caption" color="subtle">
+                  {S.inProgress}
+                </Text>
+              ) : null}
+              {!isFolded
+                ? now.map((p, i) => (
+                    <Box key={`now-${id}-${i}`} paddingX="sm" backgroundColor={fill(BLUE_TINT)}>
+                      <Text size="footnote">
+                        <Text color={BLUE}>● </Text>
+                        {p.text}
+                      </Text>
+                    </Box>
+                  ))
+                : null}
+              {!isFolded && planned.length ? (
+                <Text size="caption" color="subtle">
+                  {S.planned}
+                </Text>
+              ) : null}
+              {!isFolded ? planned.map(plannedRow) : null}
+              {!isFolded && planned.length ? (
+                <Text size="caption" color="subtle">
+                  {S.noRemove}
+                </Text>
+              ) : null}
+            </Box>
+          ) : null}
           {!isCol &&
             s.agents.map(a => {
               const tier = tierOf(a.type)
@@ -1134,46 +1530,47 @@ export const register: Register = (on, options) => {
               // Only this session's own subagents can be opened from here.
               const pick = () => void $.ui.view({ agentId: a.id }).then(r => r.deny && $.ui.toast(r.deny))
               const name = (
-                <Text size="footnote" weight="semibold">
+                <Text size="footnote" weight="semibold" wrap="truncate-end">
                   {a.description || a.type}
                 </Text>
               )
-              // Each worker is a row of its own under the session's header: ruled off, inset, in smaller type.
+              // Each worker is one compact row under the header: name, tier and figures on a line, its bar right under it.
               return (
-                <Box key={`${s.sessionId}-${a.id}`} flexDirection="column">
+                <Box key={`${id}-${a.id}`} flexDirection="column">
                   {rule}
-                  <Box flexDirection="row" gap="sm" paddingY="sm" paddingRight="sm" paddingLeft="lg" alignItems="flex-start">
-                    {crab(tier === 'other' ? 'other' : tier, word, a.status === 'running', false, 26)}
-                    <Box flexDirection="column" flexGrow={1} flexShrink={1} gap="xs">
-                      <Box flexDirection="row" gap="sm" justifyContent="space-between" alignItems="center">
-                        {s.sessionId === sessionId ? (
-                          <Button key={`a-${a.id}`} plain dimColor={a.status === 'idle'} onPress={pick}>
-                            {name}
-                          </Button>
-                        ) : (
-                          name
-                        )}
+                  <Box flexDirection="row" gap="sm" paddingY="xs" paddingRight="sm" paddingLeft="lg" alignItems="flex-start">
+                    {crab(tier === 'other' ? 'other' : tier, word, a.status === 'running', false, 22)}
+                    <Box flexDirection="column" flexGrow={1} flexShrink={1}>
+                      <Box flexDirection="row" gap="sm" alignItems="center">
+                        <Box flexShrink={1}>
+                          {s.sessionId === sessionId ? (
+                            <Button key={`a-${a.id}`} plain dimColor={a.status === 'idle'} onPress={pick}>
+                              {name}
+                            </Button>
+                          ) : (
+                            name
+                          )}
+                        </Box>
+                        <Text size="caption">
+                          <Text color={color} weight="semibold">
+                            {word}
+                          </Text>
+                          <Text color="subtle">{tierModels[tier] ? ` · ${tierModels[tier]}` : ''}</Text>
+                        </Text>
+                        <Text size="caption" color="subtle">
+                          {stats}
+                        </Text>
+                        <Box flexGrow={1} />
                         <Text color={a.status === 'done' ? 'success' : a.status === 'failed' ? 'error' : a.status === 'running' ? BLUE : 'subtle'}>
                           {a.status === 'done' ? '✓' : a.status === 'failed' ? '✕' : a.status === 'running' ? '●' : '◷'}
                         </Text>
                       </Box>
-                      <Text size="caption">
-                        <Text color={color} weight="semibold">
-                          {word}
-                        </Text>
-                        <Text color="subtle">{tierModels[tier] ? ` · ${tierModels[tier]}` : ''}</Text>
-                      </Text>
-                      <Box flexDirection="row" gap="sm" justifyContent="space-between">
-                        <Box flexShrink={1}>
-                          <Text size="caption" wrap="truncate-end">
-                            {steps}
-                          </Text>
-                        </Box>
-                        <Text size="caption" color="subtle">
-                          {stats}
-                        </Text>
-                      </Box>
                       {meter(ratio, a.status === 'done' ? '#3FB950' : color, `${Math.round(clamp01(ratio) * 100)}%`)}
+                      {steps ? (
+                        <Text size="caption" wrap="truncate-end">
+                          {steps}
+                        </Text>
+                      ) : null}
                     </Box>
                   </Box>
                 </Box>
@@ -1243,7 +1640,18 @@ export const register: Register = (on, options) => {
         </Text>
         {shown.length ? (
           <Box flexDirection="column" gap="sm">
-            {shown.map(sessionBlock)}
+            {locked.length ? (
+              <Text size="caption" weight="bold" color="subtle">
+                {`🔒 ${S.lockedGroup}`}
+              </Text>
+            ) : null}
+            {locked.map(sessionBlock)}
+            {locked.length && loose.length ? (
+              <Text size="caption" weight="bold" color="subtle">
+                {S.othersGroup}
+              </Text>
+            ) : null}
+            {loose.map(sessionBlock)}
           </Box>
         ) : (
           <Text size="footnote" color="subtle">

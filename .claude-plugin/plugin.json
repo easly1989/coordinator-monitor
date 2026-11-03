@@ -1,6 +1,6 @@
 {
   "name": "coordinator-monitor",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "description": "One pane for every local Claude Code session: sessions, subagents (savvy-flow aware), pending permissions and questions you can answer in place.",
   "author": { "name": "Carlo Ruggiero (easly1989)", "url": "https://easly1989.github.io/" },
   "homepage": "https://github.com/easly1989/coordinator-monitor",
@@ -27,6 +27,13 @@
       "description": "on: a session's multiple-choice questions and its '## Questions for you' section go to the pane; off: they stay in the session",
       "default": "on",
       "options": ["on", "off"]
+    },
+    "explainRequests": {
+      "type": "string",
+      "title": "Explain large requests",
+      "description": "on: a permission request too long to read at a glance gets a one- or two-sentence explanation from Haiku on its card (a small cost on your plan, and the text is written from the request itself, so check the request); off: only the built-in summary",
+      "default": "off",
+      "options": ["off", "on"]
     },
     "busDir": {
       "type": "string",
