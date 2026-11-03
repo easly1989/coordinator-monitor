@@ -18,7 +18,7 @@ import type { EngineInterface, Register, RenderChildren, RenderNode } from 'clau
 
 import type { Answer, AnswerKind, Board, ChoiceQuestion, Local, MonitorRequest, PaneUi, SessionStatus } from '../types'
 import { CRAB_H, TIER_COLOR, TIER_MODEL, crabSvg, tierOf } from './crab'
-import { QUESTIONS_HEADING, pickStrings, type Strings } from './i18n'
+import { QUESTIONS_HEADING, asksGoAhead, pickStrings, type Strings } from './i18n'
 import { compileRules, criticalIn, matchRule, type Rule, type RulesFile } from './rules'
 
 const PANE = 'coordinator-monitor'
@@ -26,10 +26,14 @@ const TICK_MS = 3000
 const STALE_MS = 15 * 60 * 1000
 const ENDED_KEEP_MS = 60 * 60 * 1000
 /** Published in every status, so the pane can flag a session still running an older copy. Keep in step with plugin.json. */
-const MOD_VERSION = '0.4.0'
+const MOD_VERSION = '0.5.0'
 const SHELL_TOOLS = new Set(['Bash', 'PowerShell'])
 const STEP_TOOL = 'mcp__savvy-progress__step'
 const FLOW_TOOL = 'mcp__savvy-progress__progress'
+// The desktop app's end-of-turn box: its recap and its one question.
+const WRAP_TOOL = 'mcp__ccd_turn__wrap_up'
+// Past this a report keeps its head: the pane is a glance, the session has the rest.
+const REPORT_MAX = 6000
 
 const board = atom({ plugin: 'coordinator-monitor', key: 'board' } as const, { sessions: [], updatedAt: 0 } as Board, { shape: 'board-1' })
 const local = atom(
@@ -68,6 +72,10 @@ let label = ''
 let effort = ''
 // shortcut: timings live in module memory, so a reload restarts them; persist in `local` if that bothers.
 const agentTimes = new Map<string, { startedAt: number; endedAt?: number }>()
+// Each subagent's last context fill and its tokens so far, from its model requests.
+const agentUse = new Map<string, { ctx: number; max: number; tokens: number }>()
+// The wrap-up the main loop called this turn, read when the turn ends.
+let wrap: { recap?: string; ask?: string } | null = null
 
 const norm = (p: string): string => p.replace(/\\/g, '/').replace(/\/+$/, '')
 const baseName = (p: string): string => norm(p).split('/').pop() || p
@@ -100,7 +108,8 @@ const detectLang = async ($: $, option: string | undefined): Promise<string> => 
   return (await $.env.get('LC_ALL')) || (await $.env.get('LANG')) || 'en'
 }
 
-type DesktopMeta = { cliSessionId?: string; title?: string; effort?: string }
+/** `localId` is the record's file name, the id the app's deep links take. */
+type DesktopMeta = { cliSessionId?: string; title?: string; effort?: string; localId?: string }
 
 // Each desktop record as last read, by path and mtime: a refresh rereads only what changed.
 const deskFiles = new Map<string, { mtimeMs: number; meta: DesktopMeta | null }>()
@@ -128,7 +137,10 @@ const desktopIndex = async ($: $): Promise<Map<string, DesktopMeta>> => {
             const path = `${dir}/${acct.name}/${org.name}/${f.name}`
             seen.add(path)
             const mtimeMs = f.mtimeMs ?? 0
-            if (deskFiles.get(path)?.mtimeMs !== mtimeMs) deskFiles.set(path, { mtimeMs, meta: await readJson<DesktopMeta>($, path) })
+            if (deskFiles.get(path)?.mtimeMs !== mtimeMs) {
+              const meta = await readJson<DesktopMeta>($, path)
+              deskFiles.set(path, { mtimeMs, meta: meta && { ...meta, localId: f.name.slice(0, -'.json'.length) } })
+            }
           }
         }
       }
@@ -164,7 +176,8 @@ const publish = async ($: $, state?: SessionStatus['state']): Promise<void> => {
     cwd,
     model,
     effort: effort || undefined,
-    state: state ?? (l.requests.length ? 'waiting' : isBusy ? 'running' : 'idle'),
+    // A report waits on the person only when it asks for a go-ahead.
+    state: state ?? (l.requests.some(r => r.kind !== 'report' || r.awaits) ? 'waiting' : isBusy ? 'running' : 'idle'),
     isCoordinator,
     heartbeat: Date.now(),
     startedAt,
@@ -174,6 +187,7 @@ const publish = async ($: $, state?: SessionStatus['state']): Promise<void> => {
     agents: list.slice(-30).map(a => {
       const st = l.steps[a.id]
       const t = agentTimes.get(a.id)
+      const use = agentUse.get(a.id)
       return {
         id: a.id,
         type: a.type,
@@ -184,6 +198,8 @@ const publish = async ($: $, state?: SessionStatus['state']): Promise<void> => {
         stepNote: st?.note,
         startedAt: t?.startedAt,
         endedAt: t?.endedAt,
+        ctxPct: use ? Math.min(100, Math.round((use.ctx / use.max) * 100)) : undefined,
+        tokens: use?.tokens,
       }
     }),
     flow: l.flow,
@@ -218,7 +234,7 @@ const applyAnswers = async ($: $): Promise<void> => {
       } else if (a.kind === 'deny') {
         prompts.push(S.deniedMsg(cmd))
       } else if (a.text?.trim()) {
-        prompts.push(S.answerMsg(a.text.trim()))
+        prompts.push(req.kind === 'report' ? S.reportReplyMsg(a.text.trim()) : S.answerMsg(a.text.trim()))
       }
     }
     return next
@@ -291,10 +307,31 @@ const coordinatorLive = async ($: $): Promise<boolean> => {
 }
 
 const addRequest = async ($: $, req: MonitorRequest): Promise<void> => {
-  // One open question set and one choice at a time; permissions and app asks stack.
-  const single = req.kind === 'questions' || req.kind === 'choice'
+  // One open question set, one choice and one report at a time; permissions and app asks stack.
+  const single = req.kind === 'questions' || req.kind === 'choice' || req.kind === 'report'
   await update($, local, cur => ({ ...cur, requests: [...cur.requests.filter(r => !(single && r.kind === req.kind)), req] }))
   await publish($)
+}
+
+/** Drops the requests `gone` picks, once the session has moved past them, and republishes. */
+const retire = async ($: $, gone: (r: MonitorRequest) => boolean): Promise<void> => {
+  if (!(await read($, local)).requests.some(gone)) return
+  await update($, local, cur => ({ ...cur, requests: cur.requests.filter(r => !gone(r)) }))
+  void publish($)
+}
+
+/**
+ * Opens a session in the desktop app by its deep link. The id comes from the app's own records and
+ * is checked to be one before it reaches a shell; the link rides in an environment variable, unquoted.
+ */
+const openSession = async ($: $, localId: string): Promise<boolean> => {
+  if (!/^local_[\w-]+$/.test(localId)) return false
+  const url = `claude://claude.ai/epitaxy/${localId}`
+  const argv = /^[a-z]:/i.test(home)
+    ? ['powershell', '-NoProfile', '-NonInteractive', '-Command', 'Start-Process -FilePath $env:CM_URL']
+    : ['sh', '-c', home.startsWith('/Users/') ? 'open "$CM_URL"' : 'xdg-open "$CM_URL"']
+  const r = await $.process.run(argv, { env: { CM_URL: url }, timeoutMs: 15_000 }).catch(() => null)
+  return r?.exitCode === 0
 }
 
 // ---------------------------------------------------------------------------
@@ -325,6 +362,7 @@ const gather = async ($: $): Promise<void> => {
       s.title = m.title.trim()
     }
     if (!s.effort && m?.effort) s.effort = m.effort
+    s.localId = m?.localId
   }
   all.sort((a, b) => rank(a) - rank(b) || b.heartbeat - a.heartbeat)
   await update($, board, () => ({ sessions: all, updatedAt: now }))
@@ -409,6 +447,7 @@ const prettyModel = (id: string): string => {
   const m = /^claude-([a-z]+)-(\d+)(?:-(\d+))?/.exec(id)
   return m?.[1] ? `${m[1].charAt(0).toUpperCase()}${m[1].slice(1)} ${m[2]}${m[3] ? `.${m[3]}` : ''}` : id
 }
+const fmtTokens = (n: number): string => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n))
 const fmtDur = (ms: number): string => {
   const s = Math.max(0, Math.round(ms / 1000))
   if (s < 60) return `${s}s`
@@ -423,6 +462,8 @@ const AMBER_TINT = '#E8A33D14'
 const AMBER_LINE = '#E8A33D66'
 const CARD = '#8080801A'
 const CARD_LINE = '#80808033'
+// A session's header band, a shade over its card, so its subagents read as rows beneath it.
+const HEAD = '#80808024'
 const BLUE = '#5B8DEF'
 const BLUE_TINT = '#5B8DEF33'
 const ON_AMBER = '#1F1E1D'
@@ -475,19 +516,26 @@ export const register: Register = (on, options) => {
   on('turn.start', async ($, e, next) => {
     if (!e.agentId) {
       isBusy = true
-      // A new turn supersedes what the session asked last time, whether the answer came from
-      // the pane or was typed in the session itself. Permissions stay: only the pane grants them.
-      const asked = (r: MonitorRequest) => r.kind === 'questions' || r.kind === 'choice'
-      if ((await read($, local)).requests.some(asked)) {
-        await update($, local, cur => ({ ...cur, requests: cur.requests.filter(r => !asked(r)) }))
-        void publish($)
-      }
+      wrap = null
+      // A new turn supersedes what the session asked or reported last time, whether the answer came
+      // from the pane or was typed in the session itself. Permissions stay: only the pane grants them.
+      await retire($, r => r.kind === 'questions' || r.kind === 'choice' || r.kind === 'report')
     }
     return next(e)
   })
 
+  // What the person types in the session answers what the session waits on there: a protected
+  // command it asked for is retired, and asked again, as a new card, if the session tries it again.
+  on('prompt.submit', async ($, e, next) => {
+    const kind = e.origin?.kind
+    if (!e.isMeta && (kind === 'composer' || kind === 'sdk' || kind === 'bridge')) await retire($, r => r.kind === 'permission')
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
   on('turn.complete', async ($, e, next) => {
     const done = await next(e)
+    // A loop that ended waits on no dialog of its own any more, whoever answered it.
+    await retire($, r => r.kind === 'ask' && r.agentId === e.agentId)
     if (e.agentId) return done
     isBusy = false
     if (forward && !e.isAborted) {
@@ -497,26 +545,74 @@ export const register: Register = (on, options) => {
         const end = rest.search(/^#{1,3}\s/m)
         const text = (end >= 0 ? rest.slice(0, end) : rest).trim()
         if (text) await addRequest($, { id: newId(), kind: 'questions', createdAt: Date.now(), text })
+      } else if (e.answer.trim() && !(await read($, local)).requests.length) {
+        // A report with no questions section: shown, marked when it waits for a go-ahead. One that
+        // ends a turn waiting on a card already in the pane would only repeat it.
+        const text = e.answer.trim()
+        const decision = wrap?.ask?.trim() || undefined
+        await addRequest($, {
+          id: newId(),
+          kind: 'report',
+          createdAt: Date.now(),
+          text: text.length > REPORT_MAX ? `${text.slice(0, REPORT_MAX)}…` : text,
+          summary: wrap?.recap?.trim() || undefined,
+          decision,
+          awaits: !!decision || asksGoAhead(text),
+        })
       }
     }
+    wrap = null
     void publish($)
     return done
   })
 
-  // savvy-flow workers report their steps, the orchestrator its plan: keep a copy.
+  on('tool.call', { tool: WRAP_TOOL }, async ($, e, next) => {
+    if (!e.agentId) wrap = { recap: typeof e.recap === 'string' ? e.recap : undefined, ask: typeof e.ask === 'string' ? e.ask : undefined }
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
+  // A call that ran, or was refused, at the app's own dialog settles the pane's card for it. Its
+  // arguments sit beside `tool` on the event, as the dialog's input has them.
+  on('tool.call', async ($, e, next) => {
+    const ran = await next(e)
+    const { tool, tool_use_id: _, agentId: __, requestMeta: ___, ...args } = e as Record<string, unknown>
+    const key = askKey(String(tool), askWhat(args))
+    await retire($, r => r.kind === 'ask' && grantKey(r) === key)
+    return ran
+  }).catch(($, e, next) => next(e))
+
+  // Each subagent's context and tokens, for its row.
+  on('turn.step', async function* ($, e, next) {
+    const result = yield* next(e)
+    const u = result.usage
+    if (e.agentId && u) {
+      const ctx = (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0) + (u.output_tokens || 0)
+      // Haiku 4.5 and the Claude 3 models have a 200K window; the rest 1M.
+      const max = /haiku-4|claude-3/i.test(u.model || e.model || '') ? 200_000 : 1_000_000
+      agentUse.set(e.agentId, { ctx, max, tokens: (agentUse.get(e.agentId)?.tokens ?? 0) + ctx })
+    }
+    return result
+  })
+
+  // savvy-flow workers report their steps, the orchestrator its plan: keep a copy. A tool's
+  // arguments sit beside `tool` on the event, not under `input`.
+  // This sees the call only while savvy-progress, which answers it, sits beneath this mod.
   on('tool.call', { tool: STEP_TOOL }, async ($, e, next) => {
     const ran = await next(e)
-    const input = e.input as { done?: number; total?: number; note?: string }
-    if (e.agentId && typeof input.total === 'number') {
-      const id = e.agentId
-      await update($, local, cur => ({ ...cur, steps: { ...cur.steps, [id]: { done: input.done ?? 0, total: input.total ?? 0, note: input.note } } }))
-    }
+    const input = e as unknown as { done?: number; total?: number; note?: string }
+    const id = e.agentId
+    // A worker states its total once, then reports `done` alone: keep the total it gave.
+    if (id)
+      await update($, local, cur => {
+        const total = typeof input.total === 'number' ? input.total : cur.steps[id]?.total
+        return total === undefined ? cur : { ...cur, steps: { ...cur.steps, [id]: { done: input.done ?? 0, total, note: input.note } } }
+      })
     return ran
   }).catch(($, e, next) => next(e))
 
   on('tool.call', { tool: FLOW_TOOL }, async ($, e, next) => {
     const ran = await next(e)
-    const input = e.input as { title?: string; total?: number; done?: number; phase?: string; finished?: boolean }
+    const input = e as unknown as { title?: string; total?: number; done?: number; phase?: string; finished?: boolean }
     if (!e.agentId) {
       await update($, local, cur => {
         if (input.finished) return { ...cur, flow: null }
@@ -553,7 +649,7 @@ export const register: Register = (on, options) => {
     if ((await read($, local)).grantsSession.includes(key)) return { decision: { behavior: 'allow' } }
     if (!(await coordinatorLive($))) return next(e)
     const id = newId()
-    await addRequest($, { id, kind: 'ask', createdAt: Date.now(), tool: e.tool_name, command: what, rule: S.appPermission })
+    await addRequest($, { id, kind: 'ask', createdAt: Date.now(), tool: e.tool_name, command: what, rule: S.appPermission, agentId: e.agent_id })
     const a = await waitAnswer($, id)
     await update($, local, cur => ({
       ...cur,
@@ -608,8 +704,8 @@ export const register: Register = (on, options) => {
     // Fills only where the surface blends them.
     const fill = (c: string): string | undefined => (isTerm ? undefined : c)
 
-    const crab = (costume: string, alt: string, walking: boolean, dim = false): RenderChildren =>
-      Svg ? <Svg source={crabSvg(costume, { isWalking: walking, isDim: dim, size: 30 })} alt={alt} width={30} height={CRAB_H(30)} /> : null
+    const crab = (costume: string, alt: string, walking: boolean, dim = false, size = 30): RenderChildren =>
+      Svg ? <Svg source={crabSvg(costume, { isWalking: walking, isDim: dim, size })} alt={alt} width={size} height={CRAB_H(size)} /> : null
     const meter = (ratio: number, color: string, alt: string): RenderChildren =>
       Svg ? <Svg source={barSvg(ratio, color)} alt={alt} height={4} /> : <Text color={color}>{bar(ratio, Math.max(10, Math.min(40, cols - 16)))}</Text>
     const badge = (label: string, tone: 'amber' | 'blue' = 'amber'): RenderNode =>
@@ -633,6 +729,16 @@ export const register: Register = (on, options) => {
         {` ${label} `}
       </Text>
     )
+    // Jumps to a session in the desktop app; none for this session, which is already in front.
+    const openButton = (s: SessionStatus, key: string): RenderNode | null =>
+      s.localId && s.sessionId !== sessionId ? (
+        <Button
+          key={key}
+          variant="secondary"
+          label={`↗ ${S.openSession}`}
+          onPress={() => void openSession($, s.localId ?? '').then(ok => ok || $.ui.toast(S.openFailed))}
+        />
+      ) : null
 
     const setFilter = (f: PaneUi['filter']) => () => void update($, paneUi, cur => ({ ...cur, filter: f }))
     const waitingCount = b.sessions.filter(s => s.state === 'waiting').length
@@ -650,7 +756,8 @@ export const register: Register = (on, options) => {
 
     // What waits for the person, newest last.
     const inbox: { s: SessionStatus; r: MonitorRequest }[] = []
-    for (const s of b.sessions) for (const r of s.requests) if (!sent.has(r.id)) inbox.push({ s, r })
+    // A closed session waits on nothing: what it asked for is moot.
+    for (const s of b.sessions) if (s.state !== 'ended') for (const r of s.requests) if (!sent.has(r.id)) inbox.push({ s, r })
     inbox.sort((x, y) => x.r.createdAt - y.r.createdAt)
 
     const stat = (key: string, label: string, value: string, sub: RenderChildren): RenderNode => (
@@ -666,21 +773,71 @@ export const register: Register = (on, options) => {
     )
 
     const card = ({ s, r }: { s: SessionStatus; r: MonitorRequest }): RenderNode => {
-      const head = (label: string, what: string) => (
+      const head = (label: string, what: string, tone: 'amber' | 'blue' = 'amber') => (
         <Box flexDirection="row" alignItems="center" gap="sm">
-          {badge(label)}
+          {badge(label, tone)}
           <Box flexGrow={1} flexShrink={1}>
             <Text weight="semibold" wrap="truncate-end">
               {what}
             </Text>
           </Box>
+          {openButton(s, `open-${r.id}`)}
         </Box>
       )
-      const shell = (children: RenderChildren) => (
-        <Box key={r.id} flexDirection="column" gap="sm" padding="md" borderStyle="round" borderColor={isTerm ? 'warning' : AMBER_LINE} backgroundColor={fill(AMBER_TINT)}>
+      // Amber for what waits on the person; a report that only informs sits in the plain card colours.
+      const shell = (children: RenderChildren, isQuiet = false) => (
+        <Box
+          key={r.id}
+          flexDirection="column"
+          gap="sm"
+          padding="md"
+          borderStyle="round"
+          borderColor={isTerm ? (isQuiet ? undefined : 'warning') : isQuiet ? CARD_LINE : AMBER_LINE}
+          borderDimColor={isQuiet && isTerm}
+          backgroundColor={fill(isQuiet ? CARD : AMBER_TINT)}
+        >
           {children}
         </Box>
       )
+      if (r.kind === 'report') {
+        const isOpen = !!u.open?.[r.id]
+        const text = r.text ?? ''
+        // Collapsed it reads as one glance: the wrap-up's question or recap, else the report's first paragraph.
+        const gist = r.decision || r.summary || (text.split(/\n\s*\n/)[0] ?? '').replace(/^#+\s*/, '').slice(0, 280)
+        return shell(
+          <Box flexDirection="column" gap="sm">
+            {head(r.awaits ? S.confirmBadge : S.report, s.title, r.awaits ? 'amber' : 'blue')}
+            {isOpen ? (
+              <Box flexDirection="column" padding="sm" backgroundColor={fill(CARD)}>
+                {Markdown ? <Markdown key={`md-${r.id}`} text={text} /> : <Text>{text}</Text>}
+              </Box>
+            ) : (
+              <Text size="footnote" weight={r.decision ? 'semibold' : undefined}>
+                {gist}
+              </Text>
+            )}
+            {isOpen && Input ? (
+              <Box flexDirection="column" gap="xs">
+                <Text size="caption" color="subtle">
+                  {S.replyLabel}
+                </Text>
+                {field(<Input key={`reply-${r.id}`} placeholder={S.replyHere} rows={3} submitLabel={S.send} onSubmit={value => value.trim() && void answer($, s, r, 'answer', value)} />)}
+              </Box>
+            ) : null}
+            <Box flexDirection="row" flexWrap="wrap" gap="sm">
+              {r.awaits ? <Button key={`go-${r.id}`} variant="primary" label={S.confirm} onPress={() => void answer($, s, r, 'answer', S.confirmMsg)} /> : null}
+              <Button
+                key={`more-${r.id}`}
+                variant="secondary"
+                label={isOpen ? `▾ ${S.hideReport}` : `▸ ${S.showReport}`}
+                onPress={() => void update($, paneUi, cur => ({ ...cur, open: { ...cur.open, [r.id]: !isOpen } }))}
+              />
+              <Button key={`dismiss-${r.id}`} variant="secondary" label={S.dismiss} onPress={() => void answer($, s, r, 'dismiss')} />
+            </Box>
+          </Box>,
+          !r.awaits,
+        )
+      }
       if (r.kind === 'permission' || r.kind === 'ask') {
         return shell(
           <Box flexDirection="column" gap="sm">
@@ -816,15 +973,26 @@ export const register: Register = (on, options) => {
         .filter(Boolean)
         .join(' · ')
       const ask = s.requests[0]
-      const asks = ask?.kind === 'permission' || ask?.kind === 'ask' ? S.waitsPermission(ask.command ?? '') : ask?.kind === 'choice' ? S.hasChoice : ask?.kind === 'questions' ? S.hasQuestions : ''
+      const asks =
+        // The command itself is on its card in the inbox, above: the session's card only says so.
+        ask?.kind === 'permission' || ask?.kind === 'ask'
+          ? S.waitsPermission
+          : ask?.kind === 'choice'
+            ? S.hasChoice
+            : ask?.kind === 'questions'
+              ? S.hasQuestions
+              : ask?.kind === 'report' && ask.awaits
+                ? S.waitsConfirm
+                : ''
       const flow = s.flow ? `${s.flow.title} · ${s.flow.done}/${s.flow.total}${s.flow.phase ? ` · ${s.flow.phase}` : ''}` : ''
       const costume = s.state === 'waiting' ? 'waiting' : 'other'
       return (
         <Box key={s.sessionId} flexDirection="column" borderStyle="round" borderColor={isTerm ? undefined : s.state === 'waiting' ? AMBER_LINE : CARD_LINE} borderDimColor={isTerm} backgroundColor={fill(CARD)}>
-          <Box flexDirection="row" gap="sm" alignItems="center" padding="sm">
-            {crab(costume, s.title, s.state === 'running', s.state === 'ended' || s.state === 'idle')}
+          {/* The session's header: a band of its own, larger type, the session's figures on the right. */}
+          <Box flexDirection="row" gap="sm" alignItems="center" padding="md" backgroundColor={fill(HEAD)}>
+            {crab(costume, s.title, s.state === 'running', s.state === 'ended' || s.state === 'idle', 34)}
             <Box flexDirection="column" flexGrow={1} flexShrink={1}>
-              <Text weight="semibold">{s.title}</Text>
+              <Text weight="bold">{s.title}</Text>
               <Text size="footnote" color="subtle" wrap="truncate-end">
                 {flow || asks || who || s.folder || s.cwd}
               </Text>
@@ -835,12 +1003,13 @@ export const register: Register = (on, options) => {
                 </Text>
               ) : null}
             </Box>
-            <Box flexDirection="column" alignItems="flex-end">
+            <Box flexDirection="column" alignItems="flex-end" gap="xs">
               {pill(s.state)}
               <Text size="caption" color="subtle">
                 {meta}
               </Text>
             </Box>
+            {openButton(s, `open-${s.sessionId}`)}
             {s.agents.length ? (
               <Button
                 key={`c-${s.sessionId}`}
@@ -859,46 +1028,51 @@ export const register: Register = (on, options) => {
               const ratio = a.status === 'done' ? 1 : a.stepTotal ? (a.stepDone ?? 0) / a.stepTotal : 0
               const steps = a.stepTotal ? `${a.stepDone ?? 0}/${a.stepTotal}${a.stepNote ? ` · ${a.stepNote}` : ''}` : ''
               const took = a.startedAt ? fmtDur((a.endedAt ?? Date.now()) - a.startedAt) : ''
+              const stats = [a.ctxPct !== undefined ? `ctx ${a.ctxPct}%` : '', a.tokens ? fmtTokens(a.tokens) : '', took].filter(Boolean).join(' · ')
               // Only this session's own subagents can be opened from here.
               const pick = () => void $.ui.view({ agentId: a.id }).then(r => r.deny && $.ui.toast(r.deny))
-              const name = <Text weight="semibold">{a.description || a.type}</Text>
-              // Each worker is a row of its own under the session's header, ruled off as in the mockup.
+              const name = (
+                <Text size="footnote" weight="semibold">
+                  {a.description || a.type}
+                </Text>
+              )
+              // Each worker is a row of its own under the session's header: ruled off, inset, in smaller type.
               return (
                 <Box key={`${s.sessionId}-${a.id}`} flexDirection="column">
                   {rule}
-                  <Box flexDirection="row" gap="sm" padding="sm" alignItems="flex-start">
-                  {crab(tier === 'other' ? 'other' : tier, word, a.status === 'running')}
-                  <Box flexDirection="column" flexGrow={1} flexShrink={1} gap="xs">
-                    <Box flexDirection="row" gap="sm" justifyContent="space-between" alignItems="center">
-                      {s.sessionId === sessionId ? (
-                        <Button key={`a-${a.id}`} plain dimColor={a.status === 'idle'} onPress={pick}>
-                          {name}
-                        </Button>
-                      ) : (
-                        name
-                      )}
-                      <Text color={a.status === 'done' ? 'success' : a.status === 'failed' ? 'error' : a.status === 'running' ? BLUE : 'subtle'}>
-                        {a.status === 'done' ? '✓' : a.status === 'failed' ? '✕' : a.status === 'running' ? '●' : '◷'}
-                      </Text>
-                    </Box>
-                    <Box flexDirection="row" gap="sm" justifyContent="space-between">
+                  <Box flexDirection="row" gap="sm" paddingY="sm" paddingRight="sm" paddingLeft="lg" alignItems="flex-start">
+                    {crab(tier === 'other' ? 'other' : tier, word, a.status === 'running', false, 26)}
+                    <Box flexDirection="column" flexGrow={1} flexShrink={1} gap="xs">
+                      <Box flexDirection="row" gap="sm" justifyContent="space-between" alignItems="center">
+                        {s.sessionId === sessionId ? (
+                          <Button key={`a-${a.id}`} plain dimColor={a.status === 'idle'} onPress={pick}>
+                            {name}
+                          </Button>
+                        ) : (
+                          name
+                        )}
+                        <Text color={a.status === 'done' ? 'success' : a.status === 'failed' ? 'error' : a.status === 'running' ? BLUE : 'subtle'}>
+                          {a.status === 'done' ? '✓' : a.status === 'failed' ? '✕' : a.status === 'running' ? '●' : '◷'}
+                        </Text>
+                      </Box>
                       <Text size="caption">
                         <Text color={color} weight="semibold">
                           {word}
                         </Text>
                         <Text color="subtle">{tierModels[tier] ? ` · ${tierModels[tier]}` : ''}</Text>
                       </Text>
-                      <Text size="caption" color="subtle">
-                        {took}
-                      </Text>
+                      <Box flexDirection="row" gap="sm" justifyContent="space-between">
+                        <Box flexShrink={1}>
+                          <Text size="caption" wrap="truncate-end">
+                            {steps}
+                          </Text>
+                        </Box>
+                        <Text size="caption" color="subtle">
+                          {stats}
+                        </Text>
+                      </Box>
+                      {meter(ratio, a.status === 'done' ? '#3FB950' : color, `${Math.round(clamp01(ratio) * 100)}%`)}
                     </Box>
-                    {steps ? (
-                      <Text size="footnote" wrap="truncate-end">
-                        {steps}
-                      </Text>
-                    ) : null}
-                    {meter(ratio, a.status === 'done' ? '#3FB950' : color, `${Math.round(clamp01(ratio) * 100)}%`)}
-                  </Box>
                   </Box>
                 </Box>
               )

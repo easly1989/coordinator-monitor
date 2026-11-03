@@ -55,7 +55,9 @@ const FILES: Record<string, SessionStatus> = {
     title: 'Recipes',
     state: 'idle',
     costUsd: 1.5,
-    agents: [{ id: 'w1', type: 'savvy-medium', description: 'Migrate schema', status: 'running', stepDone: 2, stepTotal: 4, stepNote: 'events' }],
+    agents: [{ id: 'w1', type: 'savvy-medium', description: 'Migrate schema', status: 'running', stepDone: 2, stepTotal: 4, stepNote: 'events', ctxPct: 22, tokens: 44_000 }],
+    // Its turn ended on a report that waits for a go-ahead.
+    requests: [{ id: 'r1', kind: 'report', createdAt: now + 3, text: 'Migrated the schema.\n\nShall I deploy it?', summary: 'Schema migrated; deploy pending', decision: 'Deploy to staging?', awaits: true }],
   }),
   // The coordinator: its request reaches the inbox, its own card stays out of the list.
   'c.json': status({
@@ -86,6 +88,11 @@ test('the pane draws sessions, workers and every kind of request, on every surfa
     return { value: undefined }
   })
   on('clock.every', () => ({ value: undefined }))
+  const runs: { argv: string[]; env?: Record<string, string> }[] = []
+  on('process.run', (_, e) => {
+    runs.push({ argv: [...e.argv], env: e.init?.env as Record<string, string> | undefined })
+    return { value: { exitCode: 0, stdout: '', stderr: '' } as never }
+  })
   // The desktop app's own record of this session, as it files it.
   const DESK = 'C:/AppData/Claude/claude-code-sessions'
   const DIRS: Record<string, never[]> = {
@@ -124,7 +131,7 @@ test('the pane draws sessions, workers and every kind of request, on every surfa
   expect(mine.title).toBe('Coordinatore')
   expect(mine.folder).toBe('coordinator')
   expect(mine.effort).toBe('high')
-  expect(mine.version).toBe('0.4.0')
+  expect(mine.version).toBe('0.5.0')
 
   for (const surface of ['terminal', 'desktop', 'vscode', 'mobile'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface })
@@ -134,15 +141,35 @@ test('the pane draws sessions, workers and every kind of request, on every surfa
     expect(await ui.find({ type: 'Text', text: /62%/ })).toBeTruthy()
     expect(await ui.find({ type: 'Text', text: /\$1\.50/ })).toBeTruthy()
     expect(await ui.find({ type: 'Text', text: /Opus 5\.5 · extra/ })).toBeTruthy()
-    expect(await ui.find({ type: 'Text', text: /waiting for a permission: git push origin main/ })).toBeTruthy()
+    // The session's card says it waits; the command is written out once, on the inbox card.
+    expect(await ui.find({ type: 'Text', text: /^waiting for a permission$/ })).toBeTruthy()
+    expect(await ui.find({ type: 'Code', source: 'git push origin main' } as never)).toBeTruthy()
+    expect(await ui.find({ type: 'Text', text: /git push origin main/ })).toBeFalsy()
     // The fixtures publish no version, as copies before 0.3 did: each is flagged.
     expect(await ui.find({ type: 'Text', text: /runs mod < 0\.3: \/reload-plugins there/ })).toBeTruthy()
     expect(await ui.find({ type: 'Text', text: /^\s*Running\s*$/ })).toBeTruthy()
     expect(await ui.find({ type: 'Text', text: /Lead · Bash/ })).toBeTruthy()
     expect(await ui.find({ type: 'Text', text: /^Lead$/ })).toBeFalsy()
     expect(await ui.find({ type: 'Text', text: /2 active \/ 2/ })).toBeTruthy()
+    // Each worker row carries its context, tokens and elapsed time.
+    expect(await ui.find({ type: 'Text', text: /ctx 22% · 44k/ })).toBeTruthy()
+    // A report waiting for a go-ahead: its wrap-up question as the gist, the whole text on demand.
+    expect(await ui.find({ type: 'Text', text: /GO-AHEAD/ })).toBeTruthy()
+    expect(await ui.find({ type: 'Text', text: /Deploy to staging\?/ })).toBeTruthy()
+    expect(await ui.find({ text: /Migrated the schema/ })).toBeFalsy()
+    await ui.press({ key: 'more-r1' })
+    expect(await ui.find({ text: /Migrated the schema/ })).toBeTruthy()
+    await ui.press({ key: 'more-r1' })
+    // A session the desktop app knows opens from its card, by the app's deep link.
+    await ui.press({ key: 'open-a' })
+    expect(runs.at(-1)?.env?.CM_URL).toBe('claude://claude.ai/epitaxy/local_a')
     await ui.unmount()
   }
+  // This session has no link to itself; one the desktop app does not know has none either.
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ key: 'open-me' })).toBeFalsy()
+  expect(await ui.find({ key: 'open-b' })).toBeFalsy()
+  await ui.unmount()
 })
 
 test('a new turn retires the questions the session asked', async ($, on) => {
@@ -185,6 +212,102 @@ test('a new turn retires the questions the session asked', async ($, on) => {
   await settle()
   expect(mine().requests).toEqual([])
 })
+
+describe('a session reporting', () => {
+  const setup = (on: TestOn, agents: unknown[] = []) => {
+    const written: Record<string, string> = {}
+    on('command.register', () => ({ value: { command: 'agents-monitor' } }))
+    on('session.start', (_, e) => ({ cwd: e.cwd }))
+    on('env.get', () => ({ value: undefined }))
+    on('settings.read', () => ({ value: {} }))
+    on('session.id', () => ({ value: 'me' }))
+    on('session.cwd', () => ({ value: '/repos/project' }))
+    on('session.model', () => ({ value: 'claude-sonnet-5-5' }))
+    on('session.usage', () => ({ value: { rateLimits: [] } as never }))
+    on('agent.list', () => ({ value: agents as never }))
+    on('fs.exists', () => ({ value: false }))
+    on('fs.list', () => ({ value: [] }))
+    on('fs.read', () => {
+      throw new Error('ENOENT')
+    })
+    on('fs.write', (_, e) => {
+      written[e.path.replace(/\\/g, '/')] = e.text
+      return { value: undefined }
+    })
+    on('clock.every', () => ({ value: undefined }))
+    on('turn.start', (_, e) => ({ turnId: (e as { turnId: string }).turnId }) as never)
+    on('turn.complete', () => ({ text: '' }) as never)
+    on('tool.call', () => ({ result: 'ok' }) as never)
+    on('prompt.submit', (_, e) => ({ text: (e as { text: string }).text }) as never)
+    const mine = (): SessionStatus => JSON.parse(Object.entries(written).find(([k]) => k.endsWith('/sessions/me.json'))?.[1] ?? '{}') as SessionStatus
+    const settle = async () => {
+      for (let i = 0; i < 20; i++) await new Promise<void>(r => setTimeout(r, 5))
+    }
+    return { mine, settle }
+  }
+
+  test('a turn that ends on a report shows it, waiting when it asks for a go-ahead', async ($, on) => {
+    const { mine, settle } = setup(on)
+    await $.session.start({ cwd: '/repos/project', surface: 'desktop', isInteractive: true })
+    await $.turn.start({ turnId: 't1' } as never)
+    // The desktop's wrap-up box: its recap and its one question.
+    await $.tool.call({ tool: 'mcp__ccd_turn__wrap_up', recap: 'Fix merged on the branch.', ask: 'Open the PR?' } as never)
+    await $.turn.complete({ turnId: 't1', answer: 'Fixed the parser and pushed the branch.', isAborted: false } as never)
+    await settle()
+    const [r] = mine().requests
+    expect(r?.kind).toBe('report')
+    expect(r?.summary).toBe('Fix merged on the branch.')
+    expect(r?.decision).toBe('Open the PR?')
+    expect(r?.awaits).toBe(true)
+    expect(mine().state).toBe('waiting')
+
+    // The next turn retires it; a report that only informs does not make the session wait.
+    await $.turn.start({ turnId: 't2' } as never)
+    await settle()
+    expect(mine().requests).toEqual([])
+    await $.turn.complete({ turnId: 't2', answer: 'All tests pass. Nothing left to do.', isAborted: false } as never)
+    await settle()
+    expect(mine().requests.map(x => [x.kind, x.awaits])).toEqual([['report', false]])
+    expect(mine().state).toBe('idle')
+
+    // Asking for confirmation in so many words, with no wrap-up, waits too.
+    await $.turn.start({ turnId: 't3' } as never)
+    await $.turn.complete({ turnId: 't3', answer: 'Il branch è pronto. Attendo la tua conferma prima del merge.', isAborted: false } as never)
+    await settle()
+    expect(mine().requests[0]?.awaits).toBe(true)
+  })
+
+  test('savvy workers and the flow report through the tools as the model calls them', async ($, on) => {
+    const { mine, settle } = setup(on, [{ id: 'w1', type: 'savvy-medium', description: 'Migrate schema', status: 'running' }])
+    await $.session.start({ cwd: '/repos/project', surface: 'desktop', isInteractive: true })
+    // The tool's arguments ride beside `tool`, the worker's loop as `agentId`.
+    await $.tool.call({ tool: 'mcp__savvy-progress__step', done: 0, total: 4, agentId: 'w1' } as never)
+    // Later reports name `done` alone; the total stands.
+    await $.tool.call({ tool: 'mcp__savvy-progress__step', done: 1, note: 'schema', agentId: 'w1' } as never)
+    await $.tool.call({ tool: 'mcp__savvy-progress__progress', title: 'Calendar', total: 3, done: 1, phase: 'delegate' } as never)
+    await $.turn.start({ turnId: 't1' } as never)
+    await $.turn.complete({ turnId: 't1', answer: '', isAborted: false } as never)
+    await settle()
+    expect(mine().agents[0]).toMatchObject({ stepDone: 1, stepTotal: 4, stepNote: 'schema' })
+    expect(mine().flow).toEqual({ title: 'Calendar', done: 1, total: 3, phase: 'delegate' })
+  })
+
+  test('a protected command the person answered in the session leaves the pane', async ($, on) => {
+    const { mine, settle } = setup(on)
+    on('tool.check', () => ({ decision: 'allow' }) as never)
+    await $.session.start({ cwd: '/repos/project', surface: 'desktop', isInteractive: true })
+    await $.tool.check({ tool: 'Bash', input: { command: 'gh pr merge 7' }, tool_use_id: 'u1' } as never)
+    await settle()
+    expect(mine().requests.map(r => r.kind)).toEqual(['permission'])
+    // A background task's notification is not the person: the card stays.
+    await $.prompt.submit({ text: 'task done', origin: { kind: 'task-notification' }, wait: false } as never)
+    await settle()
+    expect(mine().requests.map(r => r.kind)).toEqual(['permission'])
+    await $.prompt.submit({ text: 'leave it for now', origin: { kind: 'composer' }, wait: false } as never)
+    await settle()
+    expect(mine().requests).toEqual([])
+  })
+})
 describe('the app asking for a permission', () => {
   // `file` is the name the coordinator's status file is listed under: anything but c.json poses as it.
   // `version` is the copy of the mod the coordinator publishes.
@@ -215,10 +338,12 @@ describe('the app asking for a permission', () => {
     on('clock.every', () => ({ value: undefined }))
     const mine = () => JSON.parse(Object.entries(written).find(([k]) => k.endsWith('/sessions/me.json'))?.[1] ?? '{}') as SessionStatus
     // The pane, while the session waits: what it saw on the card, and the answer it gives (none: no answer in time).
-    const pane = { reply: undefined as string | undefined, seen: [] as string[] }
-    on('process.run', (_, e) => {
+    // `hold`: the pane takes its time, while the person answers the app's own dialog in the session.
+    const pane = { reply: undefined as string | undefined, seen: [] as string[], hold: undefined as Promise<void> | undefined }
+    on('process.run', async (_, e) => {
       const ask = mine().requests.at(-1)
       pane.seen.push(ask?.command ?? '')
+      await pane.hold
       // The engine resolves the mod's paths: the answers file sits beside the status file it wrote.
       const file = Object.keys(written).find(k => k.endsWith('/sessions/me.json'))?.replace('/sessions/', '/answers/')
       expect(file?.endsWith(String(e.init?.env?.CM_FILE).slice(1))).toBe(true)
@@ -257,6 +382,41 @@ describe('the app asking for a permission', () => {
     // Too long to show whole: the dialog, without asking the pane.
     await $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: { command: 'x'.repeat(9000) } } as never)
     expect(pane.seen.length).toBe(3)
+  })
+
+  test('a dialog answered in the session leaves the pane, by the call running or the turn ending', async ($, on) => {
+    const { mine, pane } = setup(on, true)
+    on('classic.PermissionRequest', () => ({ decision: { behavior: 'allow' } }) as never)
+    on('tool.call', () => ({ result: 'ok' }) as never)
+    on('turn.complete', () => ({ text: '' }) as never)
+    await $.session.start({ cwd: '/repos/project', surface: 'desktop', isInteractive: true })
+    const asked = async () => {
+      for (let i = 0; i < 300 && !mine().requests?.length; i++) await new Promise<void>(r => setTimeout(r, 10))
+      return mine().requests.map(r => r.kind)
+    }
+    // The session republishes in the background once it retires a card.
+    const left = async () => {
+      for (let i = 0; i < 300 && mine().requests.length; i++) await new Promise<void>(r => setTimeout(r, 10))
+      return mine().requests
+    }
+    let release = () => {}
+    pane.hold = new Promise<void>(r => (release = r))
+    const first = $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: { command: 'npm test' } } as never)
+    expect(await asked()).toEqual(['ask'])
+    // Allowed at the dialog: the call runs, and the card goes.
+    await $.tool.call({ tool: 'Bash', command: 'npm test' } as never)
+    expect(await left()).toEqual([])
+    release()
+    await first
+
+    pane.hold = new Promise<void>(r => (release = r))
+    const second = $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: { command: 'npm run build' } } as never)
+    expect(await asked()).toEqual(['ask'])
+    // Refused, or interrupted: the turn ends, and nothing waits on the dialog any more.
+    await $.turn.complete({ turnId: 't1', answer: '', isAborted: true } as never)
+    expect(await left()).toEqual([])
+    release()
+    await second
   })
 
   test('a session reloads its plugins once when the coordinator runs a newer copy', async ($, on) => {

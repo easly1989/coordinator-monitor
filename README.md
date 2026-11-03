@@ -16,16 +16,18 @@ One pane for every local Claude Code session: what each one is doing, its subage
 
 It is a Claude Code **mod** (function hooks, the early-access plugin API). Made for a "coordinator" workflow, where you talk to one session and it delegates to many, but useful as soon as you run more than one session at a time.
 
-> Status: **0.2, early.** Built against Claude Code 2.1.316. The screenshots come from the design mockup, which the pane now follows; real ones will replace them once the pane has run on more machines. See the [changelog](CHANGELOG.md).
+> Status: **0.5, early.** Built against Claude Code 2.1.316. The screenshots come from the design mockup, which the pane now follows; real ones will replace them once the pane has run on more machines. See the [changelog](CHANGELOG.md).
 
 ## What it does
 
-- **Every local session in one place.** Each session that runs the mod publishes its status (state, model, effort, context, subagents) to a shared folder; the pane reads them all. Sessions show under their sidebar names, each with its subagents ruled off beneath it, waiting ones first; one whose subagents are still working counts as active. The coordinator itself is left out of the list (its chat is beside the pane), though anything it waits on still reaches the inbox.
+- **Every local session in one place.** Each session that runs the mod publishes its status (state, model, effort, context, subagents) to a shared folder; the pane reads them all. Sessions show under their sidebar names, waiting ones first: the session's header on a shaded band, each subagent an inset row beneath it with its context, tokens and elapsed time. One whose subagents are still working counts as active. The coordinator itself is left out of the list (its chat is beside the pane), though anything it waits on still reaches the inbox.
+- **Open any session.** The **Open** button on a session's card brings it up in the desktop app.
 - **savvy-flow aware.** With [savvy-flow](https://github.com/johnnyvizz/claude-kit/tree/main/plugins/savvy-flow) and [savvy-progress](https://github.com/johnnyvizz/claude-kit/tree/main/plugins/savvy-progress) installed, workers show up with their tier crab (astronaut, detective, engineer, chef, racer), model and effort, and the steps they report. Without them, any subagent is listed.
 - **Protected commands wait for you.** Merges, pushes to `main`, deploys and service restarts never run without your approval, whatever the session's permission mode. The session is told to stop and wait; you approve once, for the session, or deny, from the pane.
 - **The app's permission prompts come to you too.** While a coordinator session is running, a session whose app would ask for a permission sends the ask to the pane and holds there, as it would at the dialog; approve it once, for the session, or deny it, and the session carries on. With no answer in nine minutes, or no coordinator running, the app's own dialog asks. The coordinator keeps its own dialog: you are in its chat.
 - **Questions come to you.** A session's multiple-choice question (the dialog with options) is forwarded to the pane with every option and a free answer field. Open questions a session ends its turn with, under a `## Questions for you` heading, are shown too, with a reply box.
-- **Answered means gone.** A request leaves the pane as soon as you answer it; the owning session receives your answer as a new message and carries on. Answer a session's questions in the session itself and they leave the pane on its next turn; anything else you can dismiss.
+- **Reports come to you.** A session that ends its turn with a report and no questions section shows it in the inbox as one line, the whole report a click away, with a reply box. One that waits for your go-ahead (its desktop wrap-up asks, or its text asks for confirmation) is marked, and **Go ahead** answers it.
+- **Answered means gone.** A request leaves the pane as soon as you answer it; the owning session receives your answer as a new message and carries on. Answered in the session itself, it leaves too: questions and reports on the session's next turn, an app permission once the call runs or the turn ends, a protected command once you type in the session. Anything else you can dismiss.
 - **Usage at a glance.** The 5-hour and weekly limits, as the latest session reported them.
 
 <p align="center">
@@ -64,7 +66,7 @@ The mod has to run in **every** session you want to see: that is what publishes 
 - `/agents-monitor` opens the pane in the current session.
 - After updating the mod, run `/reload-plugins` in the coordinator: every other session sees the newer version and reloads itself once it is idle. A session still on an older copy is flagged on its card.
 - Set **Coordinator folder** (`/config`, or `pluginConfigs` below) to the folder name of your coordinator session: the pane opens there by itself, and that session keeps its own questions instead of forwarding them.
-- Click a subagent of the current session to open its transcript. Other sessions open from the sidebar: jumping straight into one is not something the mod API offers yet.
+- Click a subagent of the current session to open its transcript. **Open** on any other session's card brings that session up in the desktop app (its `claude://` deep link; the session must be one the desktop app started).
 - Ask your sessions (in your `CLAUDE.md`) to end a turn that needs your input with a `## Questions for you` section, numbered. The Italian `## Domande per te` works too.
 
 ### Settings

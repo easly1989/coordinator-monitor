@@ -9,6 +9,9 @@ export type AgentRow = {
   /** When this session first saw it run, and saw it finish (epoch ms). */
   startedAt?: number
   endedAt?: number
+  /** Its context window's fill and the tokens it has used, from its own model requests. */
+  ctxPct?: number
+  tokens?: number
 }
 
 export type ChoiceOption = { label: string; description?: string }
@@ -20,8 +23,11 @@ export type ChoiceQuestion = {
   options: ChoiceOption[]
 }
 
-/** `ask` is the app's own permission dialog, up in the session: shown, answered there. */
-export type RequestKind = 'permission' | 'choice' | 'questions' | 'ask'
+/**
+ * `ask` is the app's own permission dialog, up in the session: shown, answered there.
+ * `report` is what a session said as its turn ended, when it asked no questions.
+ */
+export type RequestKind = 'permission' | 'choice' | 'questions' | 'ask' | 'report'
 
 export type MonitorRequest = {
   id: string
@@ -34,9 +40,14 @@ export type MonitorRequest = {
   rule?: string
   /** choice: the questions as the model asked them. */
   questions?: ChoiceQuestion[]
-  /** questions: the '## Questions for you' section, as markdown. */
+  /** questions: the '## Questions for you' section, as markdown; report: the closing message. */
   text?: string
   agentId?: string
+  /** report: the desktop wrap-up's recap and its question, when the session gave one. */
+  summary?: string
+  decision?: string
+  /** report: the session waits for the person's go-ahead before it carries on. */
+  awaits?: boolean
 }
 
 export type RateLimit = { kind: string; percentUsed: number; resetsAt?: string }
@@ -67,6 +78,8 @@ export type SessionStatus = {
   agents: AgentRow[]
   flow: FlowInfo | null
   requests: MonitorRequest[]
+  /** The desktop app's id for the session (`local_…`), added by the pane: it opens the session. */
+  localId?: string
 }
 
 /** `dismiss` drops a request without telling the session anything. */
@@ -92,6 +105,8 @@ export type PaneUi = {
   collapsed: Record<string, boolean>
   picks: Record<string, number[]>
   sent: string[]
+  /** Reports drawn whole rather than as their one-line summary. */
+  open?: Record<string, boolean>
 }
 
 declare module 'claude-code' {
