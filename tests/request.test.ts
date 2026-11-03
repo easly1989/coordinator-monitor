@@ -1,6 +1,65 @@
 import { expect, test } from 'claude-code/testing'
 
-import { risksOf, stepsOf, viewOf, visible } from '../hooks/request'
+import { risksOf, segmentsOf, stepsOf, viewOf, visible } from '../hooks/request'
+
+// A request as sessions send them: files written by here-docs, then a script run on them, piped on.
+const HEREDOCS = [
+  'S=C:/tmp/demo',
+  'mkdir -p $S/overlay',
+  "cat > $S/overlay/app.json <<'EOF'",
+  '{',
+  '  "Headless": true,',
+  '  "Url": "https://example.org"',
+  '}',
+  'EOF',
+  "cat > $S/shots.js <<'EOF'",
+  'const { chromium } = require("playwright");',
+  '(async () => {',
+  '  console.log("hi");',
+  '})();',
+  'EOF',
+  'cd $S && rm -rf shots && MODE=demo bash shots.sh shots.js 2>&1 | python -c "import sys; print(sys.stdin.read()[-1500:])"; ls shots',
+].join('\n')
+
+test('a request cuts into its shell text and the blocks it hands on, which together are the request', () => {
+  const segs = segmentsOf(HEREDOCS)
+  expect(segs.map(sg => sg.text).join('')).toBe(HEREDOCS)
+  expect(segs.map(sg => (sg.kind === 'block' ? [sg.to, sg.lines, sg.runBy ?? ''] : sg.kind))).toEqual([
+    'shell',
+    ['$S/overlay/app.json', 4, ''],
+    'shell',
+    ['$S/shots.js', 4, 'bash'],
+    'shell',
+  ])
+  // Piped to an interpreter, a here-doc is that program's input; a long inline script is a block too.
+  const piped = segmentsOf("cat <<'EOF' | python\nprint(1)\nEOF")
+  expect(piped[1]).toEqual({ kind: 'block', text: 'print(1)\n', lines: 1, to: 'python', language: 'python' })
+  const inline = `node -e "${'x();'.repeat(30)}" && echo done`
+  const segs2 = segmentsOf(inline)
+  expect(segs2.map(sg => sg.text).join('')).toBe(inline)
+  expect(segs2.map(sg => sg.kind)).toEqual(['shell', 'block', 'shell'])
+  // A here-string in PowerShell; a here-doc with no end line stays shell text.
+  expect(segmentsOf('$s = @"\nline\n"@\n$s', 'powershell').map(sg => (sg.kind === 'block' ? [sg.to, !!sg.isString] : sg.kind))).toEqual(['shell', ['$s', true], 'shell'])
+  expect(segmentsOf("cat > f <<'EOF'\nno end").map(sg => sg.kind)).toEqual(['shell'])
+})
+
+test('the reading aid says each step in plain words, a here-doc as the file it writes', () => {
+  expect(viewOf('Bash', HEREDOCS)).toEqual({
+    kind: 'shell',
+    steps: [
+      'sets S',
+      'creates the folders $S/overlay',
+      'writes $S/overlay/app.json (4 lines)',
+      'writes $S/shots.js (4 lines, run later by bash)',
+      'goes to $S',
+      'deletes shots',
+      'runs shots.sh with bash: shots.js 2>&1 (with MODE=demo)',
+      'pipes into: runs inline python: "import sys; print(sys.stdin.read()[-1500:])"',
+      'lists shots',
+    ],
+    risks: ['exec', 'del', 'write'],
+  })
+})
 
 test('a shell command splits into its steps, quotes and $( ) kept whole, with what each kind of step can do', () => {
   const cmd = `mkdir -p "$P/bin" && cd $P/bin && gh release download -R a/b --pattern '*x64.zip;*.txt' | tee log; python -c "import x; print(1)" && echo $(date +%s) > out.txt`

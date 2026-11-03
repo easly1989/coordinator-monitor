@@ -4,6 +4,17 @@
 
 - **Each card shows its request's short id** (`#x1nb2c`, the last six characters), dim, in its header. A press copies the whole id. The messages sessions get, and the coordinator's notes, quote the same short form. A closing message that asks for a card by its short form is recognised like one that names the whole id.
 - **Fewer false protected-command cards.** The body of a here-doc handed to a command that only stores it is no longer matched against the rules. That covers `cat` or `tee` into a file, `git commit -F -`, and `gh pr|issue create|edit|comment --body-file -`. So writing a test or a commit message that names `gh pr merge` raises no card. A body fed to a shell or an interpreter (`bash`, `python -`, `node`), and a quoted argument (`bash -c`, `ssh`, `node -e`), are still matched whole, since that text can run; the README says why.
+- **Large shell requests are readable.** An app ask for Bash or PowerShell no longer shows the tool's input as JSON with `\n` and `\"` escapes. It shows the command itself, with real lines and quotes; its other fields (`timeout`) are small `key: value` lines under it. Each block the command hands on whole sits in a box of its own, labelled with where it goes, always shown: a here-doc body (`→ file $S/shots.js · 34 lines · run later by node`, `→ input of python`), a PowerShell here-string, or a long `python -c` / `node -e` script. The parts together are the request, every character of it. The reading aid above says each step in plain words, for example:
+  - writes a file;
+  - runs a script with node;
+  - pipes into a command;
+  - goes to a folder;
+  - deletes something.
+
+  `visible()`, the size caption and the fallbacks stay.
+- **Task rows on a grid.** Number, a source mark (◆ queued by the coordinator, ◇ the session's own), the title, then ▲ ▼ ⤒ at the same place on every row, whatever the title's length. The row never overflows. A long title stays on one line with an ellipsis on the desktop. Hovering it shows it whole, and so does pressing its number, so a keyboard reaches it too. On touch and the terminal it wraps. The controls are icons, not words; a legend line names them. On touch they are full-size buttons, further apart. The session lock is a 🔒 / 🔓 icon button the size of Open beside it.
+
+  A ping-pong scroll for long titles was left out. The mod hears no hover, so it would have to redraw every row on a timer even while nothing moves.
 
 ## 0.6.1 — 2026-11-03
 

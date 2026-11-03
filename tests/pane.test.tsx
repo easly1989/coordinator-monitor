@@ -32,6 +32,24 @@ const status = (over: Partial<SessionStatus>): SessionStatus => ({
   ...over,
 })
 
+// An app ask for a shell command, as the app files it: the tool's input as JSON, the command full of here-docs.
+const HEREDOC_ASK = JSON.stringify(
+  {
+    command: [
+      'S=C:/tmp/demo',
+      "cat > $S/shots.js <<'EOF'",
+      'const { chromium } = require("playwright");',
+      'console.log("demo");',
+      'EOF',
+      'cd $S && node shots.js https://example.org out 2>&1 | tail -5',
+      ...Array.from({ length: 6 }, (_, n) => `echo "line ${n}"`),
+    ].join('\n'),
+    timeout: 300000,
+  },
+  null,
+  2,
+)
+
 // Two sessions publishing: one waits on a permission and a choice, one runs a worker.
 const FILES: Record<string, SessionStatus> = {
   'a.json': status({
@@ -81,6 +99,7 @@ const FILES: Record<string, SessionStatus> = {
       { id: 'p4', kind: 'ask', createdAt: now + 6, tool: 'Write', command: JSON.stringify({ content: 'print(1)\n'.repeat(30), file_path: 'C:/repos/demo/run.py' }, null, 2), explain: 'Writes a demo script.' },
       // A large command whose split is not certain (a here-string), with a hidden reversal: no summary, the
       // whole command shown, the reversal as a code.
+      { id: 'p6', kind: 'ask', createdAt: now + 8, tool: 'Bash', command: HEREDOC_ASK },
       { id: 'p5', kind: 'permission', createdAt: now + 7, tool: 'PowerShell', command: `$s = @"\n${'line\n'.repeat(30)}"@; Remove-Item C:/demo/x # \u202Egnp.exe`, rule: 'delete' },
     ],
   }),
@@ -182,7 +201,9 @@ test('the pane draws sessions, workers and every kind of request, on every surfa
     expect(await ui.find({ key: 'raw-p4-b' })).toBeFalsy()
     // The request's size shows even with no aid, so a tail pushed out of sight is given away.
     expect(await ui.find({ type: 'Text', text: /^Full request \(what you approve\) · 32 lines · \d+ characters$/ })).toBeTruthy()
-    expect(await ui.find({ type: 'Code', text: /line\n"@; Remove-Item C:\/demo\/x # \\u202Egnp\.exe$/ })).toBeTruthy()
+    // A here-string is its own labelled block; the line after it is shell text, its reversal a code.
+    expect(await ui.find({ type: 'Text', text: /^here-string \$s · 30 lines$/ })).toBeTruthy()
+    expect(await ui.find({ type: 'Code', text: /^"@; Remove-Item C:\/demo\/x # \\u202Egnp\.exe$/ })).toBeTruthy()
     // Another session's texts draw their hidden characters as codes; a request with an id the mod
     // would not make is dropped.
     expect((await ui.find({ key: 'c1-0-0-b' }))?.text).toMatch(/with gcloud\\u200B/)
@@ -214,6 +235,16 @@ test('the pane draws sessions, workers and every kind of request, on every surfa
   }
   // This session has no link to itself; one the desktop app does not know has none either.
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  // An app ask's JSON is read as what it is: the command itself, its here-doc a labelled block, the
+  // other fields as lines, a reading aid in plain words above. No JSON escapes are left to read.
+  expect(await ui.find({ type: 'Code', text: /"command":/ })).toBeFalsy()
+  expect(await ui.find({ type: 'Text', text: /^→ file \$S\/shots\.js · 2 lines · run later by node$/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Code', text: /^const \{ chromium \} = require\("playwright"\);\nconsole\.log\("demo"\);$/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Code', text: /^EOF\ncd \$S && node shots\.js/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /^timeout: 300000$/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /writes \$S\/shots\.js \(2 lines, run later by node\)/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /pipes into: tail -5/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /^Full request \(what you approve\) · 11 steps · 12 lines · \d+ characters$/ })).toBeTruthy()
   // Each card shows its request's short id; a press copies the whole id.
   expect((await ui.find({ key: 'id-p4' }))?.text).toBe('#p4')
   await ui.press({ key: 'id-p4' })
@@ -588,6 +619,11 @@ describe('a session reporting', () => {
     expect(await ui.find({ text: /from the coordinator/ })).toBeTruthy()
     // No control removes a task.
     expect(await ui.find({ text: /Removing a task: ask the coordinator or the session/ })).toBeTruthy()
+    // The controls are icons at the end of each row, named by the legend line; the lock is an icon too.
+    expect((await ui.find({ key: 'up-me-0' }))?.text).toBe('▲')
+    expect((await ui.find({ key: 'top-me-0' }))?.text).toBe('⤒')
+    expect((await ui.find({ key: 'lock-me' }))?.text).toBe('🔓')
+    expect(await ui.find({ text: /Move to the top|Unlock/ })).toBeFalsy()
 
     // Down on the first planned task: the order holds in the pane and reaches the session as a note, with no turn.
     const before = prompts.length

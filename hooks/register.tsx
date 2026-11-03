@@ -19,7 +19,7 @@ import type { EngineInterface, Register, RenderChildren, RenderNode } from 'clau
 import type { AgentRow, Answer, AnswerKind, Board, ChoiceOption, ChoiceQuestion, Local, MonitorRequest, PaneUi, PlanItem, Queues, SessionStatus } from '../types'
 import { CRAB_H, TIER_COLOR, TIER_MODEL, crabSvg, hatFor, tierOf } from './crab'
 import { QUESTIONS_HEADING, asksGoAhead, pickStrings, type Strings } from './i18n'
-import { lineCount, viewOf, visible } from './request'
+import { lineCount, segmentsOf, viewOf, visible } from './request'
 import { compileRules, criticalIn, matchRule, type Rule, type RulesFile } from './rules'
 
 const PANE = 'coordinator-monitor'
@@ -298,6 +298,16 @@ const agentLabel = async ($: $, id: string): Promise<string> => {
 /** A row the model reads at its next request, in a running turn or the next one, without starting one. */
 const appendNote = async ($: $, text: string): Promise<void> => {
   await $.session.append({ message: { type: 'user', content: [{ type: 'text', text }] } }).catch(() => undefined)
+}
+
+/** `text` as a JSON object, or `null`. */
+const jsonObject = (text: string): Record<string, unknown> | null => {
+  try {
+    const v: unknown = JSON.parse(text)
+    return v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : null
+  } catch {
+    return null
+  }
 }
 
 const fmtTime = (ms: number): string => new Date(ms).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
@@ -1246,12 +1256,44 @@ export const register: Register = (on, options) => {
       }
       if (r.kind === 'permission' || r.kind === 'ask') {
         const what = r.command ?? ''
-        // Characters that hide or reorder text are drawn as codes, here and in the summary.
-        const raw = <Code key={`raw-${r.id}`} source={visible(what)} wrap="wrap" language={what.startsWith('{') ? 'json' : r.tool === 'PowerShell' ? 'powershell' : 'bash'} />
+        const tool = r.tool ?? 'Bash'
+        const shellKind = tool === 'PowerShell' ? 'powershell' : 'bash'
+        // An app ask holds a shell tool's whole input as JSON: the command reads as itself, its other
+        // fields as lines under it. Decoding the JSON is exact, so nothing of what is approved changes.
+        const input = (tool === 'Bash' || tool === 'PowerShell') && what.startsWith('{') ? jsonObject(what) : null
+        const cmd = typeof input?.command === 'string' ? input.command : what
+        const fields = typeof input?.command === 'string' ? Object.entries(input).filter(([k]) => k !== 'command') : []
+        const isShell = (tool === 'Bash' || tool === 'PowerShell') && !cmd.startsWith('{')
+        // A shell command is drawn in its parts, every character of it: shell text, and each block it
+        // hands on whole (a here-doc, a here-string, a long inline script) under a label saying where it goes.
+        // Characters that hide or reorder text are drawn as codes, here and in the aid.
+        const raw = isShell ? (
+          <Box flexDirection="column" gap="xs">
+            {segmentsOf(cmd, shellKind).map((sg, k) =>
+              sg.kind === 'shell' ? (
+                sg.text.trim() ? <Code key={`raw-${r.id}-${k}`} source={visible(sg.text.replace(/\n$/, ''))} wrap="wrap" language={shellKind} /> : null
+              ) : (
+                <Box key={`blk-${r.id}-${k}`} flexDirection="column" gap="xs" paddingLeft="sm" borderStyle="round" borderColor={isTerm ? undefined : CARD_LINE} borderDimColor={isTerm}>
+                  <Text size="caption" color="subtle">
+                    {visible(S.blockLabel(sg.isInline ? 'inline' : sg.isString ? 'string' : sg.path ? 'file' : 'input', sg.to, sg.lines, sg.runBy))}
+                  </Text>
+                  <Code key={`raw-${r.id}-${k}`} source={visible(sg.text.replace(/\n$/, ''))} wrap="wrap" language={sg.language} path={sg.path} startLine={1} />
+                </Box>
+              ),
+            )}
+            {fields.map(([k, v]) => (
+              <Text key={`fld-${r.id}-${k}`} size="caption" color="subtle">
+                {visible(`${k}: ${JSON.stringify(v)}`)}
+              </Text>
+            ))}
+          </Box>
+        ) : (
+          <Code key={`raw-${r.id}`} source={visible(what)} wrap="wrap" language={what.startsWith('{') ? 'json' : shellKind} />
+        )
         // A large request, or a file it writes, gets a reading aid on top: its steps as the asking tool's
         // shell reads them, or the file's path and code. None where the split is not certain.
-        const view = viewOf(r.tool ?? 'Bash', what)
-        const isAided = !!view && (isLarge(what) || view.kind !== 'shell')
+        const view = viewOf(tool, cmd)
+        const isAided = !!view && (isLarge(cmd) || view.kind !== 'shell')
         const HEAD_LINES = 12
         const summary: RenderChildren = !view ? null : view.kind === 'shell' ? (
           <Box flexDirection="column" gap="xs">
@@ -1318,7 +1360,7 @@ export const register: Register = (on, options) => {
             <Box flexDirection="column" gap="xs">
               {/* Always: its size gives away a tail that blank lines or a comment push out of sight. */}
               <Text size="caption" color="subtle">
-                {`${S.fullRequest} · ${view?.kind === 'shell' ? `${S.steps(view.steps.length)} · ` : ''}${S.commandSize(lineCount(what), what.length)}`}
+                {`${S.fullRequest} · ${view?.kind === 'shell' ? `${S.steps(view.steps.length)} · ` : ''}${S.commandSize(lineCount(cmd), cmd.length)}`}
               </Text>
               {raw}
             </Box>
@@ -1526,34 +1568,59 @@ export const register: Register = (on, options) => {
       const now = plan.filter(p => p.status === 'in_progress')
       const planned = plannedOf(s, own(u.order, id))
       const isFolded = !!u.tasksFolded?.[id]
-      // Move controls show under the pointer where there is one; always where there is none.
+      // A pointer can show a long title whole on hover; with none (terminal, touch) the title wraps instead.
       const hasHover = !isTerm && e.surface !== 'mobile'
-      const plannedRow = (p: PlanItem, i: number): RenderNode => (
-        <Box key={`pl-${id}-${i}`} flexDirection="row" gap="sm" alignItems="center" paddingX="sm" hover={hasHover ? { backgroundColor: '#80808026' } : undefined}>
-          <Text size="caption" color="subtle">
-            {`${i + 1}.`}
-          </Text>
-          <Box flexGrow={1} flexShrink={1}>
-            <Text size="footnote" wrap="truncate-end">
-              {p.text}
-            </Text>
+      // A grid: number | source mark | title, which takes what is left | the controls, last and fixed, so
+      // they stand at the same place on every row. They stay drawn (dim at rest) so the keyboard reaches them.
+      // The controls are their glyphs: a desktop draws a Button's label, not its children, and words
+      // overflowed the row. The legend line above names them.
+      // On touch the controls are full buttons, a finger's size apart.
+      const ctl = e.surface === 'mobile' ? ({ variant: 'secondary' } as const) : ({ plain: true, dimColor: true } as const)
+      const plannedRow = (p: PlanItem, i: number): RenderNode => {
+        // The number opens the whole title, for a keyboard and a press as well as the pointer's hover.
+        const isWhole = !hasHover || !!u.open?.[`task:${id}:${p.text}`]
+        return (
+          <Box key={`pl-${id}-${i}`} flexDirection="row" gap="sm" alignItems="center" paddingX="sm" hover={hasHover ? { backgroundColor: '#80808026' } : undefined}>
+            <Box flexShrink={0}>
+              {hasHover ? (
+                <Button
+                  key={`exp-${id}-${i}`}
+                  plain
+                  dimColor
+                  label={`${String(i + 1).padStart(2, '\u2007')}.`}
+                  onPress={() => void update($, paneUi, cur => ({ ...cur, open: { ...cur.open, [`task:${id}:${p.text}`]: !isWhole } }))}
+                />
+              ) : (
+                <Text size="caption" color="subtle">
+                  {`${String(i + 1).padStart(2, '\u2007')}.`}
+                </Text>
+              )}
+            </Box>
+            <Box flexShrink={0}>
+              <Text size="caption" color={p.from === 'queue' ? BLUE : 'subtle'}>
+                {p.from === 'queue' ? '◆' : '◇'}
+              </Text>
+            </Box>
+            <Box flexGrow={1} flexShrink={1} minWidth={0}>
+              <Text size="footnote" wrap={isWhole ? 'wrap' : 'truncate-end'}>
+                {p.text}
+              </Text>
+              {!isWhole && p.text.length > 40 ? (
+                <Box position="absolute" top={1} left={0} display="none" hover={{ display: 'flex' }} padding="xs" borderStyle="round" borderColor={CARD_LINE} backgroundColor={HEAD}>
+                  <Text size="footnote" wrap="wrap">
+                    {p.text}
+                  </Text>
+                </Box>
+              ) : null}
+            </Box>
+            <Box flexDirection="row" gap={e.surface === 'mobile' ? 'sm' : 'xs'} flexShrink={0}>
+              <Button key={`up-${id}-${i}`} {...ctl} label="▲" onPress={() => void movePlanned($, s, i, i - 1)} />
+              <Button key={`down-${id}-${i}`} {...ctl} label="▼" onPress={() => void movePlanned($, s, i, i + 1)} />
+              <Button key={`top-${id}-${i}`} {...ctl} label="⤒" onPress={() => void movePlanned($, s, i, 0)} />
+            </Box>
           </Box>
-          <Text size="caption" color="subtle">
-            {p.from === 'queue' ? S.fromQueue : S.fromSession}
-          </Text>
-          <Box flexDirection="row" gap="xs" display={hasHover ? 'none' : 'flex'} hover={hasHover ? { display: 'flex' } : undefined}>
-            <Button key={`top-${id}-${i}`} plain dimColor label={S.moveTop} onPress={() => void movePlanned($, s, i, 0)}>
-              ⤒
-            </Button>
-            <Button key={`up-${id}-${i}`} plain dimColor label={S.moveUp} onPress={() => void movePlanned($, s, i, i - 1)}>
-              ▲
-            </Button>
-            <Button key={`down-${id}-${i}`} plain dimColor label={S.moveDown} onPress={() => void movePlanned($, s, i, i + 1)}>
-              ▼
-            </Button>
-          </Box>
-        </Box>
-      )
+        )
+      }
       return (
         // padding 0: the header's band reaches the card's edges.
         <Box key={id} flexDirection="column" padding={0} borderStyle="round" borderColor={isTerm ? undefined : s.state === 'waiting' ? AMBER_LINE : CARD_LINE} borderDimColor={isTerm} backgroundColor={fill(CARD)}>
@@ -1582,14 +1649,9 @@ export const register: Register = (on, options) => {
                 {meta}
               </Text>
               {openButton(s, `open-${id}`)}
-              {isLocked && u.locked?.[0] !== id ? (
-                <Button key={`lockup-${id}`} plain dimColor label={S.moveUp} onPress={lockUp}>
-                  ▲
-                </Button>
-              ) : null}
-              <Button key={`lock-${id}`} plain dimColor={!isLocked} label={isLocked ? S.unlock : S.lock} onPress={toggleLock}>
-                {isLocked ? '🔒' : '🔓'}
-              </Button>
+              {/* Icons, as big as Open beside them: the desktop draws a Button's label, so the label is the glyph. */}
+              {isLocked && u.locked?.[0] !== id ? <Button key={`lockup-${id}`} variant="secondary" label="▲" onPress={lockUp} /> : null}
+              <Button key={`lock-${id}`} variant="secondary" label={isLocked ? '🔒' : '🔓'} onPress={toggleLock} />
               {s.agents.length ? (
                 <Button
                   key={`c-${id}`}
