@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.3 — 2026-11-03
+
+- **Here-doc labels that could mislead are gone** (#12). The rule stays fail closed: when in doubt, shell text, and never a "→ file" label on something that runs.
+  - A descriptor or a pipe set up anywhere in the request (`exec 3> …`, `mkfifo`, `mknod`, `coproc`) means no here-doc is cut out. So does a target under `/dev` or `/proc`.
+  - `cat` given files (`cat notes.txt <<EOF`) reads them, not the body: no block.
+  - A file written by a here-doc is marked `run later by …` when the request uses it again in a way that may run it, on the opener line (`; bash f.sh`) or after the body. That covers running it directly (`./f.sh`, marked "the shell"), sourcing it, and any command not known only to read files.
+  - An interpreter fed the block with its output redirected (`bash > f <<EOF`) reads as one step: "runs bash on the block below, output to f".
+
 ## 0.6.2 — 2026-11-03
 
 - **Each card shows its request's short id** (`#x1nb2c`, the last six characters), dim, in its header. A press copies the whole id. The messages sessions get, and the coordinator's notes, quote the same short form. A closing message that asks for a card by its short form is recognised like one that names the whole id.
