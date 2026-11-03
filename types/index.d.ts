@@ -92,10 +92,11 @@ export type SessionStatus = {
 }
 
 /**
- * `dismiss` drops a request without telling the session anything. `order` names no request: its
- * text is the planned tasks in the order the person set, for the session to follow.
+ * `dismiss` drops a request without telling the session anything; `read` drops a report and tells the
+ * session it was read. `order` names no request: its text is the planned tasks in the order the
+ * person set, for the session to follow.
  */
-export type AnswerKind = 'approve-once' | 'approve-session' | 'deny' | 'answer' | 'dismiss' | 'order'
+export type AnswerKind = 'approve-once' | 'approve-session' | 'deny' | 'answer' | 'dismiss' | 'read' | 'order'
 
 export type Answer = { requestId: string; at: number; kind: AnswerKind; text?: string }
 

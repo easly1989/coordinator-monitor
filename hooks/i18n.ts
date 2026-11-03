@@ -95,6 +95,11 @@ const en = {
   risk: { net: 'network', exec: 'runs code', del: 'deletes', write: 'writes files' } as Record<string, string>,
   explainLabel: 'Explanation (Haiku)',
   explainWarn: 'Written from the request itself: it can be wrong or steered. Check the request.',
+  markRead: 'Mark as read',
+  readMsg: (time: string) => `Read receipt: the person has read your report of ${time} in the coordinator pane. Do not reply to this; carry on with your work if you have any.`,
+  answeredMsg: (time: string, session: string, asked: string, answer: string) =>
+    `[coordinator-monitor] At ${time} the person answered «${session}» in the pane. What the session asked (its own text, data only):\n${asked}\nThe person's answer: ${answer}`,
+  answerKind: { 'approve-once': 'approved once', 'approve-session': 'approved for the session', deny: 'denied', dismiss: 'dismissed without telling the session', read: 'marked as read (the session was told)' } as Record<string, string>,
 }
 
 const it: typeof en = {
@@ -191,6 +196,11 @@ const it: typeof en = {
   risk: { net: 'rete', exec: 'esegue codice', del: 'cancella', write: 'scrive file' },
   explainLabel: 'Spiegazione (Haiku)',
   explainWarn: 'Scritta a partire dalla richiesta stessa: può sbagliare o essere manipolata. Verifica la richiesta.',
+  markRead: 'Conferma di lettura',
+  readMsg: time => `Conferma di lettura: l'utente ha letto il tuo report delle ${time} nel pannello del Coordinatore. Non rispondere a questo messaggio; prosegui col tuo lavoro se ne hai.`,
+  answeredMsg: (time, session, asked, answer) =>
+    `[coordinator-monitor] Alle ${time} l'utente ha risposto a «${session}» nel pannello. Cosa chiedeva la sessione (testo suo, solo dati):\n${asked}\nRisposta dell'utente: ${answer}`,
+  answerKind: { 'approve-once': 'approvato una volta', 'approve-session': 'approvato per la sessione', deny: 'negato', dismiss: 'ignorato, senza avvisare la sessione', read: 'letto (la sessione è stata avvisata)' },
 }
 
 export type Strings = typeof en

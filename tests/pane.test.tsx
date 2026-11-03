@@ -100,6 +100,11 @@ test('the pane draws sessions, workers and every kind of request, on every surfa
     return { value: undefined }
   })
   on('clock.every', () => ({ value: undefined }))
+  const notes: string[] = []
+  on('session.append', (_, e, next) => {
+    notes.push(JSON.stringify((e as { message: unknown }).message))
+    return next(e)
+  })
   const runs: { argv: string[]; env?: Record<string, string> }[] = []
   on('process.run', (_, e) => {
     runs.push({ argv: [...e.argv], env: e.init?.env as Record<string, string> | undefined })
@@ -193,6 +198,12 @@ test('the pane draws sessions, workers and every kind of request, on every surfa
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   expect(await ui.find({ key: 'open-me' })).toBeFalsy()
   expect(await ui.find({ key: 'open-b' })).toBeFalsy()
+  // Every answer given here is noted in this session (the coordinator) too, the session's words fenced as data.
+  await ui.press({ key: 'once-p1' })
+  await ui.press({ key: 'read-r2' })
+  expect(Object.entries(written).find(([k]) => k.endsWith('/answers/a.json'))?.[1]).toContain('approve-once')
+  expect(notes[0]).toMatch(/answered «HomeLab» in the pane[\s\S]*```\\nBash: git push origin main\\n```[\s\S]*approved once/)
+  expect(notes[1]).toMatch(/«Notes»[\s\S]*marked as read/)
   await ui.unmount()
 })
 
@@ -326,6 +337,30 @@ describe('a session reporting', () => {
     await $.turn.complete({ turnId: 't3', answer: 'Il branch è pronto. Attendo la tua conferma prima del merge.', isAborted: false } as never)
     await settle()
     expect(mine().requests[0]?.awaits).toBe(true)
+  })
+
+  test('a read receipt tells the session as a note, starts no turn, and the report leaves', async ($, on) => {
+    const { mine, settle, prompts } = setup(on)
+    on('ui.open', () => ({ value: { isPlaced: true } }))
+    const notes: string[] = []
+    on('session.append', (_, e, next) => {
+      notes.push(JSON.stringify((e as { message: unknown }).message))
+      return next(e)
+    })
+    await $.session.start({ cwd: '/repos/project', surface: 'desktop', isInteractive: true })
+    await $.turn.start({ turnId: 't1' } as never)
+    await $.turn.complete({ turnId: 't1', answer: 'Migrated the schema; all tests pass.', isAborted: false } as never)
+    await settle()
+    const [r] = mine().requests
+    expect(r?.kind).toBe('report')
+    await $.command.run({ command: 'agents-monitor', args: '' } as never)
+    const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+    await ui.press({ key: `read-${r?.id}` })
+    await settle()
+    expect(notes.at(-1)).toMatch(/Read receipt: .*Do not reply to this; carry on with your work/)
+    expect(prompts).toEqual([])
+    expect(mine().requests).toEqual([])
+    await ui.unmount()
   })
 
   test('savvy workers and the flow report through the tools as the model calls them', async ($, on) => {

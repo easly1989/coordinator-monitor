@@ -10,6 +10,8 @@
 - **Compact subagent rows**: name, tier and model, context, tokens and time on one line, the bar right under it, the step note last.
 - **Approvals land faster.** While a coordinator runs, a protected command waits in its call for the pane's answer for up to two minutes: approved, it runs at once, with no refusal and no new turn. A session with a card waiting looks for answers every second instead of every three, and the pane reads again right after you answer.
 - **Large requests read at a glance.** A long shell command is split into its steps with tags for what they can do; a file write shows its path, size and first lines as code, an edit its diff; the full request is one click away. `explainRequests` (off by default) adds a short Haiku explanation, labelled as unverified.
+- **The coordinator hears every answer.** Each answer given in the pane (approvals, denials, choices, replies, go-aheads, dismissals, read receipts, a new task order) is added to the pane's own session as a note: when, which session, what it asked (its text fenced as data) and the answer. The coordinator reads it at its next request; no turn is started for it.
+- **Mark as read.** Report cards get a third action beside reply and dismiss: the session gets a note that its report was read, not to be answered; it starts no turn, so no reply or new report can follow it. The card leaves the pane.
 
 ## 0.5.1 — 2026-11-03
 

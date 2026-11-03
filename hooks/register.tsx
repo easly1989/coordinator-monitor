@@ -231,7 +231,7 @@ const applyAnswers = async ($: $): Promise<void> => {
   // The person's order for the planned tasks: a note the model reads at its next request, no turn of its own.
   for (const a of answers.filter(x => x.kind === 'order' && x.text && !l.applied.includes(x.requestId))) {
     await update($, local, cur => ({ ...cur, applied: [...cur.applied, a.requestId].slice(-300) }))
-    await $.session.append({ message: { type: 'user', content: [{ type: 'text', text: S.orderMsg(a.text ?? '') }] } }).catch(() => undefined)
+    await appendNote($, S.orderMsg(a.text ?? ''))
   }
   // An app ask, and a protected command held in its call, are answered by the hook that waits on them.
   const fresh = answers.filter(
@@ -239,6 +239,7 @@ const applyAnswers = async ($: $): Promise<void> => {
   )
   if (!fresh.length) return
   const prompts: string[] = []
+  const notes: string[] = []
   await update($, local, cur => {
     const next: Local = { ...cur, requests: [...cur.requests], grantsOnce: [...cur.grantsOnce], grantsSession: [...cur.grantsSession], applied: [...cur.applied] }
     for (const a of fresh) {
@@ -256,18 +257,29 @@ const applyAnswers = async ($: $): Promise<void> => {
         prompts.push(S.approvedMsg(cmd, false))
       } else if (a.kind === 'deny') {
         prompts.push(S.deniedMsg(cmd))
+      } else if (a.kind === 'read') {
+        // A note, not a prompt: it starts no turn, so nothing answers it and no report follows it.
+        notes.push(S.readMsg(fmtTime(req.createdAt)))
       } else if (a.text?.trim()) {
         prompts.push(req.kind === 'report' ? S.reportReplyMsg(a.text.trim()) : S.answerMsg(a.text.trim()))
       }
     }
     return next
   })
+  for (const text of notes) await appendNote($, text)
   for (const text of prompts) {
     ownPrompts.add(text)
     await $.prompt.submit({ text, asUser: true })
   }
   await publish($)
 }
+
+/** A row the model reads at its next request, in a running turn or the next one, without starting one. */
+const appendNote = async ($: $, text: string): Promise<void> => {
+  await $.session.append({ message: { type: 'user', content: [{ type: 'text', text }] } }).catch(() => undefined)
+}
+
+const fmtTime = (ms: number): string => new Date(ms).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
 
 // Past this an ask keeps the app's dialog: the card shows, and the grant covers, the whole input.
 const ASK_MAX = 8000
@@ -497,10 +509,27 @@ const postAnswer = async ($: $, target: SessionStatus, a: Answer): Promise<void>
 const answer = async ($: $, target: SessionStatus, req: MonitorRequest, kind: AnswerKind, text?: string): Promise<void> => {
   await update($, paneUi, u => ({ ...u, sent: [...u.sent, req.id].slice(-300) }))
   await postAnswer($, target, { requestId: req.id, at: Date.now(), kind, text })
+  // The session the pane sits in (the coordinator) keeps a record of every answer, read at its next request.
+  if (target.sessionId !== sessionId) await appendNote($, S.answeredMsg(fmtTime(Date.now()), target.title, askedOf(req), answerOf(kind, text)))
   $.ui.toast(S.sentToast(target.title))
   // Read again now: the session's next status shows the card gone sooner than the next tick would.
   void gather($)
 }
+
+/** What a request asked, cut to a glance, for the coordinator's record: the session's own words, fenced as data. */
+const askedOf = (r: MonitorRequest): string => {
+  const what =
+    r.kind === 'permission' || r.kind === 'ask'
+      ? `${r.tool ?? 'Bash'}: ${r.command ?? ''}`
+      : r.kind === 'choice'
+        ? (r.questions ?? []).map(q => `${q.question} [${q.options.map(o => o.label).join(' / ')}]`).join('\n')
+        : r.kind === 'report'
+          ? r.decision || r.summary || r.text || ''
+          : r.text || ''
+  return fence(what.length > 600 ? `${what.slice(0, 600)}…` : what)
+}
+const answerOf = (kind: AnswerKind, text?: string): string =>
+  kind === 'answer' ? fence(text ?? '') : (S.answerKind[kind] ?? kind)
 
 /** The planned tasks a session shows, in the person's order: its own plan's pending ones, then the queue's. */
 const plannedOf = (s: SessionStatus, order: string[] = []): PlanItem[] => {
@@ -516,7 +545,9 @@ const movePlanned = async ($: $, s: SessionStatus, i: number, to: number): Promi
   if (moved === undefined) return
   list.splice(Math.max(0, Math.min(list.length, to)), 0, moved)
   await update($, paneUi, u => ({ ...u, order: { ...u.order, [s.sessionId]: list } }))
-  await postAnswer($, s, { requestId: `order-${newId()}`, at: Date.now(), kind: 'order', text: list.map((t, n) => `${n + 1}. ${t}`).join('\n') })
+  const text = list.map((t, n) => `${n + 1}. ${t}`).join('\n')
+  await postAnswer($, s, { requestId: `order-${newId()}`, at: Date.now(), kind: 'order', text })
+  if (s.sessionId !== sessionId) await appendNote($, S.answeredMsg(fmtTime(Date.now()), s.title, fence(S.planned), fence(text)))
 }
 
 const newer = (a: string, b: string): boolean => a.localeCompare(b, undefined, { numeric: true }) > 0
@@ -1107,6 +1138,8 @@ export const register: Register = (on, options) => {
                 label={isOpen ? `▾ ${S.hideReport}` : `▸ ${S.showReport}`}
                 onPress={() => void update($, paneUi, cur => ({ ...cur, open: { ...cur.open, [r.id]: !isOpen } }))}
               />
+              {/* Unlike a dismissal, the session learns it was read; it owes no reply. */}
+              <Button key={`read-${r.id}`} variant="secondary" label={S.markRead} onPress={() => void answer($, s, r, 'read')} />
               <Button key={`dismiss-${r.id}`} variant="secondary" label={S.dismiss} onPress={() => void answer($, s, r, 'dismiss')} />
             </Box>
           </Box>,
