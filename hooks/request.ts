@@ -153,6 +153,8 @@ export const segmentsOf = (cmd: string, shell: Shell = 'bash'): Segment[] => {
       const head = line.slice(0, m.index)
       const after = line.slice((m.index ?? 0) + m[0].length)
       const part = stepsOf(head, 'bash')?.at(-1) ?? ''
+      // A process substitution or a duplicated descriptor (`>(bash)`, `<(…)`, `>&3`) may run the body.
+      if (/[<>]\(|>&/.test(head + after)) continue
       if (!READER.test(part) || (after.trim() && !stepsOf(after, 'bash')) || /[|\\]|&&[ \t]*$/.test(after)) continue
       const word = m[3] ?? ''
       // Exactly the word, as bash wants it: `EOF` with a CR after it is not the end.

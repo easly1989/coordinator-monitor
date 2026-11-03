@@ -7,6 +7,7 @@
   - its word whole as bash reads it: not `<<EOF.x`, `<<EOF"X"`, `<<-EOF-1`, `<<EOF` with a CR, nor a second `<<` on the line;
   - `cat`, `tee` or a program that reads code before it;
   - nothing open after the word: no `|`, no `\` continuation, no open quote or `$(`, no trailing `&&`;
+  - no process substitution or duplicated descriptor on the line (`>(…)`, `<(…)`, `>&`);
   - no `|` or `&&` on the line after the end word. The reading aid above says each step in plain words, for example:
   - writes a file;
   - runs a script with node;
