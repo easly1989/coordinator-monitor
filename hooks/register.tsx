@@ -954,8 +954,9 @@ export const register: Register = (on, options) => {
                     <Box
                       key={`${r.id}-${qi}-${oi}`}
                       flexDirection="column"
-                      paddingX="md"
-                      paddingY="sm"
+                      // Thin: the Button inside is the press target, the padding around it is not.
+                      paddingX="sm"
+                      paddingY="xs"
                       borderStyle="round"
                       borderColor={isOn ? (isTerm ? 'warning' : AMBER) : isTerm ? undefined : CARD_LINE}
                       borderDimColor={!isOn && isTerm}

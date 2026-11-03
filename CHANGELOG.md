@@ -4,7 +4,7 @@
 
 - **An approved request no longer comes back as a question.** A session told to wait for a protected command or a forwarded choice would end its turn asking, in its questions or its report, to "approve request <id> in the pane": a second card next to the real one, still waiting after the approval. Such items are now left out of the questions card (a section of only those adds none), and a report that only points at one of the session's own requests, open or done with, no longer waits on you. The message the session reads when it is told to wait also asks it not to repeat the request among its questions.
 - **A question's options are buttons.** Bullets under a numbered question that open on a bold label (`- **Not now:** …`) show as buttons on its card, as the desktop's own box draws them. One question answers on a press; several are picked one by one and sent together, each with its number. The free-text reply stays.
-- **A choice's option picks from its description too**, not only from its title: both lines are one press target. The padding around them is not (the mod API has no pressable box).
+- **A choice's option picks from its description too**, not only from its title: both lines are one press target. The padding around them is not (the mod API has no pressable box), so it is now thin.
 
 ## 0.5.0 — 2026-11-03
 
