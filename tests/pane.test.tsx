@@ -175,6 +175,8 @@ test('the pane draws sessions, workers and every kind of request, on every surfa
     expect(await ui.find({ type: 'Code', text: /"file_path": "C:\/repos\/demo\/run\.py"/ })).toBeTruthy()
     expect(await ui.find({ type: 'Text', text: /Writes a demo script/ })).toBeTruthy()
     expect(await ui.find({ key: 'raw-p4-b' })).toBeFalsy()
+    // The request's size shows even with no aid, so a tail pushed out of sight is given away.
+    expect(await ui.find({ type: 'Text', text: /^Full request \(what you approve\) · 32 lines · \d+ characters$/ })).toBeTruthy()
     expect(await ui.find({ type: 'Code', text: /line\n"@; Remove-Item C:\/demo\/x # \\u202Egnp\.exe$/ })).toBeTruthy()
     // Another session's texts draw their hidden characters as codes; a request with an id the mod
     // would not make is dropped.

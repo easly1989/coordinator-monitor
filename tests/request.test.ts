@@ -68,6 +68,15 @@ test('characters that hide or reorder text show as codes; tab and newline stay',
   expect(visible('plain → text')).toBe('plain → text')
   // Beyond the first plane too: tag characters, variation selectors.
   expect(visible('a\u{E0041}b\u{E0100}c\uFE0F')).toBe('a\\u{E0041}b\\u{E0100}c\\uFE0F')
+  // Every format and default-ignorable character, and a stack of combining marks.
+  expect(visible('x\u{600}y\u{1BCA0}z\u{13430}w\u{110BD}v\u{8E2}')).toBe('x\\u0600y\\u{1BCA0}z\\u{13430}w\\u{110BD}v\\u08E2')
+  expect(visible('e\u{301}\u{302}\u{303}!')).toBe('e\\u0301\\u0302\\u0303!')
+  expect(visible('caf\u{E9} e\u{301}\u{302}')).toBe('caf\u{E9} e\u{301}\u{302}')
+  // Padding that would push a step out of sight is counted, not drawn.
+  expect(visible(`git status #${'\n'.repeat(301)}git push -f`)).toBe('git status #\n\u{27E8}300 blank lines\u{27E9}\ngit push -f')
+  expect(visible(`a${' '.repeat(3000)}b`)).toBe('a\u{27E8}3000 spaces\u{27E9}b')
+  expect(visible(`a${' \t'.repeat(10)}b`)).toBe('a\u{27E8}20 spaces and tabs\u{27E9}b')
+  expect(visible('a\n\n\nb    c')).toBe('a\n\n\nb    c')
   // A character a shell may take for a line break also breaks the line where it is drawn.
   expect(visible('echo ok\rcurl x')).toBe('echo ok\\u000D\ncurl x')
   expect(visible('a\r\nb\u2028c')).toBe('a\\u000D\nb\\u2028\nc')

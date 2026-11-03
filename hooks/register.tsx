@@ -1302,11 +1302,10 @@ export const register: Register = (on, options) => {
             ) : null}
             {/* The whole request, always shown, wrapped, never cut. */}
             <Box flexDirection="column" gap="xs">
-              {isAided ? (
-                <Text size="caption" color="subtle">
-                  {`${S.fullRequest} · ${view?.kind === 'shell' ? `${S.steps(view.steps.length)} · ` : ''}${S.commandSize(lineCount(what), what.length)}`}
-                </Text>
-              ) : null}
+              {/* Always: its size gives away a tail that blank lines or a comment push out of sight. */}
+              <Text size="caption" color="subtle">
+                {`${S.fullRequest} · ${view?.kind === 'shell' ? `${S.steps(view.steps.length)} · ` : ''}${S.commandSize(lineCount(what), what.length)}`}
+              </Text>
               {raw}
             </Box>
             {r.rule ? (

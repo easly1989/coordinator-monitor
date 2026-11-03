@@ -13,10 +13,11 @@ export type RequestView =
 /**
  * Characters that change how text reads without showing themselves: controls but tab and newline
  * (ESC, a bare CR), bidi marks, overrides and isolates, zero-width and other invisible fillers,
- * variation selectors, tag characters, lone surrogates.
+ * variation selectors, tag characters, lone surrogates, and every other default-ignorable or format
+ * character Unicode lists.
  */
 const HIDDEN =
-  /[\u0000-\u0008\u000B-\u001F\u007F-\u009F\u00AD\u034F\u061C\u115F-\u1160\u17B4-\u17B5\u180B-\u180F\u200B-\u200F\u2028-\u202E\u2060-\u206F\u3164\uFE00-\uFE0F\uFEFF\uFFA0\uFFF0-\uFFFB\u{1D173}-\u{1D17A}\u{E0000}-\u{E0FFF}\uD800-\uDFFF]/u
+  /[\u0000-\u0008\u000B-\u001F\u007F-\u009F\u00AD\u034F\u061C\u115F-\u1160\u17B4-\u17B5\u180B-\u180F\u200B-\u200F\u2028-\u202E\u2060-\u206F\u3164\uFE00-\uFE0F\uFEFF\uFFA0\uFFF0-\uFFFB\u{1D173}-\u{1D17A}\u{E0000}-\u{E0FFF}\uD800-\uDFFF\p{Default_Ignorable_Code_Point}\p{Cf}]/u
 
 /**
  * A command line split at `&&`, `||`, `&`, `;`, `|` and newlines outside quotes and `$( … )`, quoting
@@ -99,17 +100,25 @@ export const risksOf = (cmd: string): string[] => RISKS.filter(([, re]) => re.te
 export const lineCount = (s: string): number => (s ? s.split('\n').length : 0)
 
 /**
- * `s` with every hidden character drawn as a visible code (`\u202E`, `\u{E0041}`). Tab and newline
- * stay; a character a shell may read as a line break (CR, NEL, the line and paragraph separators) also
- * breaks the line where it stands, so what follows it shows as the line it is.
+ * `s` with every hidden character drawn as a visible code (`\u202E`, `\u{E0041}`), and so is a stack of
+ * three or more combining marks. Tab and newline stay; a character a shell may read as a line break
+ * (CR, NEL, the line and paragraph separators) also breaks the line where it stands, so what follows it
+ * shows as the line it is. Padding that would push the rest of the text out of sight is counted
+ * instead of drawn: three or more blank lines, twenty or more spaces or tabs in a row.
  */
 export const visible = (s: string): string =>
-  s.replace(new RegExp(HIDDEN.source, 'gu'), (ch: string, at: number) => {
-    const n = ch.codePointAt(0) ?? 0
-    const hex = n.toString(16).toUpperCase()
-    const code = n > 0xffff ? `\\u{${hex}}` : `\\u${hex.padStart(4, '0')}`
-    return /[\r\u0085\u2028\u2029]/.test(ch) && s[at + ch.length] !== '\n' ? `${code}\n` : code
-  })
+  s
+    .replace(new RegExp(`${HIDDEN.source}|\\p{M}{3,}`, 'gu'), (run: string, at: number) => {
+      const codes = [...run]
+        .map(ch => {
+          const hex = (ch.codePointAt(0) ?? 0).toString(16).toUpperCase()
+          return hex.length > 4 ? `\\u{${hex}}` : `\\u${hex.padStart(4, '0')}`
+        })
+        .join('')
+      return /^[\r\u0085\u2028\u2029]$/.test(run) && s[at + run.length] !== '\n' ? `${codes}\n` : codes
+    })
+    .replace(/\n(?:[ \t]*\n){3,}/g, m => `\n⟨${m.split('\n').length - 2} blank lines⟩\n`)
+    .replace(/[ \t]{20,}/g, m => `⟨${m.length} ${m.includes('\t') ? 'spaces and tabs' : 'spaces'}⟩`)
 
 /**
  * `what` as the card holds it (a bare command for a shell tool, else the tool's input as JSON), read
