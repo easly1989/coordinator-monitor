@@ -19,7 +19,7 @@ import type { EngineInterface, Register, RenderChildren, RenderNode } from 'clau
 import type { AgentRow, Answer, AnswerKind, Board, ChoiceOption, ChoiceQuestion, Local, MonitorRequest, PaneUi, PlanItem, Queues, SessionStatus } from '../types'
 import { CRAB_H, TIER_COLOR, TIER_MODEL, crabSvg, hatFor, tierOf } from './crab'
 import { QUESTIONS_HEADING, asksGoAhead, pickStrings, type Strings } from './i18n'
-import { lineCount, viewOf, visible } from './request'
+import { lineCount, segmentsOf, viewOf, visible } from './request'
 import { compileRules, criticalIn, matchRule, type Rule, type RulesFile } from './rules'
 
 const PANE = 'coordinator-monitor'
@@ -29,7 +29,7 @@ const FAST_MS = 1000
 const STALE_MS = 15 * 60 * 1000
 const ENDED_KEEP_MS = 60 * 60 * 1000
 /** Published in every status, so the pane can flag a session still running an older copy. Keep in step with plugin.json. */
-const MOD_VERSION = '0.6.1'
+const MOD_VERSION = '0.6.2'
 const SHELL_TOOLS = new Set(['Bash', 'PowerShell'])
 const STEP_TOOL = 'mcp__savvy-progress__step'
 const FLOW_TOOL = 'mcp__savvy-progress__progress'
@@ -103,6 +103,8 @@ const titleOf = (dir: string): string => {
 }
 
 const newId = (): string => `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`
+/** The id as a card shows it: its last six characters, the random four and the clock's last two. */
+const shortId = (id: string): string => id.slice(-6)
 
 const readJson = async <T,>($: $, path: string): Promise<T | null> => {
   try {
@@ -298,6 +300,17 @@ const appendNote = async ($: $, text: string): Promise<void> => {
   await $.session.append({ message: { type: 'user', content: [{ type: 'text', text }] } }).catch(() => undefined)
 }
 
+/** `text` as the object `askWhat` wrote it from, or `null` when it is anything else, written as it would be. */
+const ownJson = (text: string): Record<string, unknown> | null => {
+  try {
+    const v: unknown = JSON.parse(text)
+    const isOwn = !!v && typeof v === 'object' && !Array.isArray(v) && JSON.stringify(sortKeys(v), null, 2) === text
+    return isOwn ? (v as Record<string, unknown>) : null
+  } catch {
+    return null
+  }
+}
+
 const fmtTime = (ms: number): string => new Date(ms).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
 
 // Past this an ask keeps the app's dialog: the card shows, and the grant covers, the whole input.
@@ -305,10 +318,19 @@ const ASK_MAX = 8000
 const sortKeys = (v: unknown): unknown =>
   Array.isArray(v) ? v.map(sortKeys) : v && typeof v === 'object' ? Object.fromEntries(Object.keys(v).sort().map(k => [k, sortKeys((v as Record<string, unknown>)[k])])) : v
 
+const askFields = (input: unknown): Record<string, unknown> => {
+  const { description: _, ...rest } = (input && typeof input === 'object' ? input : { input }) as Record<string, unknown>
+  return rest
+}
+/** Whether an ask is a bare command: it is then shown as is, never read as the JSON it may look like. */
+const isBareAsk = (input: unknown): boolean => {
+  const rest = askFields(input)
+  return Object.keys(rest).length === 1 && typeof rest.command === 'string'
+}
 /** What an app permission ask is about, in full: a bare command as is, else every field but the description. */
 const askWhat = (input: unknown): string => {
-  const { description: _, ...rest } = (input && typeof input === 'object' ? input : { input }) as Record<string, unknown>
-  return Object.keys(rest).length === 1 && typeof rest.command === 'string' ? rest.command : JSON.stringify(sortKeys(rest), null, 2)
+  const rest = askFields(input)
+  return isBareAsk(input) ? String(rest.command) : JSON.stringify(sortKeys(rest), null, 2)
 }
 const askKey = (tool: string, what: string): string => `ask\u0000${tool}\u0000${what}`
 /** A grant belongs to whoever asked: a subagent's serves that agent alone, never its parent or another agent. */
@@ -369,9 +391,13 @@ const optionsOf = (item: string): string[] => {
 /** The requests this session raised itself, open or done with: a closing message pointing at one repeats its card. */
 const ownIds = (l: Local): Set<string> => new Set([...l.applied, ...l.requests.filter(r => r.kind !== 'questions' && r.kind !== 'report').map(r => r.id)])
 const ASK_VERB = /\b(approv|confirm|conferm|answer|rispond|accept|accett)\w*/i
-/** Whether `text` asks the person to answer one of `ids` ("approve request <id>"), not merely mentions one. */
-const asksOwn = (text: string, ids: Set<string>): boolean =>
-  [...text.matchAll(/\b[a-z0-9]{8,16}\b/g)].some(m => ids.has(m[0]) && ASK_VERB.test(text.slice(Math.max(0, m.index - 100), m.index).split(/[.!?\n]/).pop() ?? ''))
+/** Whether `text` asks the person to answer one of `ids` ("approve request <id>" or "#<short id>"), not merely mentions one. */
+const asksOwn = (text: string, ids: Set<string>): boolean => {
+  const shorts = new Set([...ids].map(shortId))
+  return [...text.matchAll(/(#)?\b([a-z0-9]{6,16})\b/g)].some(
+    m => (m[1] ? shorts.has(m[2] ?? '') : ids.has(m[2] ?? '')) && ASK_VERB.test(text.slice(Math.max(0, m.index - 100), m.index).split(/[.!?\n]/).pop() ?? ''),
+  )
+}
 
 type PlanArgs = { items?: { content?: unknown; status?: unknown }[]; advance?: boolean; done?: number[]; start?: number }
 const planStatus = (s: unknown): PlanItem['status'] => (s === 'completed' || s === 'in_progress' ? s : 'pending')
@@ -509,6 +535,7 @@ const gather = async ($: $): Promise<void> => {
         summary: txt(r.summary),
         decision: txt(r.decision),
         explain: txt(r.explain),
+        isInput: r.isInput === true,
         agentId: str(r.agentId),
         questions: arr<ChoiceQuestion>(r.questions)
           .filter(q => q && typeof q === 'object')
@@ -1003,7 +1030,7 @@ export const register: Register = (on, options) => {
     if ((await read($, local)).grantsSession.includes(key)) return { decision: { behavior: 'allow' } }
     if (!(await coordinatorLive($))) return next(e)
     const id = newId()
-    await addRequest($, { id, kind: 'ask', createdAt: Date.now(), tool: e.tool_name, command: what, rule: S.appPermission, agentId: e.agent_id })
+    await addRequest($, { id, kind: 'ask', createdAt: Date.now(), tool: e.tool_name, command: what, isInput: !isBareAsk(e.tool_input), rule: S.appPermission, agentId: e.agent_id })
     void explainLater($, id, e.tool_name, what)
     const a = await waitAnswer($, id)
     await update($, local, cur => ({
@@ -1171,6 +1198,14 @@ export const register: Register = (on, options) => {
               {what}
             </Text>
           </Box>
+          {/* The request's short id, as sessions and the coordinator quote it; a press copies the whole id. */}
+          <Button
+            key={`id-${r.id}`}
+            plain
+            dimColor
+            label={`#${shortId(r.id)}`}
+            onPress={press => void $.ui.copy({ text: r.id, surface: press.surface }).then(c => $.ui.toast(c.isCopied ? S.idCopied(r.id) : r.id))}
+          />
           {openButton(s, `open-${r.id}`)}
         </Box>
       )
@@ -1232,12 +1267,46 @@ export const register: Register = (on, options) => {
       }
       if (r.kind === 'permission' || r.kind === 'ask') {
         const what = r.command ?? ''
-        // Characters that hide or reorder text are drawn as codes, here and in the summary.
-        const raw = <Code key={`raw-${r.id}`} source={visible(what)} wrap="wrap" language={what.startsWith('{') ? 'json' : r.tool === 'PowerShell' ? 'powershell' : 'bash'} />
+        const tool = r.tool ?? 'Bash'
+        const shellKind = tool === 'PowerShell' ? 'powershell' : 'bash'
+        // An app ask holds a shell tool's whole input as JSON: the command reads as itself, its other
+        // fields as lines under it. Decoding the JSON is exact, so nothing of what is approved changes.
+        // Only JSON the mod wrote itself is decoded: a bare command that looks like JSON (two `command`
+        // keys, say) is a command, and is shown as one.
+        const input = r.kind === 'ask' && r.isInput && (tool === 'Bash' || tool === 'PowerShell') ? ownJson(what) : null
+        const cmd = typeof input?.command === 'string' ? input.command : what
+        const fields = typeof input?.command === 'string' ? Object.entries(input).filter(([k]) => k !== 'command') : []
+        const isShell = (tool === 'Bash' || tool === 'PowerShell') && !cmd.startsWith('{')
+        // A shell command is drawn in its parts, every character of it: shell text, and each block it
+        // hands on whole (a here-doc, a here-string, a long inline script) under a label saying where it goes.
+        // Characters that hide or reorder text are drawn as codes, here and in the aid.
+        const raw = isShell ? (
+          <Box flexDirection="column" gap="xs">
+            {segmentsOf(cmd, shellKind).map((sg, k) =>
+              sg.kind === 'shell' ? (
+                sg.text.trim() ? <Code key={`raw-${r.id}-${k}`} source={visible(sg.text.replace(/\n$/, ''))} wrap="wrap" language={shellKind} /> : null
+              ) : (
+                <Box key={`blk-${r.id}-${k}`} flexDirection="column" gap="xs" paddingLeft="sm" borderStyle="round" borderColor={isTerm ? undefined : CARD_LINE} borderDimColor={isTerm}>
+                  <Text size="caption" color="subtle">
+                    {visible(S.blockLabel(sg.isInline ? 'inline' : sg.isString ? 'string' : sg.path ? 'file' : 'input', sg.to, sg.lines, sg.runBy, sg.isRunning))}
+                  </Text>
+                  <Code key={`raw-${r.id}-${k}`} source={visible(sg.text.replace(/\n$/, ''))} wrap="wrap" language={sg.language} path={sg.path} startLine={1} />
+                </Box>
+              ),
+            )}
+            {fields.map(([k, v]) => (
+              <Text key={`fld-${r.id}-${k}`} size="caption" color="subtle">
+                {visible(`${k}: ${JSON.stringify(v)}`)}
+              </Text>
+            ))}
+          </Box>
+        ) : (
+          <Code key={`raw-${r.id}`} source={visible(what)} wrap="wrap" language={what.startsWith('{') ? 'json' : shellKind} />
+        )
         // A large request, or a file it writes, gets a reading aid on top: its steps as the asking tool's
         // shell reads them, or the file's path and code. None where the split is not certain.
-        const view = viewOf(r.tool ?? 'Bash', what)
-        const isAided = !!view && (isLarge(what) || view.kind !== 'shell')
+        const view = viewOf(tool, cmd)
+        const isAided = !!view && (isLarge(cmd) || view.kind !== 'shell')
         const HEAD_LINES = 12
         const summary: RenderChildren = !view ? null : view.kind === 'shell' ? (
           <Box flexDirection="column" gap="xs">
@@ -1304,7 +1373,7 @@ export const register: Register = (on, options) => {
             <Box flexDirection="column" gap="xs">
               {/* Always: its size gives away a tail that blank lines or a comment push out of sight. */}
               <Text size="caption" color="subtle">
-                {`${S.fullRequest} · ${view?.kind === 'shell' ? `${S.steps(view.steps.length)} · ` : ''}${S.commandSize(lineCount(what), what.length)}`}
+                {`${S.fullRequest} · ${view?.kind === 'shell' ? `${S.steps(view.steps.length)} · ` : ''}${S.commandSize(lineCount(cmd), cmd.length)}`}
               </Text>
               {raw}
             </Box>
@@ -1512,34 +1581,59 @@ export const register: Register = (on, options) => {
       const now = plan.filter(p => p.status === 'in_progress')
       const planned = plannedOf(s, own(u.order, id))
       const isFolded = !!u.tasksFolded?.[id]
-      // Move controls show under the pointer where there is one; always where there is none.
+      // A pointer can show a long title whole on hover; with none (terminal, touch) the title wraps instead.
       const hasHover = !isTerm && e.surface !== 'mobile'
-      const plannedRow = (p: PlanItem, i: number): RenderNode => (
-        <Box key={`pl-${id}-${i}`} flexDirection="row" gap="sm" alignItems="center" paddingX="sm" hover={hasHover ? { backgroundColor: '#80808026' } : undefined}>
-          <Text size="caption" color="subtle">
-            {`${i + 1}.`}
-          </Text>
-          <Box flexGrow={1} flexShrink={1}>
-            <Text size="footnote" wrap="truncate-end">
-              {p.text}
-            </Text>
+      // A grid: number | source mark | title, which takes what is left | the controls, last and fixed, so
+      // they stand at the same place on every row. They stay drawn (dim at rest) so the keyboard reaches them.
+      // The controls are their glyphs: a desktop draws a Button's label, not its children, and words
+      // overflowed the row. The legend line above names them.
+      // On touch the controls are full buttons, a finger's size apart.
+      const ctl = e.surface === 'mobile' ? ({ variant: 'secondary' } as const) : ({ plain: true, dimColor: true } as const)
+      const plannedRow = (p: PlanItem, i: number): RenderNode => {
+        // The number opens the whole title, for a keyboard and a press as well as the pointer's hover.
+        const isWhole = !hasHover || !!u.open?.[`task:${id}:${p.text}`]
+        return (
+          <Box key={`pl-${id}-${i}`} flexDirection="row" gap="sm" alignItems="center" paddingX="sm" hover={hasHover ? { backgroundColor: '#80808026' } : undefined}>
+            <Box flexShrink={0}>
+              {hasHover ? (
+                <Button
+                  key={`exp-${id}-${i}`}
+                  plain
+                  dimColor
+                  label={`${String(i + 1).padStart(2, '\u2007')}.`}
+                  onPress={() => void update($, paneUi, cur => ({ ...cur, open: { ...cur.open, [`task:${id}:${p.text}`]: !isWhole } }))}
+                />
+              ) : (
+                <Text size="caption" color="subtle">
+                  {`${String(i + 1).padStart(2, '\u2007')}.`}
+                </Text>
+              )}
+            </Box>
+            <Box flexShrink={0}>
+              <Text size="caption" color={p.from === 'queue' ? BLUE : 'subtle'}>
+                {p.from === 'queue' ? '◆' : '◇'}
+              </Text>
+            </Box>
+            <Box flexGrow={1} flexShrink={1} minWidth={0}>
+              <Text size="footnote" wrap={isWhole ? 'wrap' : 'truncate-end'}>
+                {p.text}
+              </Text>
+              {!isWhole && p.text.length > 40 ? (
+                <Box position="absolute" top={1} left={0} display="none" hover={{ display: 'flex' }} padding="xs" borderStyle="round" borderColor={CARD_LINE} backgroundColor={HEAD}>
+                  <Text size="footnote" wrap="wrap">
+                    {p.text}
+                  </Text>
+                </Box>
+              ) : null}
+            </Box>
+            <Box flexDirection="row" gap={e.surface === 'mobile' ? 'sm' : 'xs'} flexShrink={0}>
+              <Button key={`up-${id}-${i}`} {...ctl} label="▲" onPress={() => void movePlanned($, s, i, i - 1)} />
+              <Button key={`down-${id}-${i}`} {...ctl} label="▼" onPress={() => void movePlanned($, s, i, i + 1)} />
+              <Button key={`top-${id}-${i}`} {...ctl} label="⤒" onPress={() => void movePlanned($, s, i, 0)} />
+            </Box>
           </Box>
-          <Text size="caption" color="subtle">
-            {p.from === 'queue' ? S.fromQueue : S.fromSession}
-          </Text>
-          <Box flexDirection="row" gap="xs" display={hasHover ? 'none' : 'flex'} hover={hasHover ? { display: 'flex' } : undefined}>
-            <Button key={`top-${id}-${i}`} plain dimColor label={S.moveTop} onPress={() => void movePlanned($, s, i, 0)}>
-              ⤒
-            </Button>
-            <Button key={`up-${id}-${i}`} plain dimColor label={S.moveUp} onPress={() => void movePlanned($, s, i, i - 1)}>
-              ▲
-            </Button>
-            <Button key={`down-${id}-${i}`} plain dimColor label={S.moveDown} onPress={() => void movePlanned($, s, i, i + 1)}>
-              ▼
-            </Button>
-          </Box>
-        </Box>
-      )
+        )
+      }
       return (
         // padding 0: the header's band reaches the card's edges.
         <Box key={id} flexDirection="column" padding={0} borderStyle="round" borderColor={isTerm ? undefined : s.state === 'waiting' ? AMBER_LINE : CARD_LINE} borderDimColor={isTerm} backgroundColor={fill(CARD)}>
@@ -1568,14 +1662,9 @@ export const register: Register = (on, options) => {
                 {meta}
               </Text>
               {openButton(s, `open-${id}`)}
-              {isLocked && u.locked?.[0] !== id ? (
-                <Button key={`lockup-${id}`} plain dimColor label={S.moveUp} onPress={lockUp}>
-                  ▲
-                </Button>
-              ) : null}
-              <Button key={`lock-${id}`} plain dimColor={!isLocked} label={isLocked ? S.unlock : S.lock} onPress={toggleLock}>
-                {isLocked ? '🔒' : '🔓'}
-              </Button>
+              {/* Icons, as big as Open beside them: the desktop draws a Button's label, so the label is the glyph. */}
+              {isLocked && u.locked?.[0] !== id ? <Button key={`lockup-${id}`} variant="secondary" label="▲" onPress={lockUp} /> : null}
+              <Button key={`lock-${id}`} variant="secondary" label={isLocked ? '🔒' : '🔓'} onPress={toggleLock} />
               {s.agents.length ? (
                 <Button
                   key={`c-${id}`}

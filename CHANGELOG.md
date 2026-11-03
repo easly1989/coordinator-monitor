@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.6.2 — 2026-11-03
+
+- **Each card shows its request's short id** (`#x1nb2c`, the last six characters), dim, in its header. A press copies the whole id. The messages sessions get, and the coordinator's notes, quote the same short form. A closing message that asks for a card by its short form is recognised like one that names the whole id.
+- **Large shell requests are readable.** An app ask for Bash or PowerShell no longer shows the tool's input as JSON with `\n` and `\"` escapes. It shows the command itself, with real lines and quotes; its other fields (`timeout`) are small `key: value` lines under it. Each block the command hands on whole sits in a box of its own, labelled with where it goes, always shown: a here-doc body (`→ file $S/shots.js · 34 lines · run later by node`, `→ input of python`), a PowerShell here-string, or a long `python -c` / `node -e` script. The parts together are the request, every character of it. A label says when a block runs: an unquoted here-doc whose `$( )` run as it is written (`runs the $( ) in it now`), a body fed to a program that reads code (`→ input of python`), a file run or sourced later (`run later by node`, `run later by source`). Only the JSON the mod wrote itself is decoded: a bare command that looks like JSON is shown as it is. A here-doc is cut out only where its reading is certain; anything else stays shell text. That needs:
+  - its word whole as bash reads it: not `<<EOF.x`, `<<EOF"X"`, `<<-EOF-1`, `<<EOF` with a CR, nor a second `<<` on the line;
+  - `cat`, `tee` or a program that reads code before it;
+  - nothing open after the word: no `|`, no `\` continuation, no open quote or `$(`, no trailing `&&`;
+  - no process substitution or duplicated descriptor on the line (`>(…)`, `<(…)`, `>&`);
+  - no `|` or `&&` on the line after the end word. The reading aid above says each step in plain words, for example:
+  - writes a file;
+  - runs a script with node;
+  - pipes into a command;
+  - goes to a folder;
+  - deletes something.
+
+  `visible()`, the size caption and the fallbacks stay.
+- **Task rows on a grid.** Number, a source mark (◆ queued by the coordinator, ◇ the session's own), the title, then ▲ ▼ ⤒ at the same place on every row, whatever the title's length. The row never overflows. A long title stays on one line with an ellipsis on the desktop. Hovering it shows it whole, and so does pressing its number, so a keyboard reaches it too. On touch and the terminal it wraps. The controls are icons, not words; a legend line names them. On touch they are full-size buttons, further apart. The session lock is a 🔒 / 🔓 icon button the size of Open beside it.
+
+  A ping-pong scroll for long titles was left out. The mod hears no hover, so it would have to redraw every row on a timer even while nothing moves.
+
 ## 0.6.1 — 2026-11-03
 
 ### Security

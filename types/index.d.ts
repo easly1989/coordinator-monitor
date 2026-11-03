@@ -39,6 +39,8 @@ export type MonitorRequest = {
   /** permission: the tool and the command it was asked to run. */
   tool?: string
   command?: string
+  /** ask: `command` is the tool's input as JSON the mod wrote (more fields than a command), not a bare command. */
+  isInput?: boolean
   /** permission: why it is protected (the rule's label). */
   rule?: string
   /** choice: the questions as the model asked them. */
