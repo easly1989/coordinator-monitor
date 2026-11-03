@@ -19,7 +19,7 @@ import type { EngineInterface, Register, RenderChildren, RenderNode } from 'clau
 import type { Answer, AnswerKind, Board, ChoiceQuestion, Local, MonitorRequest, PaneUi, PlanItem, Queues, SessionStatus } from '../types'
 import { CRAB_H, TIER_COLOR, TIER_MODEL, crabSvg, hatFor, tierOf } from './crab'
 import { QUESTIONS_HEADING, asksGoAhead, pickStrings, type Strings } from './i18n'
-import { lineCount, viewOf } from './request'
+import { lineCount, viewOf, visible } from './request'
 import { compileRules, criticalIn, matchRule, type Rule, type RulesFile } from './rules'
 
 const PANE = 'coordinator-monitor'
@@ -29,7 +29,7 @@ const FAST_MS = 1000
 const STALE_MS = 15 * 60 * 1000
 const ENDED_KEEP_MS = 60 * 60 * 1000
 /** Published in every status, so the pane can flag a session still running an older copy. Keep in step with plugin.json. */
-const MOD_VERSION = '0.6.0'
+const MOD_VERSION = '0.6.1'
 const SHELL_TOOLS = new Set(['Bash', 'PowerShell'])
 const STEP_TOOL = 'mcp__savvy-progress__step'
 const FLOW_TOOL = 'mcp__savvy-progress__progress'
@@ -243,7 +243,7 @@ const applyAnswers = async ($: $): Promise<void> => {
     a => !l.applied.includes(a.requestId) && !holding.has(a.requestId) && l.requests.some(r => r.id === a.requestId && r.kind !== 'ask'),
   )
   if (!fresh.length) return
-  const prompts: string[] = []
+  const prompts: { text: string; agentId?: string }[] = []
   const notes: string[] = []
   await update($, local, cur => {
     const next: Local = { ...cur, requests: [...cur.requests], grantsOnce: [...cur.grantsOnce], grantsSession: [...cur.grantsSession], applied: [...cur.applied] }
@@ -254,29 +254,43 @@ const applyAnswers = async ($: $): Promise<void> => {
       next.applied = [...next.applied, a.requestId].slice(-300)
       // Fenced: the command is the session's text, sent on in the person's voice.
       const cmd = fence(req.command ?? '')
+      const to = req.agentId
       if (a.kind === 'approve-once') {
         next.grantsOnce.push(grantKey(req))
-        prompts.push(S.approvedMsg(cmd, true))
+        prompts.push({ text: S.approvedMsg(cmd, true), agentId: to })
       } else if (a.kind === 'approve-session') {
         next.grantsSession.push(grantKey(req))
-        prompts.push(S.approvedMsg(cmd, false))
+        prompts.push({ text: S.approvedMsg(cmd, false), agentId: to })
       } else if (a.kind === 'deny') {
-        prompts.push(S.deniedMsg(cmd))
+        prompts.push({ text: S.deniedMsg(cmd), agentId: to })
       } else if (a.kind === 'read') {
         // A note, not a prompt: it starts no turn, so nothing answers it and no report follows it.
         notes.push(S.readMsg(fmtTime(req.createdAt)))
       } else if (a.text?.trim()) {
-        prompts.push(req.kind === 'report' ? S.reportReplyMsg(a.text.trim()) : S.answerMsg(a.text.trim()))
+        prompts.push({ text: req.kind === 'report' ? S.reportReplyMsg(a.text.trim()) : S.answerMsg(a.text.trim()), agentId: to })
       }
     }
     return next
   })
   for (const text of notes) await appendNote($, text)
-  for (const text of prompts) {
+  for (const p of prompts) {
+    // A subagent's request is answered to that agent. Only when it cannot be reached does the parent
+    // hear of it, told whose it is, so the parent does not run another agent's command as its own.
+    if (p.agentId) {
+      const sent = await $.session.send({ to: { agentId: p.agentId }, text: p.text }).catch(() => ({ isDelivered: false }))
+      if (sent.isDelivered) continue
+    }
+    const text = p.agentId ? S.forAgentMsg(await agentLabel($, p.agentId), p.text) : p.text
     ownPrompts.add(text)
     await $.prompt.submit({ text, asUser: true })
   }
   await publish($)
+}
+
+/** A subagent as its parent knows it: its id and the description it was started with, quoted. */
+const agentLabel = async ($: $, id: string): Promise<string> => {
+  const a = (await $.agent.list().catch(() => [])).find(x => x.id === id)
+  return JSON.stringify(visible(a?.description ? `${id} (${a.description})` : id))
 }
 
 /** A row the model reads at its next request, in a running turn or the next one, without starting one. */
@@ -522,7 +536,9 @@ const answer = async ($: $, target: SessionStatus, req: MonitorRequest, kind: An
   await update($, paneUi, u => ({ ...u, sent: [...u.sent, req.id].slice(-300) }))
   await postAnswer($, target, { requestId: req.id, at: Date.now(), kind, text })
   // The session the pane sits in (the coordinator) keeps a record of every answer, read at its next request.
-  if (target.sessionId !== sessionId) await appendNote($, S.answeredMsg(fmtTime(Date.now()), target.title, askedOf(req), answerOf(kind, text)))
+  // It carries nothing the other session wrote but its title, quoted: no question, no report text.
+  // A dismiss tells no one, so it leaves no record either.
+  if (target.sessionId !== sessionId && kind !== 'dismiss') await appendNote($, answeredNote(target, req.id, kind, text))
   $.ui.toast(S.sentToast(target.title))
   // Read again now: the session's next status shows the card gone sooner than the next tick would.
   void gather($)
@@ -561,20 +577,9 @@ const changeQueue = async ($: $, a: QueueArgs): Promise<string> => {
   return `${s.title}: ${list.length ? list.map((t, n) => `${n + 1}. ${t}`).join('\n') : 'nothing queued'}`
 }
 
-/** What a request asked, cut to a glance, for the coordinator's record: the session's own words, fenced as data. */
-const askedOf = (r: MonitorRequest): string => {
-  const what =
-    r.kind === 'permission' || r.kind === 'ask'
-      ? `${r.tool ?? 'Bash'}: ${r.command ?? ''}`
-      : r.kind === 'choice'
-        ? (r.questions ?? []).map(q => `${q.question} [${q.options.map(o => o.label).join(' / ')}]`).join('\n')
-        : r.kind === 'report'
-          ? r.decision || r.summary || r.text || ''
-          : r.text || ''
-  return fence(what.length > 600 ? `${what.slice(0, 600)}…` : what)
-}
-const answerOf = (kind: AnswerKind, text?: string): string =>
-  kind === 'answer' ? fence(text ?? '') : (S.answerKind[kind] ?? kind)
+/** The coordinator's record of one answer: the session's title as a quoted string, the request id, the person's answer. */
+const answeredNote = (s: SessionStatus, id: string, kind: AnswerKind, text?: string): string =>
+  S.answeredMsg(fmtTime(Date.now()), JSON.stringify(visible(s.title)), id, kind === 'answer' ? fence(text ?? '') : (S.answerKind[kind] ?? kind))
 
 /** The planned tasks a session shows, in the person's order: its own plan's pending ones, then the queue's. */
 const plannedOf = (s: SessionStatus, order: string[] = []): PlanItem[] => {
@@ -594,8 +599,10 @@ const movePlanned = async ($: $, s: SessionStatus, i: number, to: number): Promi
   const list = items.map(p => p.text)
   await update($, paneUi, u => ({ ...u, order: { ...u.order, [s.sessionId]: list } }))
   const text = items.map((p, n) => `${n + 1}. ${p.text}${p.from === 'queue' ? ` ${S.queuedMark}` : ''}`).join('\n')
-  await postAnswer($, s, { requestId: `order-${newId()}`, at: Date.now(), kind: 'order', text })
-  if (s.sessionId !== sessionId) await appendNote($, S.answeredMsg(fmtTime(Date.now()), s.title, fence(S.planned), fence(text)))
+  const id = `order-${newId()}`
+  await postAnswer($, s, { requestId: id, at: Date.now(), kind: 'order', text })
+  // Not the list: its tasks are the session's own words.
+  if (s.sessionId !== sessionId) await appendNote($, answeredNote(s, id, 'order'))
 }
 
 const newer = (a: string, b: string): boolean => a.localeCompare(b, undefined, { numeric: true }) > 0
@@ -930,7 +937,9 @@ export const register: Register = (on, options) => {
   // The coordinator's queue per session. The mod writes it: no session may write the bus itself.
   // Calls run one at a time, so tasks queued in parallel all land.
   on('tool.call', { tool: QUEUE_TOOL }, async ($, e) => {
-    const run = queueChain.then(() => changeQueue($, e as unknown as QueueArgs))
+    // The tool is registered in the coordinator alone; a call from anywhere else changes nothing.
+    if (!isCoordinator) return { result: 'Only the coordinator session can change the queue.' }
+    const run =queueChain.then(() => changeQueue($, e as unknown as QueueArgs))
     queueChain = run.catch(() => undefined)
     return { result: await run }
   }).catch(() => ({ result: 'coordinator-monitor could not change the queue' }))
@@ -1189,9 +1198,11 @@ export const register: Register = (on, options) => {
       }
       if (r.kind === 'permission' || r.kind === 'ask') {
         const what = r.command ?? ''
-        const raw = <Code key={`raw-${r.id}`} source={what} language={what.startsWith('{') ? 'json' : r.tool === 'PowerShell' ? 'powershell' : 'bash'} />
-        // A large request, or a file it writes, leads with what it does; the request itself stays a press away.
-        const view = viewOf(what)
+        // Characters that hide or reorder text are drawn as codes, here and in the summary.
+        const raw = <Code key={`raw-${r.id}`} source={visible(what)} language={what.startsWith('{') ? 'json' : r.tool === 'PowerShell' ? 'powershell' : 'bash'} />
+        // A large request, or a file it writes, leads with what it does; the request itself stays a press
+        // away. Read as the asking tool reads it; where the split is not certain there is no summary.
+        const view = viewOf(r.tool ?? 'Bash', what)
         const isSummed = !!view && (isLarge(what) || view.kind !== 'shell')
         const isRawOpen = !!u.open?.[`${r.id}:raw`]
         const HEAD_LINES = 12
@@ -1205,29 +1216,25 @@ export const register: Register = (on, options) => {
                 <Box key={`risk-${r.id}-${k}`}>{tag(S.risk[k] ?? k, RISK_COLOR[k] ?? BLUE)}</Box>
               ))}
             </Box>
-            {view.steps.slice(0, 15).map((st, i) => (
-              <Text key={`st-${r.id}-${i}`} size="footnote" wrap="truncate-end">
+            {/* Every step, whole: a cut one could hide what runs after the cut. */}
+            {view.steps.map((st, i) => (
+              <Text key={`st-${r.id}-${i}`} size="footnote" wrap="wrap">
                 <Text color="subtle">{`${i + 1}. `}</Text>
-                {st.length > 160 ? `${st.slice(0, 160)}…` : st}
+                {visible(st)}
               </Text>
             ))}
-            {view.steps.length > 15 ? (
-              <Text size="caption" color="subtle">
-                {`+${view.steps.length - 15}`}
-              </Text>
-            ) : null}
           </Box>
         ) : (
           <Box flexDirection="column" gap="xs">
             <Text size="footnote">
               <Text color="subtle">{`${view.kind === 'write' ? S.writes : S.edits} `}</Text>
-              <Text weight="semibold">{view.path}</Text>
+              <Text weight="semibold">{visible(view.path)}</Text>
               <Text color="subtle">{view.kind === 'write' ? ` · ${S.lines(lineCount(view.content))}` : view.isEveryMatch ? ` ${S.everyMatch}` : ''}</Text>
             </Text>
             {view.kind === 'write' ? (
-              <Code key={`body-${r.id}`} source={view.content.split('\n').slice(0, HEAD_LINES).join('\n')} path={view.path} startLine={1} />
+              <Code key={`body-${r.id}`} source={visible(view.content.split('\n').slice(0, HEAD_LINES).join('\n'))} path={view.path} startLine={1} />
             ) : (
-              <Code key={`body-${r.id}`} source={view.diff} format="diff" path={view.path} />
+              <Code key={`body-${r.id}`} source={visible(view.diff)} format="diff" path={view.path} />
             )}
             {view.kind === 'write' && lineCount(view.content) > HEAD_LINES ? (
               <Text size="caption" color="subtle">
@@ -1245,7 +1252,8 @@ export const register: Register = (on, options) => {
                 {S.partialSummary}
               </Text>
             ) : null}
-            {r.explain ? (
+            {/* Written from the request itself: shown only beside the request, never in its place. */}
+            {r.explain && (!isSummed || isRawOpen) ? (
               <Box flexDirection="column" gap="xs" padding="sm" borderStyle="round" borderColor={isTerm ? undefined : '#7F77DD66'} borderDimColor={isTerm} backgroundColor={fill('#7F77DD14')}>
                 <Text size="caption" weight="semibold" color="#B3ADF0">
                   {S.explainLabel}
@@ -1260,7 +1268,7 @@ export const register: Register = (on, options) => {
               <Box flexDirection="column" gap="xs">
                 <Box flexDirection="row" gap="sm" alignItems="center" justifyContent="space-between">
                   <Text size="caption" color="subtle">
-                    {S.commandSize(lineCount(what), what.length)}
+                    {`${view?.kind === 'shell' ? `${S.steps(view.steps.length)} · ` : ''}${S.commandSize(lineCount(what), what.length)}`}
                   </Text>
                   <Button
                     key={`raw-${r.id}-b`}

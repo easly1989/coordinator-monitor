@@ -76,7 +76,11 @@ const FILES: Record<string, SessionStatus> = {
       { id: 'r2', kind: 'report', createdAt: now + 4, text: 42 as never, awaits: false },
       { id: 'p3', kind: 'permission', createdAt: now + 5, tool: 'Bash', command: 'npm publish', rule: 'publish' },
       // A file write, as the app asks it: its path and code lead, the JSON stays a press away.
-      { id: 'p4', kind: 'ask', createdAt: now + 6, tool: 'Write', command: JSON.stringify({ content: 'print(1)\n'.repeat(30), file_path: 'C:/repos/demo/run.py' }, null, 2) },
+      // Its explanation shows only beside the request itself, never in its place.
+      { id: 'p4', kind: 'ask', createdAt: now + 6, tool: 'Write', command: JSON.stringify({ content: 'print(1)\n'.repeat(30), file_path: 'C:/repos/demo/run.py' }, null, 2), explain: 'Writes a demo script.' },
+      // A large command whose split is not certain (a here-string), with a hidden reversal: no summary, the
+      // whole command shown, the reversal as a code.
+      { id: 'p5', kind: 'permission', createdAt: now + 7, tool: 'PowerShell', command: `$s = @"\n${'line\n'.repeat(30)}"@; Remove-Item C:/demo/x # \u202Egnp.exe`, rule: 'delete' },
     ],
   }),
 }
@@ -148,7 +152,7 @@ test('the pane draws sessions, workers and every kind of request, on every surfa
   expect(mine.title).toBe('Coordinatore')
   expect(mine.folder).toBe('coordinator')
   expect(mine.effort).toBe('high')
-  expect(mine.version).toBe('0.6.0')
+  expect(mine.version).toBe('0.6.1')
 
   for (const surface of ['terminal', 'desktop', 'vscode', 'mobile'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface })
@@ -166,9 +170,13 @@ test('the pane draws sessions, workers and every kind of request, on every surfa
     expect(await ui.find({ type: 'Text', text: /^Writes C:\/repos\/demo\/run\.py · 31 lines$/ })).toBeTruthy()
     expect(await ui.find({ type: 'Code', text: /^(print\(1\)\n){11}print\(1\)$/ })).toBeTruthy()
     expect(await ui.find({ type: 'Code', text: /"file_path": "C:\/repos\/demo\/run\.py"/ })).toBeFalsy()
+    expect(await ui.find({ type: 'Text', text: /Writes a demo script/ })).toBeFalsy()
     await ui.press({ key: 'raw-p4-b' })
     expect(await ui.find({ type: 'Code', text: /"file_path": "C:\/repos\/demo\/run\.py"/ })).toBeTruthy()
+    expect(await ui.find({ type: 'Text', text: /Writes a demo script/ })).toBeTruthy()
     await ui.press({ key: 'raw-p4-b' })
+    expect(await ui.find({ type: 'Code', text: /line\n"@; Remove-Item C:\/demo\/x # \\u202Egnp\.exe$/ })).toBeTruthy()
+    expect(await ui.find({ key: 'raw-p5-b' })).toBeFalsy()
     expect(await ui.find({ type: 'Text', text: /git push origin main/ })).toBeFalsy()
     // The fixtures publish no version, as copies before 0.3 did: each is flagged.
     expect(await ui.find({ type: 'Text', text: /runs mod < 0\.3: \/reload-plugins there/ })).toBeTruthy()
@@ -198,12 +206,16 @@ test('the pane draws sessions, workers and every kind of request, on every surfa
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   expect(await ui.find({ key: 'open-me' })).toBeFalsy()
   expect(await ui.find({ key: 'open-b' })).toBeFalsy()
-  // Every answer given here is noted in this session (the coordinator) too, the session's words fenced as data.
+  // Every answer given here is noted in this session (the coordinator) too: the session's title quoted,
+  // the request id and the answer, nothing else the session wrote. A dismissal leaves no note.
   await ui.press({ key: 'once-p1' })
-  await ui.press({ key: 'read-r2' })
   expect(Object.entries(written).find(([k]) => k.endsWith('/answers/a.json'))?.[1]).toContain('approve-once')
-  expect(notes[0]).toMatch(/answered «HomeLab» in the pane[\s\S]*```\\nBash: git push origin main\\n```[\s\S]*approved once/)
-  expect(notes[1]).toMatch(/«Notes»[\s\S]*marked as read/)
+  await ui.press({ key: 'read-r2' })
+  await ui.press({ key: 'dismiss-c1' })
+  expect(notes[0]).toMatch(/answered request p1 of the session titled \\"HomeLab\\" in the pane: approved once/)
+  expect(notes[0]).not.toMatch(/git push/)
+  expect(notes[1]).toMatch(/request r2 of the session titled \\"Notes\\"[\s\S]*marked as read/)
+  expect(notes.length).toBe(2)
   await ui.unmount()
 })
 
@@ -265,21 +277,23 @@ test('questions leave when the person replies in the session, or the session spe
 })
 
 describe('a session reporting', () => {
-  const setup = (on: TestOn, agents: unknown[] = []) => {
+  const setup = (on: TestOn, agents: unknown[] = [], cwd = '/repos/project') => {
     const written: Record<string, string> = {}
     on('command.register', () => ({ value: { command: 'agents-monitor' } }))
     on('session.start', (_, e) => ({ cwd: e.cwd }))
     on('env.get', () => ({ value: undefined }))
     on('settings.read', () => ({ value: {} }))
     on('session.id', () => ({ value: 'me' }))
-    on('session.cwd', () => ({ value: '/repos/project' }))
+    on('session.cwd', () => ({ value: cwd }))
     on('session.model', () => ({ value: 'claude-sonnet-5-5' }))
     on('session.usage', () => ({ value: { rateLimits: [] } as never }))
     on('agent.list', () => ({ value: agents as never }))
     on('fs.exists', () => ({ value: false }))
     const path = (e: unknown) => String((e as { path?: string }).path ?? '').replace(/\\/g, '/')
     // The bus as this session writes it: its own status file, and the answers the pane leaves.
-    on('fs.list', (_, e) => ({ value: path(e).endsWith('/sessions') && written[`${path(e)}/me.json`] ? [{ kind: 'file', name: 'me.json', mtimeMs: Date.now() } as never] : [] }))
+    on('fs.list', (_, e) => ({
+      value: path(e).endsWith('/sessions') ? Object.keys(written).filter(k => k.startsWith(`${path(e)}/`)).map(k => ({ kind: 'file', name: k.split('/').pop(), mtimeMs: Date.now() }) as never) : [],
+    }))
     on('fs.read', (_, e) => {
       const text = written[path(e)]
       if (text !== undefined) return { value: text }
@@ -522,7 +536,7 @@ describe('a session reporting', () => {
   })
 
   test("a session's tasks, queue and progress show on its card, reorder without removal, fold, and the card locks", async ($, on) => {
-    const { mine, settle, prompts } = setup(on)
+    const { mine, settle, prompts, written } = setup(on)
     on('ui.open', () => ({ value: { isPlaced: true } }))
     const notes: string[] = []
     on('session.append', (_, e, next) => {
@@ -542,11 +556,12 @@ describe('a session reporting', () => {
     await $.command.run({ command: 'agents-monitor', args: '' } as never)
     // The coordinator queues a task for the session by its title; the pane shows it among the planned.
     // Two queued at once both land; a name that matches nothing changes nothing.
+    // Outside the coordinator the queue tool changes nothing; the queue stands as the coordinator's left it.
     const queue = (args: object) => $.tool.call({ tool: 'mcp__coordinator-monitor__queue', ...args } as never) as Promise<{ result?: string }>
-    await Promise.all([queue({ action: 'add', session: 'project', text: 'Benchmark the parser' }), queue({ action: 'add', session: 'proj', text: 'Profile the cache' })])
-    expect((await queue({ action: 'list', session: 'project' })).result).toMatch(/1\. Benchmark the parser\n2\. Profile the cache/)
-    expect((await queue({ action: 'add', session: 'nowhere', text: 'x' })).result).toMatch(/No session/)
-    expect((await queue({ action: 'remove', session: 'project', text: 'Profile' })).result).not.toMatch(/Profile/)
+    expect((await queue({ action: 'add', session: 'project', text: 'x' })).result).toMatch(/Only the coordinator/)
+    const bus = Object.keys(written).find(k => k.endsWith('/sessions/me.json'))?.replace(/\/sessions\/me\.json$/, '') ?? ''
+    expect(written[`${bus}/queues.json`]).toBeUndefined()
+    written[`${bus}/queues.json`] = JSON.stringify({ me: ['Benchmark the parser'] })
     await $.command.run({ command: 'agents-monitor', args: '' } as never)
     const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
     expect((await ui.find({ key: 'tasks-me' }))?.text).toMatch(/TASKS · 1 in progress · 3 planned · ✓ 1 done/)
@@ -583,6 +598,52 @@ describe('a session reporting', () => {
     await settle()
     expect(mine().plan?.every(p => p.status === 'completed')).toBe(true)
     await ui.unmount()
+  })
+
+  test('the coordinator queues tasks for a session; two at once both land', { options: { coordinatorFolder: 'coordinator' } }, async ($, on) => {
+    const { settle, written } = setup(on, [], '/repos/coordinator')
+    on('ui.open', () => ({ value: { isPlaced: true } }))
+    await $.session.start({ cwd: '/repos/coordinator', surface: 'desktop', isInteractive: true })
+    await settle()
+    const bus = Object.keys(written).find(k => k.endsWith('/sessions/me.json'))?.replace(/\/sessions\/me\.json$/, '') ?? ''
+    written[`${bus}/sessions/p.json`] = JSON.stringify(status({ sessionId: 'p', title: 'project', heartbeat: Date.now() }))
+    await $.command.run({ command: 'agents-monitor', args: '' } as never)
+    const queue = (args: object) => $.tool.call({ tool: 'mcp__coordinator-monitor__queue', ...args } as never) as Promise<{ result?: string }>
+    await Promise.all([queue({ action: 'add', session: 'project', text: 'Benchmark the parser' }), queue({ action: 'add', session: 'proj', text: 'Profile the cache' })])
+    expect((await queue({ action: 'list', session: 'project' })).result).toMatch(/1\. Benchmark the parser\n2\. Profile the cache/)
+    expect((await queue({ action: 'add', session: 'nowhere', text: 'x' })).result).toMatch(/No session/)
+    expect((await queue({ action: 'remove', session: 'project', text: 'Profile' })).result).not.toMatch(/Profile/)
+    expect(JSON.parse(written[`${bus}/queues.json`] ?? '{}')).toEqual({ p: ['Benchmark the parser'] })
+    await settle()
+  })
+
+  test("a subagent's request is answered to that agent; when it is gone, the parent is told whose it is", async ($, on) => {
+    const { mine, settle, written, prompts, answersFile } = setup(on, [{ id: 'w1', type: 'savvy-medium', description: 'Release worker', status: 'completed' }])
+    on('tool.check', () => ({ decision: 'allow' }) as never)
+    const sent: string[] = []
+    let isReachable = true
+    on('session.send', (_, e) => {
+      sent.push(e.text)
+      return isReachable ? { isDelivered: true } : { isDelivered: false, reason: 'gone' }
+    })
+    await $.session.start({ cwd: '/repos/project', surface: 'desktop', isInteractive: true })
+    await $.tool.check({ tool: 'Bash', input: { command: 'npm publish' }, tool_use_id: 'u1', agentId: 'w1' } as never)
+    await settle()
+    const [a] = mine().requests
+    expect(a?.agentId).toBe('w1')
+    written[answersFile()] = JSON.stringify([{ requestId: a?.id, at: Date.now(), kind: 'approve-once' }])
+    for (let i = 0; i < 300 && !sent.length; i++) await new Promise<void>(r => setTimeout(r, 10))
+    expect(sent[0]).toMatch(/Approved[\s\S]*npm publish/)
+    expect(prompts.some(t => t.includes('npm publish'))).toBe(false)
+
+    isReachable = false
+    await $.tool.check({ tool: 'Bash', input: { command: 'gh release create v1' }, tool_use_id: 'u2', agentId: 'w1' } as never)
+    await settle()
+    const [b] = mine().requests
+    written[answersFile()] = JSON.stringify([{ requestId: b?.id, at: Date.now(), kind: 'deny' }])
+    for (let i = 0; i < 300 && !prompts.some(t => t.includes('gh release create v1')); i++) await new Promise<void>(r => setTimeout(r, 10))
+    expect(prompts.at(-1)).toMatch(/subagent "w1 \(Release worker\)"[\s\S]*that agent's, not yours[\s\S]*Denied[\s\S]*gh release create v1/)
+    await settle()
   })
 })
 describe('the app asking for a permission', () => {

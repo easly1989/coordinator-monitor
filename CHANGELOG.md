@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.6.1 — 2026-11-03
+
+### Security
+
+- **A summary can no longer hide a step.** A large shell command's steps are shown whole, wrapped and never cut, and every one of them. The command is read as the shell that asks reads it: Bash or PowerShell, decided by the asking tool, not by the look of the text. In PowerShell `\"` ends a string and a doubled quote stays inside one; in bash a backslash inside single quotes is literal. Where the split is not certain, there is no summary and the card shows the whole command. That covers a quote or `$(` left open, a here-doc or here-string, a backtick substitution, a line continuation, and more than 40 steps. The step count sits next to the command's size, so a mismatch is visible.
+- **Hidden characters show as codes.** Bidi overrides and isolates, zero-width marks, ESC and the other control characters are drawn as `\u` codes. This applies to the summary, the file path, the code and diff shown, and the raw command.
+- **The coordinator's record of an answer carries no text from the other session** except its title, quoted. It holds the request id and your answer, but no question or report text, and no task list on a reorder. A dismissal leaves no record. The mod API has no model-readable role for an appended note other than a user-role one, so the fix keeps the content small instead.
+- **The explanation shows only beside the request.** `explainRequests` stays off by default. When on, its text shows only while the request itself is shown, never in its place.
+- **The `queue` tool answers only in the coordinator.** A call from any other session changes nothing.
+- **A subagent's request is answered to that agent.** An approval, denial or answer for a protected command a subagent asked for goes to the agent itself. When the agent can no longer be reached, the parent session gets the answer wrapped with the agent's id and task. The wrapper says the command is that agent's, not the parent's: the parent runs it only if it is still part of the work it gave that agent.
+
 ## 0.6.0 — 2026-11-03
 
 - **Each session's tasks.** A session's card lists its tasks in progress and planned, as its own task list has them (the desktop's `update_plan`, the CLI's `TodoWrite`; a subagent's list stays its own), plus what the coordinator queued for it through its new `queue` tool. Planned tasks reorder with ▲ ▼ ⤒, shown under the pointer on the desktop and always on the terminal and mobile; the session gets the new order as a note it reads at its next request, with no turn of its own. The pane has no control that removes a task. The list folds per session.
