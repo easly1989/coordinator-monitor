@@ -10,9 +10,10 @@ const en = {
   agentsRunning: (n: number) => (n === 1 ? '1 subagent running' : `${n} subagents running`),
   questionOf: (i: number, n: number) => `question ${i} of ${n}`,
   otherPlaceholder: 'Write a different answer…',
-  waitsPermission: (cmd: string) => `waiting for a permission: ${cmd}`,
+  waitsPermission: 'waiting for a permission',
   hasChoice: 'has a choice for you',
   hasQuestions: 'has questions for you',
+  waitsConfirm: 'waits for your go-ahead',
   oldMod: (v: string) => `runs mod ${v}: /reload-plugins there`,
   effort: { low: 'low', medium: 'medium', high: 'high', xhigh: 'extra', max: 'max' } as Record<string, string>,
   sessions: 'sessions',
@@ -26,6 +27,13 @@ const en = {
   answersGuard: "coordinator-monitor: only the mod writes its shared folder (answers, rules, status files); a session may read it but not change it.",
   choice: 'CHOICE',
   questions: 'QUESTIONS',
+  report: 'REPORT',
+  confirmBadge: 'GO-AHEAD',
+  showReport: 'Show report',
+  hideReport: 'Hide report',
+  confirm: 'Go ahead',
+  openSession: 'Open',
+  openFailed: 'Could not open the session in the desktop app.',
   critical: 'critical service',
   approveOnce: 'Approve once',
   approveSession: 'Approve for the session',
@@ -53,6 +61,8 @@ const en = {
     `Approved from the coordinator pane${once ? ' (this one time)' : ' (for the rest of this session)'}: you may now run\n\n${cmd}`,
   deniedMsg: (cmd: string) => `Denied from the coordinator pane: do not run\n\n${cmd}\n\nFind another way or explain what you need.`,
   answerMsg: (text: string) => `Answer to your questions, sent from the coordinator pane:\n\n${text}`,
+  reportReplyMsg: (text: string) => `Reply to your report, sent from the coordinator pane:\n\n${text}`,
+  confirmMsg: 'Go ahead.',
 }
 
 const it: typeof en = {
@@ -67,9 +77,10 @@ const it: typeof en = {
   agentsRunning: n => (n === 1 ? '1 subagente in corso' : `${n} subagenti in corso`),
   questionOf: (i, n) => `domanda ${i} di ${n}`,
   otherPlaceholder: 'Scrivi una risposta diversa…',
-  waitsPermission: cmd => `attende permesso: ${cmd}`,
+  waitsPermission: 'attende un permesso',
   hasChoice: 'ha una scelta per te',
   hasQuestions: 'ha domande per te',
+  waitsConfirm: 'attende il tuo via libera',
   oldMod: v => `usa la mod ${v}: fai /reload-plugins lì`,
   effort: { low: 'basso', medium: 'medio', high: 'alto', xhigh: 'extra', max: 'max' },
   sessions: 'sessioni',
@@ -83,6 +94,13 @@ const it: typeof en = {
   answersGuard: 'coordinator-monitor: solo la mod scrive nella sua cartella condivisa (risposte, regole, file di stato); una sessione può leggerla ma non modificarla.',
   choice: 'SCELTA',
   questions: 'DOMANDE',
+  report: 'REPORT',
+  confirmBadge: 'VIA LIBERA',
+  showReport: 'Mostra report',
+  hideReport: 'Nascondi report',
+  confirm: 'Procedi',
+  openSession: 'Apri',
+  openFailed: "Non è stato possibile aprire la sessione nell'app desktop.",
   critical: 'servizio critico',
   approveOnce: 'Approva una volta',
   approveSession: 'Approva per la sessione',
@@ -108,6 +126,8 @@ const it: typeof en = {
   approvedMsg: (cmd, once) => `Approvato dal pannello del Coordinatore${once ? ' (solo questa volta)' : ' (per il resto della sessione)'}: ora puoi eseguire\n\n${cmd}`,
   deniedMsg: cmd => `Negato dal pannello del Coordinatore: non eseguire\n\n${cmd}\n\nTrova un'altra strada o spiega cosa ti serve.`,
   answerMsg: text => `Risposta alle tue domande, inviata dal pannello del Coordinatore:\n\n${text}`,
+  reportReplyMsg: text => `Risposta al tuo report, inviata dal pannello del Coordinatore:\n\n${text}`,
+  confirmMsg: 'Procedi.',
 }
 
 export type Strings = typeof en
@@ -116,3 +136,12 @@ export const pickStrings = (lang: string | undefined): Strings => (lang?.toLower
 
 /** The heading a session ends its turn with when it has open questions. */
 export const QUESTIONS_HEADING = /^#{1,3}\s*(questions for you|domande per te)\s*$/im
+
+/**
+ * Whether a closing message waits for the person's go-ahead without a questions section: its last
+ * paragraph is a question, or it asks for confirmation in so many words.
+ * shortcut: a phrase list in English and Italian; add phrases as sessions word it otherwise.
+ */
+export const asksGoAhead = (text: string): boolean =>
+  /\?\s*$/.test(text.trim().split(/\n\s*\n/).pop() ?? '') ||
+  /\b(shall i|should i|want me to|do you want me|waiting for your (ok|go-ahead|confirmation)|ok to proceed)\b|\b(confermi|vuoi che|posso procedere|attendo (la tua |una tua |il tuo )?(conferma|via libera|ok)|aspetto (la tua |una tua |il tuo )?(conferma|via libera|ok)|dammi (il )?via libera)\b/i.test(text)
