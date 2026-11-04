@@ -54,11 +54,11 @@ const HEREDOC_ASK = JSON.stringify(
 const FOLD_ASK = JSON.stringify(
   {
     command: [
-      'S=C:/tmp/demo',
-      "cat > $S/cfg.json <<'EOF'",
+      'mkdir -p /tmp/demo',
+      "cat > /tmp/demo/cfg.json <<'EOF'",
       '{"url": "https://example.org/feed"}',
       'EOF',
-      'cd $S && ls',
+      'cd /tmp/demo && ls',
       ...Array.from({ length: 6 }, (_, n) => `echo "line ${n}"`),
     ].join('\n'),
     timeout: 60000,
@@ -272,7 +272,7 @@ test('the pane draws sessions, workers and every kind of request, on every surfa
   // touches, its size and its fields stay, and it can be approved as it is; its text is one press away.
   expect(await ui.find({ type: 'Code', text: /example\.org\/feed/ })).toBeFalsy()
   expect(await ui.find({ type: 'Text', text: /^Touches \(always shown, read from the command\)$/ })).toBeTruthy()
-  for (const line of [/^writes {2}\$S\/cfg\.json$/, /^goes to {2}\$S$/, /^url {2}https:\/\/example\.org\/feed$/])
+  for (const line of [/^writes {2}\/tmp\/demo\/cfg\.json$/, /^goes to {2}\/tmp\/demo$/, /^url {2}https:\/\/example\.org\/feed$/])
     expect(await ui.find({ type: 'Text', text: line })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /^timeout: 60000$/ })).toBeTruthy()
   expect(await ui.find({ key: 'once-p13' })).toBeTruthy()

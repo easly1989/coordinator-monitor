@@ -279,6 +279,8 @@ test('what a request touches is read from all of it: inside quotes, $( ), sudo, 
   // A quote in an earlier word, inside the other kind of quote, opens nothing: what follows is read.
   expect(of(`echo "it's done"; rm -r '/srv/data'`)).toEqual(['rm \'/srv/data\''])
   expect(of(`echo 'say "hi"' && cd /srv && ssh h "rm -f /x"`)).toEqual(['cd /srv', 'rm /x', 'host h'])
+  // A substitution inside double quotes has quotes of its own: its `'` does not stay open after it.
+  expect(of(`echo "$(echo "'")"; rm -r /srv/x`)).toEqual(['rm /srv/x'])
 })
 
 test('the risk chips know the destructive tools of this setup and an encoded command', () => {
@@ -292,7 +294,7 @@ test('the risk chips know the destructive tools of this setup and an encoded com
 
 test('a card folds only when no block of it can run', () => {
   const pad = Array.from({ length: 6 }, (_, n) => `echo ${n}`).join('\n')
-  const folds = (cmd: string, shell?: 'bash' | 'powershell') => canFold(segmentsOf(cmd, shell))
+  const folds = (cmd: string, shell: 'bash' | 'powershell' = 'bash') => canFold(segmentsOf(cmd, shell), shell)
   // Plain shell text, and a file of data that nothing uses as code: may fold.
   expect(folds(`cd /srv\n${pad}`)).toBe(true)
   expect(folds(`cat > /tmp/cfg.json <<'EOF'\n{"a": 1}\nEOF\n${pad}`)).toBe(true)
@@ -312,4 +314,31 @@ test('a card folds only when no block of it can run', () => {
   expect(folds(`cat > cfg.json <<EOF\n$(pct destroy 101)\nEOF\n${pad}`)).toBe(false)
   // A PowerShell here-string.
   expect(folds(`$s = @"\nbody\n"@\n${pad}`, 'powershell')).toBe(false)
+})
+
+test('a card folds only when every step is a file mover, and a data file is not code for a later command', () => {
+  const pad = Array.from({ length: 6 }, (_, n) => `echo ${n}`).join('\n')
+  const folds = (cmd: string) => canFold(segmentsOf(cmd), 'bash')
+  // The allowlist: cat, ls, mkdir, cd, echo, printf, cp, mv, touch, chmod, tee with one file.
+  expect(folds(`mkdir -p /srv/a && cd /srv/a && ls -la\ncp a.txt b.txt; mv b.txt c.txt\ntouch d\nchmod 600 d\nprintf x\ncat c.txt\n${pad}`)).toBe(true)
+  expect(folds(`tee /srv/a/x.txt <<'EOF'\nhello\nEOF\n${pad}`)).toBe(true)
+  expect(folds(`echo hi | tee out.txt\n${pad}`)).toBe(true)
+  // A data file that a later command reads as configuration or as a manifest.
+  expect(folds(`cat > x.conf <<'EOF'\n[core]\nfsmonitor = ./hook.sh\nEOF\nGIT_CONFIG_GLOBAL=x.conf git status\n${pad}`)).toBe(false)
+  expect(folds(`cat > package.json <<'EOF'\n{"scripts": {"preinstall": "./x"}}\nEOF\nnpm install\n${pad}`)).toBe(false)
+  expect(folds(`cat > x.txt <<'EOF'\ndiff --git a/b b/b\nEOF\ngit apply x.txt\n${pad}`)).toBe(false)
+  expect(folds(`git status\n${pad}`)).toBe(false)
+  // tee writes every file it is given: two files (one of them a cron job) never fold.
+  expect(folds(`tee /etc/cron.d/job x.txt <<'EOF'\n* * * * * root ./x\nEOF\n${pad}`)).toBe(false)
+  expect(folds(`echo hi | tee a.txt b.txt\n${pad}`)).toBe(false)
+  // Whatever changes what runs: an assignment before a program or alone, a substitution in an echo.
+  expect(folds(`LD_PRELOAD=./x.so ls\n${pad}`)).toBe(false)
+  expect(folds(`PATH=/tmp/evil\nls\n${pad}`)).toBe(false)
+  expect(folds(`echo $(pct destroy 101)\n${pad}`)).toBe(false)
+  expect(folds(`echo \`pct destroy 101\`\n${pad}`)).toBe(false)
+  // Steps it cannot split for certain (a comment), and programs near the list.
+  expect(folds(`ls # then pct destroy 101\n${pad}`)).toBe(false)
+  expect(folds(`/bin/ls\n${pad}`)).toBe(false)
+  expect(folds(`catx file\n${pad}`)).toBe(false)
+  expect(folds(`cat f | bash\n${pad}`)).toBe(false)
 })

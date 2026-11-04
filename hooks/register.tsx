@@ -1367,7 +1367,7 @@ export const register: Register = (on, options) => {
         // A large shell request opens folded: its recap, what it touches and its size stay, its text is a
         // press away. Never where the aid gave up, nor where any block could run (a body the recap does
         // not read): then the card opens whole, as before.
-        const isFoldable = isShell && view?.kind === 'shell' && isLarge(cmd) && canFold(segs)
+        const isFoldable = isShell && view?.kind === 'shell' && isLarge(cmd) && canFold(segs, shellKind)
         const isFolded = isFoldable && !u.open?.[`full:${r.id}`]
         const touches = isFoldable ? touchesOf(cmd, shellKind) : []
         // Only what closes a block is drawn under it: an inline script's closing quotes, a here-string's

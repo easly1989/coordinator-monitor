@@ -130,7 +130,7 @@ const targetOf = (part: string, after: string): { to: string; path?: string; lan
 }
 
 // Commands that read or move a file without running it.
-const INERT = /^(?:cat|ls|chmod|chown|rm|cp|mv|wc|head|tail|stat|file|diff|grep|echo|printf|test|\[|touch|git)$/
+const INERT = /^(?:cat|ls|chmod|chown|rm|cp|mv|wc|head|tail|stat|file|diff|grep|echo|printf|test|\[|touch)$/
 
 /** A step's program: its first word past assignments and leading redirections (`< f bash` is bash). */
 const programOf = (step: string): string =>
@@ -411,17 +411,33 @@ export const viewOf = (tool: string, what: string): RequestView | null => {
 /** Something a shell request touches, as the collapsed card lists it: always shown, never summarised. */
 export type Touch = { kind: 'cd' | 'rm' | 'write' | 'append' | 'url' | 'host' | 'remote'; target: string }
 
-/** The quote that is open at `at` in `text`, as the shell reads it: a `'` inside `"…"` (or the other way round) opens nothing. */
+/**
+ * The quote that is open at `at` in `text`, as the shell reads it: a `'` inside `"…"` (or the other way
+ * round) opens nothing, and a `$( )` inside `"…"` is a command again, with quotes of its own.
+ */
 const openQuoteAt = (text: string, at: number): string => {
-  let q = ''
+  // What is open, innermost last: `'`, `"`, or `(` for a `$( )`.
+  const stack: string[] = []
   for (let i = 0; i < at; i++) {
     const c = text[i] ?? ''
-    if (q === "'") q = c === "'" ? '' : q
-    else if (c === '\\') i++
-    else if (q) q = c === q ? '' : q
-    else if (c === '"' || c === "'") q = c
+    const top = stack.at(-1)
+    if (top === "'") {
+      if (c === "'") stack.pop()
+    } else if (c === '\\') i++
+    else if (top === '"') {
+      if (c === '"') stack.pop()
+      else if (c === '$' && text[i + 1] === '(') {
+        stack.push('(')
+        i++
+      }
+    } else if (c === '"' || c === "'") stack.push(c)
+    else if (c === '$' && text[i + 1] === '(') {
+      stack.push('(')
+      i++
+    } else if (c === ')' && top === '(') stack.pop()
   }
-  return q
+  const top = stack.at(-1)
+  return top === '"' || top === "'" ? top : ''
 }
 
 /**
@@ -526,17 +542,42 @@ const touchesIn = (text: string): Touch[] => {
 // Files that hold data: a block written to one of these is not code, whatever the request does with it later.
 const DATA_FILE = /\.(?:json|ya?ml|toml|ini|conf|cfg|txt|md|csv|xml|html?|css|log|properties)$/i
 
+// The programs a folded card may run: they move, make or show files and run nothing they are handed.
+const FOLD_PROGRAMS = new Set(['cat', 'ls', 'mkdir', 'cd', 'echo', 'printf', 'cp', 'mv', 'touch', 'chmod'])
+
+/** Whether one step of a folded card is on the allowlist (see `canFold`). */
+const stepFolds = (step: string): boolean => {
+  // A substitution runs whatever it holds; an assignment before the program (`GIT_CONFIG_GLOBAL=f git`,
+  // `PATH=/tmp ls`, a bare `PATH=/tmp`) changes what runs, or what a later step runs.
+  if (/\$\(|`|[<>]\(/.test(step)) return false
+  const prefix = /^(?:(?:[A-Za-z_]\w*=\S*|\d*[<>]{1,2}[ \t]*[^\s;&|<>]+)[ \t]*)*/.exec(step.trim())?.[0] ?? ''
+  if (/[A-Za-z_]\w*=/.test(prefix)) return false
+  const program = programOf(step)
+  if (FOLD_PROGRAMS.has(program)) return true
+  if (program !== 'tee') return false
+  // `tee` writes every file it is given: one only, the one the block goes to.
+  const rest = step.trim().slice(prefix.length).split(/\s+/).slice(1)
+  return !rest.some(w => /[<>]/.test(w)) && rest.filter(w => !w.startsWith('-') && !/^‹\d+›$/.test(w)).length === 1
+}
+
 /**
- * Whether a card may open folded: only when no block of it can run. Shell text is all in the recap, but
- * the body of a block is not, and any block that runs (an interpreter's input, an inline `-c` / `-e`
- * script of any language, a body whose `$( )` run as it is read, a file run or maybe piped on later)
- * would hide code behind a summary. So a block folds only if it is a plain file of data written to a
- * path, with nothing that uses it as code. Fail closed: a block of any other kind keeps the card open.
+ * Whether a card may open folded. The recap says every shell step, but not the body of a block, and a
+ * file of data can be read as code by a later command (`GIT_CONFIG_GLOBAL=x.conf git status`,
+ * `npm install` beside a package.json, `git apply x.txt`). So both must hold, and a card that fails
+ * either keeps its text on screen (fail closed):
+ * - every block is a plain file of data written to a path, used as code by nothing (no interpreter,
+ *   inline script, running `$( )`, later or piped use, here-string);
+ * - every shell step's program is on a short allowlist of file movers (cat, ls, mkdir, cd, echo,
+ *   printf, cp, mv, touch, chmod, and tee with one file), none run with an assignment before it or a
+ *   substitution in it, and the steps split for certain.
  */
-export const canFold = (segs: Segment[]): boolean =>
-  segs.every(
+export const canFold = (segs: Segment[], shell: Shell = 'bash'): boolean => {
+  const isInert = segs.every(
     sg => sg.kind === 'shell' || (!!sg.path && DATA_FILE.test(sg.path) && !sg.language && !sg.runBy && !sg.isPiped && !sg.isRunning && !sg.isInline && !sg.isString),
   )
+  const steps = splitSteps(aidTextOf(segs, shell), shell)
+  return isInert && !!steps && steps.every(st => stepFolds(st.text))
+}
 
 /**
  * What a shell request touches, read from its shell text by a generous scan (an extra line costs less
