@@ -121,7 +121,47 @@ test('a block says what runs: substitutions in an unquoted body, a pipe after th
   }
   // The aid says so in words when no runner is named.
   const aid = viewOf('Bash', "cat > g.sh <<'EOF'\necho hi\nEOF\ncat g.sh 2>&1 | bash")
-  expect(aid?.kind === 'shell' && aid.steps[0]).toContain('may run later (piped to a later command)')
+  expect(aid?.kind === 'shell' && aid.steps[0]).toContain('may run later (a later command may run it)')
+  // #15: `tee` hands its input on, so the runner is the program after it; a `tee` that ends the pipe
+  // names nothing, and is only marked.
+  expect(blockOf("cat > g.sh <<'EOF'\necho hi\nEOF\ncat g.sh | tee x | bash")).toMatchObject({ runBy: 'bash' })
+  expect(blockOf("cat > g.sh <<'EOF'\necho hi\nEOF\ncat g.sh | tee x | tee y | sh")).toMatchObject({ runBy: 'sh' })
+  expect(blockOf("cat > g.sh <<'EOF'\necho hi\nEOF\ncat g.sh | tee x")).toMatchObject({ isPiped: true })
+  expect(blockOf("cat > g.sh <<'EOF'\necho hi\nEOF\ncat g.sh | tee >(bash)")).not.toMatchObject({ runBy: expect.anything() })
+  expect(blockOf("cat > g.sh <<'EOF'\necho hi\nEOF\ncat g.sh | tee >(bash)")).toMatchObject({ isPiped: true })
+  // #15: a file spelled so that its name is not found (a glob, a quote, a variable, `..`, a string of code
+  // that builds it) is marked when something that may run it follows. Each is marked, named or not.
+  for (const after of [
+    'bash g*.sh',
+    'cat g*.sh | bash',
+    "cat g''.sh | bash",
+    'bash "g".sh',
+    "bash g$'.sh'",
+    'f=g.sh; bash $f',
+    'bash ./sub/../g.sh',
+    'bash ./sub/../g\\.sh',
+    '. g?.sh',
+    'source "$f"',
+    './g*.sh',
+    '$f',
+    "sh -c \"$(cat g''.sh)\"",
+    "python3 -c \"exec(open('g'+'.sh').read())\"",
+    'cat g.sh | bash -s',
+    'bash ~/g.sh',
+  ]) {
+    const b = blockOf(`cat > g.sh <<'EOF'\necho hi\nEOF\n${after}`)
+    expect(b?.kind === 'block' && !!(b.runBy || b.isPiped), after).toBe(true)
+  }
+  // Not marked: what is plainly another file, or runs nothing. A request that writes a data file and
+  // then runs a script of its own is common, and stays unmarked.
+  for (const after of ['node build.js', 'python3 build.py --out dist', 'cd out && npm test', 'git status', 'echo done', '[ -f x ] && ls', '(cd sub && ls)', 'node --require ./setup.js build.js', 'bash < other.sh']) {
+    const b = blockOf(`cat > g.json <<'EOF'\n{}\nEOF\n${after}`)
+    expect(b?.kind === 'block' && !!(b.runBy || b.isPiped), after).toBe(false)
+  }
+  // The same in words, and a card with such a block never folds.
+  const spelled = viewOf('Bash', "cat > g.json <<'EOF'\n{}\nEOF\nbash g*.json")
+  expect(spelled?.kind === 'shell' && spelled.steps[0]).toContain('may run later (a later command may run it)')
+  expect(canFold(segmentsOf("cat > g.json <<'EOF'\n{}\nEOF\nbash g*.json")), 'glob').toBe(false)
   // #12: an interpreter fed the block, its output redirected: one clear step.
   const fed = viewOf('Bash', "bash > f <<'EOF'\necho hi\nEOF")
   expect(fed?.kind === 'shell' ? fed.steps : []).toEqual(['runs bash on the block below (1 line), output to f'])
@@ -148,7 +188,7 @@ test('the reading aid says each step in plain words, a here-doc as the file it w
     steps: [
       'sets S',
       'creates the folders $S/overlay',
-      'writes $S/overlay/app.json (4 lines)',
+      'writes $S/overlay/app.json (4 lines, may run later (a later command may run it))',
       'writes $S/shots.js (4 lines, run later by bash)',
       'goes to $S',
       'deletes shots',

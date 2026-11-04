@@ -132,12 +132,15 @@ const targetOf = (part: string, after: string): { to: string; path?: string; lan
 // Commands that read or move a file without running it.
 const INERT = /^(?:cat|ls|chmod|chown|rm|cp|mv|wc|head|tail|stat|file|diff|grep|echo|printf|test|\[|touch)$/
 
-/** A step's program: its first word past assignments and leading redirections (`< f bash` is bash). */
-const programOf = (step: string): string =>
+/** A step's words past assignments and leading redirections (`< f bash` is bash): its program first. */
+const wordsOf = (step: string): string[] =>
   step
     .trim()
     .replace(/^(?:(?:[A-Za-z_]\w*=\S*|\d*[<>]{1,2}[ \t]*[^\s;&|<>]+)[ \t]*)*/, '')
-    .split(/\s+/)[0] ?? ''
+    .split(/\s+/)
+
+/** A step's program: its first word past assignments and leading redirections (`< f bash` is bash). */
+const programOf = (step: string): string => wordsOf(step)[0] ?? ''
 
 /**
  * The first command in `text` that uses the file `base` and may run it: its program, `the shell` when
@@ -157,16 +160,40 @@ const runnerOf = (text: string, base: string): string | undefined => {
     // A reader of the file piping on: the first program down the pipe that is not a reader runs it.
     for (let j = i; parts[j + 1] === '|'; j += 2) {
       const next = programOf(parts[j + 2] ?? '')
+      // `tee` hands its input on, so the program after it is the one that runs the file.
+      if (next === 'tee') continue
       if (next && !INERT.test(next)) return next.replace(/\.exe$/i, '').toLowerCase()
     }
   }
   return undefined
 }
 
+// A word that is one plain file name for the shell: no glob, quote, variable, substitution or `~`, and no `..` step.
+const isPlainName = (w: string): boolean => /^[\w@%+=:,./-]+$/.test(w) && !/(^|\/)\.\.(\/|$)/.test(w)
+
+/**
+ * Whether a step of `text` may run a file it does not name as its plain file name: an interpreter (or `.`,
+ * `source`) given a word that is not one (`g*.sh`, `"g".sh`, `$f`, `-c "…"`) or no file at all (it reads
+ * its input), or a program that is not a plain word (`./g*.sh`, `$f`). Another plain file name is another file.
+ */
+const runsUnnamed = (text: string): boolean =>
+  text.split(/\n|&&|\|\||[;&|]/).some(step => {
+    const [first = '', ...rest] = wordsOf(step)
+    const program = first.replace(/^[({!]+|[)}]+$/g, '')
+    if (!program || INERT.test(program) || program.startsWith('#')) return false
+    if (!new RegExp(`^(?:${INTERP})(?:\\.exe)?$|^(?:\\.|source)$`, 'i').test(program)) return !isPlainName(program)
+    // A redirection's operator is not an operand; the file after `<` or `>` is.
+    const operands = rest.map(w => w.replace(/^\d*[<>]{1,2}&?\d*/, '')).filter(w => w && !w.startsWith('-'))
+    return !operands.length || operands.some(w => !isPlainName(w))
+  })
+
 /**
  * How `text` may use the file `base` later. A runner it can name: `runBy`. Otherwise, fail closed
- * rather than parse smarter: a `|` anywhere after the first mention of the file may carry it to a
- * program (`2>&1 |`, `|&`, a quoted `;`, a line break before the next step), so the block is `isPiped`.
+ * rather than parse smarter, and mark the block `isPiped` ("may run later") when
+ * - a `|` follows the file's first mention: it may carry the file to a program (`2>&1 |`, `|&`, a quoted
+ *   `;`, a line break before the next step); or
+ * - a step runs something that is not plainly another file (`runsUnnamed`): the file may be spelled in a
+ *   way the mention test misses (a glob, a quote, a variable, `./sub/../`).
  * A false "may run" costs a word; a missed one costs the label.
  */
 const laterUse = (text: string, base: string): { runBy?: string; isPiped?: boolean } => {
@@ -174,7 +201,7 @@ const laterUse = (text: string, base: string): { runBy?: string; isPiped?: boole
   if (runBy) return { runBy }
   const esc = base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
   const at = new RegExp(`(^|[\\s/'"=<>])${esc}(?=$|[\\s'";&|)<>])`).exec(text)?.index
-  return at !== undefined && text.slice(at).includes('|') ? { isPiped: true } : {}
+  return (at !== undefined && text.slice(at).includes('|')) || runsUnnamed(text) ? { isPiped: true } : {}
 }
 
 /**
@@ -309,7 +336,7 @@ export const describeStep = (step: string, blocks: Segment[]): string => {
   }
   const size = (k: string | undefined) => {
     const b = block(k)
-    return b ? ` (${b.lines} ${b.lines === 1 ? 'line' : 'lines'}${b.isRunning ? ', runs the $( ) in it now' : ''}${b.runBy ? `, run later by ${b.runBy}` : b.isPiped ? ', may run later (piped to a later command)' : ''})` : ''
+    return b ? ` (${b.lines} ${b.lines === 1 ? 'line' : 'lines'}${b.isRunning ? ', runs the $( ) in it now' : ''}${b.runBy ? `, run later by ${b.runBy}` : b.isPiped ? ', may run later (a later command may run it)' : ''})` : ''
   }
   const env = /^((?:[A-Za-z_]\w*=\S*\s+)+)(\S.*)$/.exec(step)
   if (env?.[1] && env[2]) return `${describeStep(env[2], blocks)} (with ${env[1].trim()})`

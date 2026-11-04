@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.7 — 2026-11-04
+
+- **Run-later labels name the real runner and catch spelled-differently files** (#15). A file a block writes was marked "run later by X" only when a later step named it literally. Fail closed, as before: when unsure, the block is marked "may run later".
+  - **`tee` is a pass-through.** `cat g.sh | tee x | bash` now says `bash`, not `tee`. A pipe that ends in `tee` names nothing and is only marked.
+  - **A glob, a quote, a variable, `~` or a `..` step in a later step's file name marks the block.** An interpreter (`node`, `python`, `bash`, `sh`, `pwsh`, `.`, `source`) given a word that is not a plain file name (`bash g*.sh`, `bash "g".sh`, `f=g.sh; bash $f`, `bash ./sub/../g.sh`, `-c "…"`) or no file at all (`cat g''.sh | bash`), and a program that is not a plain word (`./g*.sh`, `$f`), now mean "may run later". A plain other file (`node build.js`, `python3 build.py --out dist`) does not.
+  - **The label reads "may run later (a later command may run it)"**, no longer "piped", as it is not always a pipe.
+  - **Noise, measured on the demo ask in the tests:** one block in one ask is marked that does not run (the data file `app.json`, written before an inline `python -c "…"`). The full request is always shown and a card with an interpreter never folds, so the cost is a word.
+
 ## 0.6.6 — 2026-11-04
 
 - **Digest follow-ups** (#19). Failure paths and one timing change; nothing else moves.
