@@ -117,8 +117,8 @@ export type Local = {
   reloadTried?: string
 }
 
-/** Quiet notes waiting to be delivered together: `seq` rises with each, `at` is when it was made. */
-export type Digest = { seq: number; rows: { seq: number; at: number; text: string }[] }
+/** Quiet notes waiting to be delivered together: `seq` rises with each, `at` is when it was made, `isUrgent` marks one that must not wait for the interval. */
+export type Digest = { seq: number; rows: { seq: number; at: number; text: string; isUrgent?: boolean }[] }
 
 export type PaneUi = {
   filter: 'all' | 'waiting' | 'active'

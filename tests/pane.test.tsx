@@ -728,7 +728,7 @@ describe('a session reporting', () => {
   })
 
   describe('quiet notes (an approval, a denial, a read receipt) are delivered together', () => {
-    type Row = { seq: number; at: number; text: string }
+    type Row = { seq: number; at: number; text: string; isUrgent?: boolean }
     // The queue is the session's state, not a file in the bus where another process could write it: the
     // tests hold that value themselves, so they can read it and seed what an earlier run left.
     const track = (on: TestOn) => {
@@ -987,6 +987,44 @@ describe('a session reporting', () => {
       await $.session.start({ cwd: '/repos/project', surface: 'desktop', isInteractive: true })
       await settle()
       expect(notes).toEqual([expect.stringMatching(/2 notes from the pane[\s\S]*1\. earlier approval\n\n2\. [\s\S]*go ahead/)])
+      expect(queue.rows()).toEqual([])
+    })
+
+    test("an answer prompt that can be neither delivered nor queued is submitted, not lost (#19)", async ($, on) => {
+      const { mine, settle, written, answersFile, prompts } = setup(on)
+      let isRefused = false
+      watch(on, () => isRefused)
+      const queue = track(on)
+      on('ui.open', () => ({ value: { isPlaced: true } }))
+      await $.session.start({ cwd: '/repos/project', surface: 'desktop', isInteractive: true })
+      await $.turn.start({ turnId: 't1' } as never)
+      await $.turn.complete({ turnId: 't1', answer: 'Migrated the schema; all tests pass.', isAborted: false } as never)
+      await settle()
+      const [r] = mine().requests
+      // The appends are refused and the queue cannot be written: the notes cannot be delivered, the prompt cannot wait behind them.
+      queue.seed({ seq: 1, rows: [{ seq: 1, at: Date.now() - 1000, text: 'earlier approval' }] })
+      isRefused = true
+      queue.fault.isWriteFailing = true
+      written[answersFile()] = JSON.stringify([{ requestId: r?.id, at: Date.now(), kind: 'answer', text: 'go ahead' }])
+      await $.session.start({ cwd: '/repos/project', surface: 'desktop', isInteractive: true })
+      await settle()
+      expect(prompts.some(t => t.includes('go ahead'))).toBe(true)
+    })
+
+    test('an urgent row is kept urgent across a reload, and a quiet one is not (#19)', async ($, on) => {
+      const { settle } = setup(on)
+      const notes = watch(on)
+      const queue = track(on)
+      const young = Date.now() - 2000
+      queue.seed({ seq: 1, rows: [{ seq: 1, at: young, text: 'quiet note' }] })
+      await $.session.start({ cwd: '/repos/project', surface: 'desktop', isInteractive: true })
+      await settle()
+      expect(notes).toEqual([])
+      // The same state read by a module that starts afresh: the urgent row goes at the next tick, a young one though it is.
+      queue.seed({ seq: 2, rows: [{ seq: 1, at: young, text: 'quiet note' }, { seq: 2, at: young, text: 'urgent note', isUrgent: true }] })
+      await $.session.start({ cwd: '/repos/project', surface: 'desktop', isInteractive: true })
+      await settle()
+      expect(notes).toEqual([expect.stringMatching(/2 notes from the pane[\s\S]*1\. quiet note\n\n2\. urgent note$/)])
       expect(queue.rows()).toEqual([])
     })
 
