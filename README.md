@@ -99,7 +99,7 @@ The key under `pluginConfigs` is the mod's source id, which depends on how it is
 | `coordinatorFolder` | empty | Folder name of the coordinator session: the pane opens there by itself. |
 | `forwardQuestions` | `on` | `off` keeps questions in their session's own dialog. |
 | `explainRequests` | `off` | `on` asks Haiku for a short plain-language explanation of each large permission request (a small cost on your plan; written from the request itself, so it can be wrong or steered). |
-| `digestMinutes` | `15` | An approval, a denial or a read receipt is noted in the session together with the others: in the turn that starts anyway, or after this many minutes idle. A note added to an idle session wakes it, and a wake re-reads the whole conversation. A free-text answer or a choice is never held. `0`: each note at once. |
+| `digestMinutes` | `15` | An approval, a denial or a read receipt is noted in the session together with the others: in the turn that starts anyway, or after this many minutes idle. A note added to an idle session wakes it, and a wake re-reads the whole conversation. A free-text answer or a choice is never held. The notes live in the session state: they survive a reload and are delivered when the session ends, but a crash may lose them (they are only a record). `0`: each note at once. |
 | `busDir` | `~/.claude/coordinator-monitor` | The shared folder sessions publish to. |
 
 ### Protected commands

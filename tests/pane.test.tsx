@@ -207,7 +207,7 @@ test('the pane draws sessions, workers and every kind of request, on every surfa
   expect(mine.title).toBe('Coordinatore')
   expect(mine.folder).toBe('coordinator')
   expect(mine.effort).toBe('high')
-  expect(mine.version).toBe('0.6.5')
+  expect(mine.version).toBe('0.6.6')
 
   for (const surface of ['terminal', 'desktop', 'vscode', 'mobile'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface })
@@ -728,7 +728,7 @@ describe('a session reporting', () => {
   })
 
   describe('quiet notes (an approval, a denial, a read receipt) are delivered together', () => {
-    type Row = { seq: number; at: number; text: string }
+    type Row = { seq: number; at: number; text: string; isUrgent?: boolean }
     // The queue is the session's state, not a file in the bus where another process could write it: the
     // tests hold that value themselves, so they can read it and seed what an earlier run left.
     const track = (on: TestOn) => {
@@ -736,16 +736,19 @@ describe('a session reporting', () => {
       type Stored = { shape: string; value: { seq: number; rows: Row[] } }
       let cur: Stored | undefined
       let version = 0
+      const fault = { isWriteFailing: false }
       const isDigest = (e: unknown) => (e as { key?: string }).key === 'digest'
       on('state.get', (_, e, next) => (isDigest(e) ? ({ value: { value: cur, version } } as never) : next(e)))
       on('state.set', (_, e, next) => {
         if (!isDigest(e)) return next(e)
+        if (fault.isWriteFailing) throw new Error('state write failed')
         const w = e as unknown as { value: Stored; ifVersion?: number }
         if (w.ifVersion !== undefined && w.ifVersion !== version) return { value: { isSet: false, version } } as never
         cur = w.value
         return { value: { isSet: true, version: ++version } } as never
       })
       return {
+        fault,
         rows: (): Row[] => cur?.value.rows ?? [],
         seed: (v: Stored['value']) => {
           cur = { shape: 'digest-1', value: v }
@@ -753,9 +756,11 @@ describe('a session reporting', () => {
         },
       }
     }
-    const watch = (on: TestOn) => {
+    // The rows added to the conversation; `isRefused` makes the engine turn the append down.
+    const watch = (on: TestOn, isRefused: () => boolean = () => false) => {
       const notes: string[] = []
       on('session.append', (_, e, next) => {
+        if (isRefused()) return { deny: 'refused' } as never
         notes.push(((e as unknown as { message: { content: { text: string }[] } }).message.content[0]?.text) ?? '')
         return next(e)
       })
@@ -868,6 +873,175 @@ describe('a session reporting', () => {
       await settle()
       expect(notes.length).toBe(1)
       expect(queue.rows().map(x => x.text)).toEqual(['fresh note'])
+    })
+
+    test('a flush whose removal from the state fails does not deliver the same notes again (#19)', async ($, on) => {
+      const { settle } = setup(on)
+      const notes = watch(on)
+      const queue = track(on)
+      queue.seed({ seq: 1, rows: [{ seq: 1, at: Date.now() - 20 * 60_000, text: 'old note' }] })
+      queue.fault.isWriteFailing = true
+      await $.session.start({ cwd: '/repos/project', surface: 'desktop', isInteractive: true })
+      await settle()
+      // Appended, and still in the queue: the write that removes it failed.
+      expect(notes.length).toBe(1)
+      expect(queue.rows().length).toBe(1)
+      queue.fault.isWriteFailing = false
+      await $.turn.start({ turnId: 't1' } as never)
+      await settle()
+      // The next flush only cleans up.
+      expect(notes.length).toBe(1)
+      expect(queue.rows()).toEqual([])
+    })
+
+    test('free text never comes before notes that could not be delivered (#19)', { options: { coordinatorFolder: 'coordinator' } }, async ($, on) => {
+      const { settle, written } = setup(on, [], '/repos/coordinator')
+      on('ui.open', () => ({ value: { isPlaced: true } }))
+      let isDenied = true
+      const notes = watch(on, () => isDenied)
+      const queue = track(on)
+      on('ui.toast', () => ({ value: undefined }))
+      await $.session.start({ cwd: '/repos/coordinator', surface: 'desktop', isInteractive: true })
+      await settle()
+      const bus = Object.keys(written).find(k => k.endsWith('/sessions/me.json'))?.replace(/\/sessions\/me\.json$/, '') ?? ''
+      written[`${bus}/sessions/p.json`] = JSON.stringify(
+        status({
+          sessionId: 'p',
+          title: 'project',
+          heartbeat: Date.now(),
+          requests: [
+            { id: 'a1', kind: 'permission', createdAt: Date.now(), tool: 'Bash', command: 'npm test', rule: 'x' },
+            { id: 'q1', kind: 'questions', createdAt: Date.now() + 1, text: '1. Ship it?\n   - **Yes:** ship.\n   - **No:** wait.' },
+          ],
+        }),
+      )
+      await $.command.run({ command: 'agents-monitor', args: '' } as never)
+      const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+      await ui.press({ key: 'once-a1' })
+      await ui.press({ key: 'opt-q1-0-0' })
+      await settle()
+      notes.length = 0
+      // The flush was refused: the answer waits behind the approval, in the queue, in order.
+      expect(queue.rows().map(x => x.seq)).toEqual([1, 2])
+      expect(queue.rows()[1]?.text).toMatch(/request q1/)
+      isDenied = false
+      await $.turn.start({ turnId: 't1' } as never)
+      await settle()
+      expect(notes.length).toBe(1)
+      expect(notes[0]).toMatch(/^\[coordinator-monitor\] 2 notes from the pane[\s\S]*1\. .*request a1[\s\S]*approved once[\s\S]*2\. .*request q1/)
+      expect(queue.rows()).toEqual([])
+      await ui.unmount()
+    })
+
+    test('free text that could not be added is tried again on the next tick, not after the interval (#19)', { options: { coordinatorFolder: 'coordinator' } }, async ($, on) => {
+      const { settle, written } = setup(on, [], '/repos/coordinator')
+      on('ui.open', () => ({ value: { isPlaced: true } }))
+      let isDenied = true
+      const notes = watch(on, () => isDenied)
+      const queue = track(on)
+      on('ui.toast', () => ({ value: undefined }))
+      await $.session.start({ cwd: '/repos/coordinator', surface: 'desktop', isInteractive: true })
+      await settle()
+      const bus = Object.keys(written).find(k => k.endsWith('/sessions/me.json'))?.replace(/\/sessions\/me\.json$/, '') ?? ''
+      written[`${bus}/sessions/p.json`] = JSON.stringify(
+        status({ sessionId: 'p', title: 'project', heartbeat: Date.now(), requests: [{ id: 'q1', kind: 'questions', createdAt: Date.now(), text: '1. Ship it?\n   - **Yes:** ship.\n   - **No:** wait.' }] }),
+      )
+      await $.command.run({ command: 'agents-monitor', args: '' } as never)
+      const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+      // Nothing waits before it, and the append itself is refused: the record is queued, not lost.
+      await ui.press({ key: 'opt-q1-0-0' })
+      await settle()
+      expect(notes).toEqual([])
+      expect(queue.rows().map(x => x.text)).toEqual([expect.stringMatching(/request q1/)])
+      // A tick while it is still refused changes nothing; once allowed, the next tick delivers it, a young note though it is.
+      await $.session.start({ cwd: '/repos/coordinator', surface: 'desktop', isInteractive: true })
+      await settle()
+      expect(notes).toEqual([])
+      isDenied = false
+      await $.session.start({ cwd: '/repos/coordinator', surface: 'desktop', isInteractive: true })
+      await settle()
+      expect(notes).toEqual([expect.stringMatching(/request q1/)])
+      expect(queue.rows()).toEqual([])
+      await ui.unmount()
+    })
+
+    test("a session's answer prompt waits behind notes that could not be delivered (#19)", async ($, on) => {
+      const { mine, settle, written, answersFile, prompts } = setup(on)
+      let isDenied = true
+      const notes = watch(on, () => isDenied)
+      const queue = track(on)
+      on('ui.open', () => ({ value: { isPlaced: true } }))
+      queue.seed({ seq: 1, rows: [{ seq: 1, at: Date.now() - 1000, text: 'earlier approval' }] })
+      await $.session.start({ cwd: '/repos/project', surface: 'desktop', isInteractive: true })
+      await $.turn.start({ turnId: 't1' } as never)
+      await $.turn.complete({ turnId: 't1', answer: 'Migrated the schema; all tests pass.', isAborted: false } as never)
+      await settle()
+      const [r] = mine().requests
+      written[answersFile()] = JSON.stringify([{ requestId: r?.id, at: Date.now(), kind: 'answer', text: 'go ahead' }])
+      await $.session.start({ cwd: '/repos/project', surface: 'desktop', isInteractive: true })
+      await settle()
+      // Not submitted ahead of the note: both wait, in order.
+      expect(prompts).toEqual([])
+      expect(queue.rows().map(x => x.text)).toEqual(['earlier approval', expect.stringMatching(/go ahead/)])
+      isDenied = false
+      await $.session.start({ cwd: '/repos/project', surface: 'desktop', isInteractive: true })
+      await settle()
+      expect(notes).toEqual([expect.stringMatching(/2 notes from the pane[\s\S]*1\. earlier approval\n\n2\. [\s\S]*go ahead/)])
+      expect(queue.rows()).toEqual([])
+    })
+
+    test("an answer prompt that can be neither delivered nor queued is submitted, not lost (#19)", async ($, on) => {
+      const { mine, settle, written, answersFile, prompts } = setup(on)
+      let isRefused = false
+      watch(on, () => isRefused)
+      const queue = track(on)
+      on('ui.open', () => ({ value: { isPlaced: true } }))
+      await $.session.start({ cwd: '/repos/project', surface: 'desktop', isInteractive: true })
+      await $.turn.start({ turnId: 't1' } as never)
+      await $.turn.complete({ turnId: 't1', answer: 'Migrated the schema; all tests pass.', isAborted: false } as never)
+      await settle()
+      const [r] = mine().requests
+      // The appends are refused and the queue cannot be written: the notes cannot be delivered, the prompt cannot wait behind them.
+      queue.seed({ seq: 1, rows: [{ seq: 1, at: Date.now() - 1000, text: 'earlier approval' }] })
+      isRefused = true
+      queue.fault.isWriteFailing = true
+      written[answersFile()] = JSON.stringify([{ requestId: r?.id, at: Date.now(), kind: 'answer', text: 'go ahead' }])
+      await $.session.start({ cwd: '/repos/project', surface: 'desktop', isInteractive: true })
+      await settle()
+      expect(prompts.some(t => t.includes('go ahead'))).toBe(true)
+    })
+
+    test('an urgent row is kept urgent across a reload, and a quiet one is not (#19)', async ($, on) => {
+      const { settle } = setup(on)
+      const notes = watch(on)
+      const queue = track(on)
+      const young = Date.now() - 2000
+      queue.seed({ seq: 1, rows: [{ seq: 1, at: young, text: 'quiet note' }] })
+      await $.session.start({ cwd: '/repos/project', surface: 'desktop', isInteractive: true })
+      await settle()
+      expect(notes).toEqual([])
+      // The same state read by a module that starts afresh: the urgent row goes at the next tick, a young one though it is.
+      queue.seed({ seq: 2, rows: [{ seq: 1, at: young, text: 'quiet note' }, { seq: 2, at: young, text: 'urgent note', isUrgent: true }] })
+      await $.session.start({ cwd: '/repos/project', surface: 'desktop', isInteractive: true })
+      await settle()
+      expect(notes).toEqual([expect.stringMatching(/2 notes from the pane[\s\S]*1\. quiet note\n\n2\. urgent note$/)])
+      expect(queue.rows()).toEqual([])
+    })
+
+    test('while a turn runs a young note waits for the others of its burst, an older one is added (#19)', async ($, on) => {
+      const { settle } = setup(on)
+      const notes = watch(on)
+      const queue = track(on)
+      await $.session.start({ cwd: '/repos/project', surface: 'desktop', isInteractive: true })
+      await $.turn.start({ turnId: 't1' } as never)
+      queue.seed({ seq: 1, rows: [{ seq: 1, at: Date.now() - 3000, text: 'young note' }] })
+      await $.session.start({ cwd: '/repos/project', surface: 'desktop', isInteractive: true })
+      await settle()
+      expect(notes).toEqual([])
+      queue.seed({ seq: 2, rows: [{ seq: 1, at: Date.now() - 15_000, text: 'older note' }, { seq: 2, at: Date.now() - 3000, text: 'young note' }] })
+      await $.session.start({ cwd: '/repos/project', surface: 'desktop', isInteractive: true })
+      await settle()
+      expect(notes).toEqual([expect.stringMatching(/2 notes from the pane[\s\S]*1\. older note\n\n2\. young note$/)])
     })
   })
 
