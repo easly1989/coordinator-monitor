@@ -84,6 +84,11 @@ const en = {
   blockLabel: (kind: 'file' | 'input' | 'inline' | 'string', to: string, lines: number, runBy?: string, isRunning?: boolean, isPiped?: boolean) =>
     `${kind === 'file' ? `→ file ${to}` : kind === 'inline' ? `inline ${to} script` : kind === 'string' ? `here-string ${to}`.trim() : `→ input of ${to}`} · ${lines} ${lines === 1 ? 'line' : 'lines'}${isRunning ? ' · runs the $( ) in it now' : ''}${runBy ? ` · run later by ${runBy}` : isPiped ? ' · may run later (piped to a later command)' : ''}`,
   followedBy: (text: string) => `followed by: ${text}`,
+  showRequest: 'Show full request',
+  hideRequest: 'Hide full request',
+  blocks: (n: number) => `${n} ${n === 1 ? 'block' : 'blocks'}`,
+  touches: 'Touches (always shown, read from the command)',
+  touch: { cd: 'goes to', rm: 'deletes', write: 'writes', append: 'appends to', url: 'url', host: 'host', remote: 'git remote' } as Record<string, string>,
   commandSize: (lines: number, chars: number) => `${lines} lines · ${chars} characters`,
   writes: 'Writes',
   edits: 'Edits',
@@ -189,6 +194,11 @@ const it: typeof en = {
   blockLabel: (kind, to, lines, runBy, isRunning, isPiped) =>
     `${kind === 'file' ? `→ file ${to}` : kind === 'inline' ? `script ${to} in linea` : kind === 'string' ? `here-string ${to}`.trim() : `→ input di ${to}`} · ${lines} ${lines === 1 ? 'riga' : 'righe'}${isRunning ? ' · esegue subito i $( ) che contiene' : ''}${runBy ? ` · eseguito poi da ${runBy}` : isPiped ? ' · potrebbe essere eseguito poi (passato a un comando in pipe)' : ''}`,
   followedBy: text => `seguito da: ${text}`,
+  showRequest: 'Mostra richiesta completa',
+  hideRequest: 'Nascondi richiesta completa',
+  blocks: n => `${n} ${n === 1 ? 'blocco' : 'blocchi'}`,
+  touches: 'Cosa tocca (sempre visibile, letto dal comando)',
+  touch: { cd: 'va in', rm: 'cancella', write: 'scrive', append: 'aggiunge a', url: 'url', host: 'host', remote: 'remote git' },
   commandSize: (lines, chars) => `${lines} righe · ${chars} caratteri`,
   writes: 'Scrive',
   edits: 'Modifica',

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.6.5 — 2026-11-04
+
+- **A large shell request opens folded behind a reveal** (#14). A request over 6 lines or 400 characters shows a recap and a reveal button; the full text, drawn exactly as before, is one press away. Short requests show in full as always.
+  - **The recap is built by the mod from the command alone**, never from model text and never from the request's own description: the reading aid's steps, in plain words, each step whole.
+  - **A card folds only when no block of it can run, and nothing else in it can.** A block's body is not in the recap, so any block that runs keeps the card open: an interpreter's input (a here-doc into bash, python, node or pwsh), an inline `-c` / `-e` / `-Command` script of any language, a body whose `$( )` run as it is written, a file run later or maybe piped on, a here-string. A file of data (`.json`, `.yml`, `.toml`, `.conf`, `.txt`, `.md`, …) can be read as code by a later command (`GIT_CONFIG_GLOBAL=x.conf git status`, `npm install` beside a package.json, `git apply x.txt`), so a short allowlist decides the rest: every step must run `cat`, `ls`, `mkdir`, `cd`, `echo`, `printf`, `cp`, `mv`, `touch`, `chmod`, or `tee` with exactly one file, with no assignment before it (`PATH=…`, `LD_PRELOAD=…`) and no `$( )`, backtick or `<( )` in it, and the steps must split for certain. Anything else, and every PowerShell card, stays open. Fail closed.
+  - **Always shown, folded or not:** a "Touches" list read from the shell text: where it goes (`cd`), what it deletes (`rm`, and the source of a `mv`), what it writes (`>`, `tee`, `cp`/`mv` destinations, `touch`, `dd of=`, `sed -i`, `curl -o`, the file a here-doc writes) with appends (`>>`, `tee -a`) told apart, URLs, ssh/scp hosts and git remotes. Quotes are tracked as the shell reads them, so an apostrophe inside `"…"` no longer hides the commands after it. The risk chips (now also `find -delete`, `zfs`/`zpool`/`qm`/`pct`/`lxc`/`virsh`/`docker` `destroy`, `mkfs`, `-EncodedCommand`), the protected-rule line and the size caption (`17 lines · 1806 characters · 1 block`) stay too.
+  - **An explanation on a card is drawn through `visible()`**, like every other text from the request.
+  - **The approve and deny buttons work folded.** Where the reading aid gives up (a here-string it cannot place, a comment, a continuation, over 40 steps) the card opens whole, with no recap, as before.
+- **Two follow-ups to the quiet-notes digest** (#17 review). The order note a session gets is now drawn through `visible()` and fenced, as the text of the bus answers file is data and now sits inside numbered digest rows. The wake timer is reset when a flush finds nothing, so a stale value no longer makes the tick read the state every second.
+
 ## 0.6.4 — 2026-11-04
 
 - **Quiet pane answers no longer wake an idle session** (#16). A note added to an idle session wakes it, and a wake re-reads the whole conversation. So the notes that are only a record now wait and go together:

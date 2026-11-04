@@ -130,7 +130,7 @@ const targetOf = (part: string, after: string): { to: string; path?: string; lan
 }
 
 // Commands that read or move a file without running it.
-const INERT = /^(?:cat|ls|chmod|chown|rm|cp|mv|wc|head|tail|stat|file|diff|grep|echo|printf|test|\[|touch|git)$/
+const INERT = /^(?:cat|ls|chmod|chown|rm|cp|mv|wc|head|tail|stat|file|diff|grep|echo|printf|test|\[|touch)$/
 
 /** A step's program: its first word past assignments and leading redirections (`< f bash` is bash). */
 const programOf = (step: string): string =>
@@ -344,8 +344,8 @@ export const describeStep = (step: string, blocks: Segment[]): string => {
 // shortcut: word lists for the common tools on this machine; a step they miss shows with no chip.
 const RISKS: [string, RegExp][] = [
   ['net', /\b(curl|wget|gh|scp|ssh|rsync|Invoke-WebRequest|iwr|Invoke-RestMethod|irm)\b|\bgit\s+(push|pull|fetch|clone)\b|\b(npm|pnpm|yarn)\s+(i|install|add|publish)\b|\bpip3?\s+install\b/i],
-  ['exec', /\b(python3?|node|bash|sh|pwsh|powershell)(\.exe)?\s+-(c|e|Command)\b|\b(eval|iex|Invoke-Expression)\b|(^|[\s;&|])\.{1,2}[\\/]\S+|\|\s*(sh|bash)\b/i],
-  ['del', /\b(rm|rmdir|del|Remove-Item)\b|\bgit\s+(reset\s+--hard|clean)\b/i],
+  ['exec', /\b(python3?|node|bash|sh|pwsh|powershell)(\.exe)?\s+-(c|e|Command|EncodedCommand|enc)\b|\b(eval|iex|Invoke-Expression)\b|(^|[\s;&|])\.{1,2}[\\/]\S+|\|\s*(sh|bash)\b/i],
+  ['del', /\b(rm|rmdir|del|Remove-Item)\b|\bgit\s+(reset\s+--hard|clean)\b|\s-delete\b|\b(zfs|zpool|qm|pct|lxc|virsh|docker)\s+(destroy|delete|rm|undefine)\b|\bmkfs(\.\w+)?\b/i],
   ['write', /(?<![\d&])>>?(?!&)\s*(?!\/dev\/null|\$null\b|nul\b)\S|\b(mv|cp|mkdir|tee|touch|Set-Content|Out-File|Add-Content|unzip|tar)\b/i],
 ]
 
@@ -406,4 +406,194 @@ export const viewOf = (tool: string, what: string): RequestView | null => {
     return input.replace_all === true ? { kind: 'edit', path, diff, isEveryMatch: true } : { kind: 'edit', path, diff }
   }
   return null
+}
+
+/** Something a shell request touches, as the collapsed card lists it: always shown, never summarised. */
+export type Touch = { kind: 'cd' | 'rm' | 'write' | 'append' | 'url' | 'host' | 'remote'; target: string }
+
+/**
+ * The quote that is open at `at` in `text`, as the shell reads it: a `'` inside `"…"` (or the other way
+ * round) opens nothing, and a `$( )` inside `"…"` is a command again, with quotes of its own.
+ */
+const openQuoteAt = (text: string, at: number): string => {
+  // What is open, innermost last: `'`, `"`, or `(` for a `$( )`.
+  const stack: string[] = []
+  for (let i = 0; i < at; i++) {
+    const c = text[i] ?? ''
+    const top = stack.at(-1)
+    if (top === "'") {
+      if (c === "'") stack.pop()
+    } else if (c === '\\') i++
+    else if (top === '"') {
+      if (c === '"') stack.pop()
+      else if (c === '$' && text[i + 1] === '(') {
+        stack.push('(')
+        i++
+      }
+    } else if (c === '"' || c === "'") stack.push(c)
+    else if (c === '$' && text[i + 1] === '(') {
+      stack.push('(')
+      i++
+    } else if (c === ')' && top === '(') stack.pop()
+  }
+  const top = stack.at(-1)
+  return top === '"' || top === "'" ? top : ''
+}
+
+/**
+ * The words after `at` in `text`, quotes kept, up to the end of the command they belong to: an unquoted
+ * `;`, `&`, `|`, newline, `)` or backtick, or the close of a quote the command sits in (`ssh h "rm x"`).
+ */
+const wordsAt = (text: string, at: number): string[] => {
+  const enclosing = openQuoteAt(text, at)
+  const words: string[] = []
+  let cur = ''
+  let quote = ''
+  for (let i = at; i < text.length; i++) {
+    const c = text[i] ?? ''
+    if (quote) {
+      cur += c
+      if (c === quote) quote = ''
+    } else if (c === enclosing || /[;&|\n)`]/.test(c)) break
+    else if (c === '"' || c === "'") {
+      quote = c
+      cur += c
+    } else if (/\s/.test(c)) {
+      if (cur) words.push(cur)
+      cur = ''
+    } else cur += c
+  }
+  if (cur) words.push(cur)
+  return words
+}
+
+const SSH_ARG = /^-[pilFJbcDEeILmOoQRSWw]$/
+
+/** Each place `text` (shell text, or a shell block) touches. Generous on purpose: an extra line costs less than a missed one. */
+const touchesIn = (text: string): Touch[] => {
+  const out: Touch[] = []
+  const each = (re: RegExp, fn: (m: RegExpExecArray, words: string[]) => void) => {
+    for (const m of text.matchAll(re)) fn(m, wordsAt(text, (m.index ?? 0) + m[0].length))
+  }
+  const cmd = (names: string) => new RegExp(String.raw`(?:^|[\s;&|(${'`'}'"])(?:${names})(?=[ \t])`, 'gim')
+  const args = (words: string[]) => words.filter(w => !w.startsWith('-'))
+  each(cmd('cd|pushd|chdir|Set-Location|sl'), (_, w) => {
+    const to = args(w)[0]
+    if (to) out.push({ kind: 'cd', target: to })
+  })
+  each(cmd('rm|rmdir|unlink|shred|Remove-Item|ri|del|erase'), (_, w) => {
+    for (const to of args(w)) out.push({ kind: 'rm', target: to })
+  })
+  // Not an arrow (`=>`, `->`) in a short inline script, a duplicated descriptor or a process substitution.
+  each(/(?<![=>-])(\d*|&)(>>|>\|?)(?![&(>])[ \t]*/g, (m, w) => {
+    const to = w[0]
+    if (to && !/^(\/dev\/null|\$null|nul)$/i.test(to)) out.push({ kind: m[2] === '>>' ? 'append' : 'write', target: to })
+  })
+  each(cmd('tee'), (_, w) => {
+    for (const to of args(w)) out.push({ kind: w.some(x => x === '-a' || x === '--append') ? 'append' : 'write', target: to })
+  })
+  each(cmd('Out-File|Set-Content|Add-Content|sc|ac'), (m, w) => {
+    const at = w.findIndex(x => /^-(Path|FilePath|LiteralPath)$/i.test(x))
+    const to = at >= 0 ? w[at + 1] : args(w)[0]
+    const isAppend = /Add-Content|ac$/i.test(m[0]) || w.some(x => /^-Append$/i.test(x))
+    if (to) out.push({ kind: isAppend ? 'append' : 'write', target: to })
+  })
+  // Copies and moves write their last argument; a move also takes the others away.
+  each(cmd('cp|mv|install|ln'), (m, w) => {
+    const files = args(w)
+    const to = files.at(-1)
+    if (to && files.length > 1) {
+      out.push({ kind: 'write', target: to })
+      if (/mv$/i.test(m[0])) for (const from of files.slice(0, -1)) out.push({ kind: 'rm', target: from })
+    }
+  })
+  each(cmd('touch|mkdir|truncate|chmod|chown'), (m, w) => {
+    const files = /chmod|chown/i.test(m[0]) ? args(w).slice(1) : args(w)
+    for (const to of files) out.push({ kind: 'write', target: to })
+  })
+  each(cmd('dd'), (_, w) => {
+    for (const x of w) if (x.startsWith('of=')) out.push({ kind: 'write', target: x.slice(3) })
+  })
+  each(cmd('sed|perl'), (_, w) => {
+    if (w.some(x => /^-[A-Za-z]*i/.test(x)) && args(w).length > 1) out.push({ kind: 'write', target: args(w).at(-1) ?? '' })
+  })
+  each(cmd('curl|wget'), (_, w) => {
+    const at = w.findIndex(x => /^(-o|--output|-O|--output-document)$/.test(x))
+    if (at >= 0 && w[at + 1] && w[at + 1] !== '-') out.push({ kind: 'write', target: w[at + 1] ?? '' })
+  })
+  each(/[a-z][a-z0-9+.-]*:\/\/[^\s'"`<>|;&()]+/gi, m => out.push({ kind: 'url', target: m[0] }))
+  each(cmd('ssh|mosh'), (_, w) => {
+    const host = w.find((x, i) => !x.startsWith('-') && !SSH_ARG.test(w[i - 1] ?? ''))
+    if (host) out.push({ kind: 'host', target: host.replace(/^[^@]*@/, '') })
+  })
+  each(cmd('scp|sftp|rsync'), (_, w) => {
+    for (const x of w) {
+      const host = /^(?:[^@\s:]+@)?([A-Za-z0-9][\w.-]+):/.exec(x)?.[1]
+      if (host && !x.includes('://')) out.push({ kind: 'host', target: host })
+    }
+  })
+  each(/\bgit[ \t]+(?:push|pull|fetch|clone)(?=[ \t])/g, (_, w) => {
+    const to = args(w)[0]
+    if (to) out.push({ kind: 'remote', target: to })
+  })
+  return out
+}
+
+// Files that hold data: a block written to one of these is not code, whatever the request does with it later.
+const DATA_FILE = /\.(?:json|ya?ml|toml|ini|conf|cfg|txt|md|csv|xml|html?|css|log|properties)$/i
+
+// The programs a folded card may run: they move, make or show files and run nothing they are handed.
+const FOLD_PROGRAMS = new Set(['cat', 'ls', 'mkdir', 'cd', 'echo', 'printf', 'cp', 'mv', 'touch', 'chmod'])
+
+/** Whether one step of a folded card is on the allowlist (see `canFold`). */
+const stepFolds = (step: string): boolean => {
+  // A substitution runs whatever it holds; an assignment before the program (`GIT_CONFIG_GLOBAL=f git`,
+  // `PATH=/tmp ls`, a bare `PATH=/tmp`) changes what runs, or what a later step runs.
+  if (/\$\(|`|[<>]\(/.test(step)) return false
+  const prefix = /^(?:(?:[A-Za-z_]\w*=\S*|\d*[<>]{1,2}[ \t]*[^\s;&|<>]+)[ \t]*)*/.exec(step.trim())?.[0] ?? ''
+  if (/[A-Za-z_]\w*=/.test(prefix)) return false
+  const program = programOf(step)
+  if (FOLD_PROGRAMS.has(program)) return true
+  if (program !== 'tee') return false
+  // `tee` writes every file it is given: one only, the one the block goes to.
+  const rest = step.trim().slice(prefix.length).split(/\s+/).slice(1)
+  return !rest.some(w => /[<>]/.test(w)) && rest.filter(w => !w.startsWith('-') && !/^‹\d+›$/.test(w)).length === 1
+}
+
+/**
+ * Whether a card may open folded. The recap says every shell step, but not the body of a block, and a
+ * file of data can be read as code by a later command (`GIT_CONFIG_GLOBAL=x.conf git status`,
+ * `npm install` beside a package.json, `git apply x.txt`). So both must hold, and a card that fails
+ * either keeps its text on screen (fail closed):
+ * - every block is a plain file of data written to a path, used as code by nothing (no interpreter,
+ *   inline script, running `$( )`, later or piped use, here-string);
+ * - every shell step's program is on a short allowlist of file movers (cat, ls, mkdir, cd, echo,
+ *   printf, cp, mv, touch, chmod, and tee with one file), none run with an assignment before it or a
+ *   substitution in it, and the steps split for certain.
+ */
+export const canFold = (segs: Segment[], shell: Shell = 'bash'): boolean => {
+  const isInert = segs.every(
+    sg => sg.kind === 'shell' || (!!sg.path && DATA_FILE.test(sg.path) && !sg.language && !sg.runBy && !sg.isPiped && !sg.isRunning && !sg.isInline && !sg.isString),
+  )
+  const steps = splitSteps(aidTextOf(segs, shell), shell)
+  return isInert && !!steps && steps.every(st => stepFolds(st.text))
+}
+
+/**
+ * What a shell request touches, read from its shell text by a generous scan (an extra line costs less
+ * than a missed one), and from a block only the file it writes and the URLs in it: a block that folds
+ * is a file of data, and a block that runs keeps the card open (see `canFold`). Drawn through
+ * `visible()` like all the rest.
+ */
+export const touchesOf = (cmd: string, shell: Shell = 'bash'): Touch[] => {
+  const out: Touch[] = []
+  for (const sg of segmentsOf(cmd, shell)) {
+    if (sg.kind === 'shell') out.push(...touchesIn(sg.text))
+    else {
+      if (sg.path) out.push({ kind: 'write', target: sg.path })
+      for (const m of sg.text.matchAll(/[a-z][a-z0-9+.-]*:\/\/[^\s'"`<>|;&()]+/gi)) out.push({ kind: 'url', target: m[0] })
+    }
+  }
+  const seen = new Set<string>()
+  return out.filter(t => !seen.has(`${t.kind} ${t.target}`) && !!seen.add(`${t.kind} ${t.target}`))
 }

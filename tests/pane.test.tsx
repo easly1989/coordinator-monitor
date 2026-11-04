@@ -50,6 +50,23 @@ const HEREDOC_ASK = JSON.stringify(
   2,
 )
 
+// A large ask whose only block is a file of data: nothing in it can run, so its card may open folded.
+const FOLD_ASK = JSON.stringify(
+  {
+    command: [
+      'mkdir -p /tmp/demo',
+      "cat > /tmp/demo/cfg.json <<'EOF'",
+      '{"url": "https://example.org/feed"}',
+      'EOF',
+      'cd /tmp/demo && ls',
+      ...Array.from({ length: 6 }, (_, n) => `echo "line ${n}"`),
+    ].join('\n'),
+    timeout: 60000,
+  },
+  null,
+  2,
+)
+
 // Two sessions publishing: one waits on a permission and a choice, one runs a worker.
 const FILES: Record<string, SessionStatus> = {
   'a.json': status({
@@ -100,6 +117,9 @@ const FILES: Record<string, SessionStatus> = {
       // A large command whose split is not certain (a here-string), with a hidden reversal: no summary, the
       // whole command shown, the reversal as a code.
       { id: 'p6', kind: 'ask', createdAt: now + 8, tool: 'Bash', command: HEREDOC_ASK, isInput: true },
+      { id: 'p13', kind: 'ask', createdAt: now + 15, tool: 'Bash', command: FOLD_ASK, isInput: true },
+      // An explanation is the request's own text: drawn through visible() like every other.
+      { id: 'p14', kind: 'permission', createdAt: now + 16, tool: 'Bash', command: 'npm run lint', rule: 'x', explain: `Runs the linter${String.fromCharCode(0x202e)}gnp` },
       // A bare command that looks like JSON with two `command` keys: it is a command, never decoded,
       // whatever the request claims about it.
       { id: 'p7', kind: 'ask', createdAt: now + 9, tool: 'Bash', command: '{"command":"$(evil)","command":"ls -la"}' },
@@ -187,7 +207,7 @@ test('the pane draws sessions, workers and every kind of request, on every surfa
   expect(mine.title).toBe('Coordinatore')
   expect(mine.folder).toBe('coordinator')
   expect(mine.effort).toBe('high')
-  expect(mine.version).toBe('0.6.4')
+  expect(mine.version).toBe('0.6.5')
 
   for (const surface of ['terminal', 'desktop', 'vscode', 'mobile'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface })
@@ -210,7 +230,7 @@ test('the pane draws sessions, workers and every kind of request, on every surfa
     expect(await ui.find({ type: 'Text', text: /Writes a demo script/ })).toBeTruthy()
     expect(await ui.find({ key: 'raw-p4-b' })).toBeFalsy()
     // The request's size shows even with no aid, so a tail pushed out of sight is given away.
-    expect(await ui.find({ type: 'Text', text: /^Full request \(what you approve\) · 32 lines · \d+ characters$/ })).toBeTruthy()
+    expect(await ui.find({ type: 'Text', text: /^Full request \(what you approve\) · 32 lines · \d+ characters · 1 block$/ })).toBeTruthy()
     // A here-string is its own labelled block; the line after it is shell text, its reversal a code.
     expect(await ui.find({ type: 'Text', text: /^here-string \$s · 30 lines$/ })).toBeTruthy()
     expect(await ui.find({ type: 'Code', text: /^"@; Remove-Item C:\/demo\/x # \\u202Egnp\.exe$/ })).toBeTruthy()
@@ -248,6 +268,22 @@ test('the pane draws sessions, workers and every kind of request, on every surfa
   // An app ask's JSON is read as what it is: the command itself, its here-doc a labelled block, the
   // other fields as lines, a reading aid in plain words above. No JSON escapes are left to read.
   expect(await ui.find({ type: 'Code', text: /"command": "S=/ })).toBeFalsy()
+  // Over 6 lines, with nothing in it that can run (p13: a file of data), it opens folded: the recap, what it
+  // touches, its size and its fields stay, and it can be approved as it is; its text is one press away.
+  expect(await ui.find({ type: 'Code', text: /example\.org\/feed/ })).toBeFalsy()
+  expect(await ui.find({ type: 'Text', text: /^Touches \(always shown, read from the command\)$/ })).toBeTruthy()
+  for (const line of [/^writes {2}\/tmp\/demo\/cfg\.json$/, /^goes to {2}\/tmp\/demo$/, /^url {2}https:\/\/example\.org\/feed$/])
+    expect(await ui.find({ type: 'Text', text: line })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /^timeout: 60000$/ })).toBeTruthy()
+  expect(await ui.find({ key: 'once-p13' })).toBeTruthy()
+  await ui.press({ key: 'full-p13' })
+  expect(await ui.find({ type: 'Code', text: /example\.org\/feed/ })).toBeTruthy()
+  // A block that runs keeps the card open, however large (p6: a script run later by node): its body is
+  // on screen at once and there is nothing to unfold. So with short asks, and a request the aid gave up on.
+  expect(await ui.find({ type: 'Code', text: /chromium/ })).toBeTruthy()
+  for (const id of ['p6', 'p1', 'p5']) expect(await ui.find({ key: `full-${id}` })).toBeFalsy()
+  // An explanation is drawn through visible(): a reversal shows as its code.
+  expect(await ui.find({ type: 'Text', text: /^Runs the linter\\u202Egnp$/ })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /^→ file \$S\/shots\.js · 2 lines · run later by node$/ })).toBeTruthy()
   expect(await ui.find({ type: 'Code', text: /^const \{ chromium \} = require\("playwright"\);\nconsole\.log\("demo"\);$/ })).toBeTruthy()
   expect(await ui.find({ type: 'Code', text: /^EOF\ncd \$S && node shots\.js/ })).toBeTruthy()
@@ -260,7 +296,7 @@ test('the pane draws sessions, workers and every kind of request, on every surfa
   }
   expect(await ui.find({ type: 'Text', text: /writes \$S\/shots\.js \(2 lines, run later by node\)/ })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /pipes into: tail -5/ })).toBeTruthy()
-  expect(await ui.find({ type: 'Text', text: /^Full request \(what you approve\) · 11 steps · 12 lines · \d+ characters$/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /^Full request \(what you approve\) · 11 steps · 12 lines · \d+ characters · 1 block$/ })).toBeTruthy()
   // The duplicate-key command shows as itself on both cards: no `ls -la` stands in for what runs.
   expect((await ui.findAll({ type: 'Code', text: /^\{"command":"\$\(evil\)","command":"ls -la"\}$/ })).length).toBe(2)
   expect((await ui.findAll({ type: 'Code' })).some(c => c.text === 'ls -la')).toBe(false)
@@ -788,6 +824,31 @@ describe('a session reporting', () => {
       expect(notes[1]).toMatch(/request q1 \(#q1\) of the session titled \\?"project\\?" in the pane: [\s\S]*Done, clean up/)
       expect(queue.rows()).toEqual([])
       await ui.unmount()
+    })
+
+    test('the text of an order from the bus answers file is data: drawn through visible() and fenced in the queued note', async ($, on) => {
+      const { mine, settle, written, answersFile } = setup(on)
+      const queue = track(on)
+      // A hidden reversal and a code fence in a task, the two things that could pass for the digest's own structure.
+      const text = `1. ship it ${String.fromCharCode(0x202e)}gnp\n2. \`\`\`\nnot a row`
+      on('ui.open', () => ({ value: { isPlaced: true } }))
+      await $.session.start({ cwd: '/repos/project', surface: 'desktop', isInteractive: true })
+      await $.turn.start({ turnId: 't1' } as never)
+      await $.turn.complete({ turnId: 't1', answer: 'Migrated the schema; all tests pass.', isAborted: false } as never)
+      await settle()
+      const [r] = mine().requests
+      // The answers file as the pane left it; the person's next answer applies everything in it.
+      written[answersFile()] = JSON.stringify([{ requestId: 'order-1', at: Date.now(), kind: 'order', text }])
+      await $.command.run({ command: 'agents-monitor', args: '' } as never)
+      const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+      await ui.press({ key: `read-${r?.id}` })
+      await settle()
+      const [row] = queue.rows()
+      await ui.unmount()
+      expect(row?.text).toContain('\\u202Egnp')
+      expect(row?.text).not.toContain(String.fromCharCode(0x202e))
+      // Fenced by a longer fence than the three backticks in the text, so nothing in it can close the fence early.
+      expect(row?.text).toMatch(/\n````\n1\. ship it [\s\S]*\n2\. ```\nnot a row\n````$/)
     })
 
     test('notes left from before a restart are delivered once they are old enough, and not before', async ($, on) => {

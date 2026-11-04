@@ -19,7 +19,7 @@ import type { EngineInterface, Register, RenderChildren, RenderNode } from 'clau
 import type { AgentRow, Answer, AnswerKind, Board, ChoiceOption, ChoiceQuestion, Digest, Local, MonitorRequest, PaneUi, PlanItem, Queues, SessionStatus } from '../types'
 import { CRAB_H, TIER_COLOR, TIER_MODEL, crabSvg, hatFor, tierOf } from './crab'
 import { QUESTIONS_HEADING, asksGoAhead, pickStrings, type Strings } from './i18n'
-import { lineCount, segmentsOf, viewOf, visible } from './request'
+import { canFold, lineCount, segmentsOf, touchesOf, viewOf, visible } from './request'
 import { compileRules, criticalIn, matchRule, type Rule, type RulesFile } from './rules'
 
 const PANE = 'coordinator-monitor'
@@ -29,7 +29,7 @@ const FAST_MS = 1000
 const STALE_MS = 15 * 60 * 1000
 const ENDED_KEEP_MS = 60 * 60 * 1000
 /** Published in every status, so the pane can flag a session still running an older copy. Keep in step with plugin.json. */
-const MOD_VERSION = '0.6.4'
+const MOD_VERSION = '0.6.5'
 const SHELL_TOOLS = new Set(['Bash', 'PowerShell'])
 const STEP_TOOL = 'mcp__savvy-progress__step'
 const FLOW_TOOL = 'mcp__savvy-progress__progress'
@@ -243,7 +243,8 @@ const applyAnswers = async ($: $): Promise<void> => {
       isMine = !cur.applied.includes(a.requestId)
       return isMine ? { ...cur, applied: [...cur.applied, a.requestId].slice(-300) } : cur
     })
-    if (isMine) await queueNote($, S.orderMsg(a.text ?? ''))
+    // The list is the bus answers file's text, and sits inside a numbered digest row: data, fenced.
+    if (isMine) await queueNote($, S.orderMsg(fence(visible(a.text ?? ''))))
   }
   // An app ask, and a protected command held in its call, are answered by the hook that waits on them.
   const fresh = answers.filter(
@@ -345,7 +346,11 @@ const flushDigest = async ($: $): Promise<void> => {
   const run = async (): Promise<void> => {
     const d = await read($, digest)
     const last = d.rows.at(-1)
-    if (!last) return
+    if (!last) {
+      // Nothing waits: a stale timer must not send the tick to read the state every second.
+      pendingSince = 0
+      return
+    }
     const sent = await $.session.append({ message: { type: 'user', content: [{ type: 'text', text: digestText(d.rows) }] } }).catch(() => ({ deny: 'failed' }))
     if (sent.deny) return
     await update($, digest, cur => {
@@ -518,7 +523,7 @@ const addRequest = async ($: $, req: MonitorRequest): Promise<void> => {
 }
 
 /** A request too long to take in at a glance: its card leads with a summary. */
-const isLarge = (what: string): boolean => what.length > 400 || what.split('\n').length > 8
+const isLarge = (what: string): boolean => what.length > 400 || what.split('\n').length > 6
 
 /**
  * Asks a small model for a plain-language gloss of a large request, when the person turned that on
@@ -1358,6 +1363,13 @@ export const register: Register = (on, options) => {
         // hands on whole (a here-doc, a here-string, a long inline script) under a label saying where it goes.
         // Characters that hide or reorder text are drawn as codes, here and in the aid.
         const segs = isShell ? segmentsOf(cmd, shellKind) : []
+        const view = viewOf(tool, cmd)
+        // A large shell request opens folded: its recap, what it touches and its size stay, its text is a
+        // press away. Never where the aid gave up, nor where any block could run (a body the recap does
+        // not read): then the card opens whole, as before.
+        const isFoldable = isShell && view?.kind === 'shell' && isLarge(cmd) && canFold(segs, shellKind)
+        const isFolded = isFoldable && !u.open?.[`full:${r.id}`]
+        const touches = isFoldable ? touchesOf(cmd, shellKind) : []
         // Only what closes a block is drawn under it: an inline script's closing quotes, a here-string's
         // `'@`, a here-doc's end word (the line after its body, by how it is cut). Anything else may run
         // (`"|sh`, `'@ | iex`) and keeps a box of its own.
@@ -1371,7 +1383,7 @@ export const register: Register = (on, options) => {
         }
         const raw = isShell ? (
           <Box flexDirection="column" gap="xs">
-            {segs.map((sg, k) =>
+            {(isFolded ? [] : segs).map((sg, k) =>
               sg.kind === 'shell' ? (
                 sg.text.trim() && !tailOf(k - 1) ? <Code key={`raw-${r.id}-${k}`} source={visible(sg.text.replace(/\n$/, ''))} wrap="wrap" language={shellKind} /> : null
               ) : (
@@ -1399,7 +1411,6 @@ export const register: Register = (on, options) => {
         )
         // A large request, or a file it writes, gets a reading aid on top: its steps as the asking tool's
         // shell reads them, or the file's path and code. None where the split is not certain.
-        const view = viewOf(tool, cmd)
         const isAided = !!view && (isLarge(cmd) || view.kind !== 'shell')
         const HEAD_LINES = 12
         const summary: RenderChildren = !view ? null : view.kind === 'shell' ? (
@@ -1451,13 +1462,27 @@ export const register: Register = (on, options) => {
                 {summary}
               </Box>
             ) : null}
+            {/* Built from the command alone, folded or not: where it goes, what it deletes and writes, whom it talks to. */}
+            {touches.length ? (
+              <Box flexDirection="column" gap="xs" padding="sm" borderStyle="round" borderColor={isTerm ? undefined : '#FFFFFF1F'} borderDimColor={isTerm}>
+                <Text size="caption" color="subtle">
+                  {S.touches}
+                </Text>
+                {touches.map((t, i) => (
+                  <Text key={`tch-${r.id}-${i}`} size="footnote" wrap="wrap">
+                    <Text color={t.kind === 'rm' ? 'warning' : 'subtle'}>{`${S.touch[t.kind]}  `}</Text>
+                    {visible(t.target)}
+                  </Text>
+                ))}
+              </Box>
+            ) : null}
             {/* Written from the request itself, as unverified as the aid. */}
             {r.explain ? (
               <Box flexDirection="column" gap="xs" padding="sm" borderStyle="round" borderColor={isTerm ? undefined : '#7F77DD66'} borderDimColor={isTerm} backgroundColor={fill('#7F77DD14')}>
                 <Text size="caption" weight="semibold" color="#B3ADF0">
                   {S.explainLabel}
                 </Text>
-                <Text size="footnote">{r.explain}</Text>
+                <Text size="footnote">{visible(r.explain)}</Text>
                 <Text size="caption" color="subtle">
                   {S.explainWarn}
                 </Text>
@@ -1467,8 +1492,18 @@ export const register: Register = (on, options) => {
             <Box flexDirection="column" gap="xs">
               {/* Always: its size gives away a tail that blank lines or a comment push out of sight. */}
               <Text size="caption" color="subtle">
-                {`${S.fullRequest} · ${view?.kind === 'shell' ? `${S.steps(view.steps.length)} · ` : ''}${S.commandSize(lineCount(cmd), cmd.length)}`}
+                {`${S.fullRequest} · ${view?.kind === 'shell' ? `${S.steps(view.steps.length)} · ` : ''}${S.commandSize(lineCount(cmd), cmd.length)}${segs.some(sg => sg.kind === 'block') ? ` · ${S.blocks(segs.filter(sg => sg.kind === 'block').length)}` : ''}`}
               </Text>
+              {isFoldable ? (
+                <Box flexDirection="row">
+                  <Button
+                    key={`full-${r.id}`}
+                    variant="secondary"
+                    label={isFolded ? `▸ ${S.showRequest}` : `▾ ${S.hideRequest}`}
+                    onPress={() => void update($, paneUi, cur => ({ ...cur, open: { ...cur.open, [`full:${r.id}`]: isFolded } }))}
+                  />
+                </Box>
+              ) : null}
               {raw}
             </Box>
             {r.rule ? (
