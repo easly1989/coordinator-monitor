@@ -100,6 +100,7 @@ const en = {
   queueBroken: 'The queue file is unreadable; nothing was changed.',
   readMsg: (time: string) => `Read receipt: the person has read your report of ${time} in the coordinator pane. Do not reply to this; carry on with your work if you have any.`,
   idCopied: (id: string) => `Copied request id ${id}`,
+  digestMsg: (n: number, from: string, to: string, body: string) => `[coordinator-monitor] ${n} notes from the pane, oldest first (${from}–${to}):\n\n${body}`,
   answeredMsg: (time: string, session: string, id: string, answer: string) =>
     `[coordinator-monitor] At ${time} the person answered request ${id} (#${id.slice(-6)}) of the session titled ${session} in the pane: ${answer}`,
   answerKind: { 'approve-once': 'approved once', 'approve-session': 'approved for the session', deny: 'denied', read: 'marked as read (the session was told)', order: 'reordered its planned tasks (the session was told)' } as Record<string, string>,
@@ -204,6 +205,7 @@ const it: typeof en = {
   queueBroken: 'Il file della coda non è leggibile; non ho cambiato nulla.',
   readMsg: time => `Conferma di lettura: l'utente ha letto il tuo report delle ${time} nel pannello del Coordinatore. Non rispondere a questo messaggio; prosegui col tuo lavoro se ne hai.`,
   idCopied: id => `Id della richiesta copiato: ${id}`,
+  digestMsg: (n, from, to, body) => `[coordinator-monitor] ${n} note dal pannello, dalla più vecchia (${from}–${to}):\n\n${body}`,
   answeredMsg: (time, session, id, answer) =>
     `[coordinator-monitor] Alle ${time} l'utente ha risposto nel pannello alla richiesta ${id} (#${id.slice(-6)}) della sessione intitolata ${session}: ${answer}`,
   answerKind: { 'approve-once': 'approvato una volta', 'approve-session': 'approvato per la sessione', deny: 'negato', read: 'letto (la sessione è stata avvisata)', order: 'riordinato le attività programmate (la sessione è stata avvisata)' },

@@ -1,6 +1,6 @@
 {
   "name": "coordinator-monitor",
-  "version": "0.6.3",
+  "version": "0.6.4",
   "description": "One pane for every local Claude Code session: sessions, subagents (savvy-flow aware), pending permissions and questions you can answer in place.",
   "author": { "name": "Carlo Ruggiero (easly1989)", "url": "https://easly1989.github.io/" },
   "homepage": "https://github.com/easly1989/coordinator-monitor",
@@ -34,6 +34,12 @@
       "description": "on: a permission request too long to read at a glance gets a one- or two-sentence explanation from Haiku on its card (a small cost on your plan, and the text is written from the request itself, so check the request); off: only the built-in summary",
       "default": "off",
       "options": ["off", "on"]
+    },
+    "digestMinutes": {
+      "type": "string",
+      "title": "Quiet notes digest (minutes)",
+      "description": "An approval, a denial or a read receipt is noted in the session as one row together with the others, when the session next speaks, or after this many minutes idle. A free-text answer or a choice is never held. 0: each note at once (it wakes an idle session).",
+      "default": "15"
     },
     "busDir": {
       "type": "string",

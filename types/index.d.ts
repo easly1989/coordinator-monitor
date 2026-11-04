@@ -117,6 +117,9 @@ export type Local = {
   reloadTried?: string
 }
 
+/** Quiet notes waiting to be delivered together: `seq` rises with each, `at` is when it was made. */
+export type Digest = { seq: number; rows: { seq: number; at: number; text: string }[] }
+
 export type PaneUi = {
   filter: 'all' | 'waiting' | 'active'
   collapsed: Record<string, boolean>
@@ -141,6 +144,7 @@ declare module 'claude-code' {
       board: Shaped<Board>
       local: Shaped<Local>
       ui: Shaped<PaneUi>
+      digest: Shaped<Digest>
     }
   }
 }
