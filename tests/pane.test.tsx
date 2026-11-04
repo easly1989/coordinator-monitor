@@ -210,7 +210,7 @@ test('the pane draws sessions, workers and every kind of request, on every surfa
     expect(await ui.find({ type: 'Text', text: /Writes a demo script/ })).toBeTruthy()
     expect(await ui.find({ key: 'raw-p4-b' })).toBeFalsy()
     // The request's size shows even with no aid, so a tail pushed out of sight is given away.
-    expect(await ui.find({ type: 'Text', text: /^Full request \(what you approve\) · 32 lines · \d+ characters$/ })).toBeTruthy()
+    expect(await ui.find({ type: 'Text', text: /^Full request \(what you approve\) · 32 lines · \d+ characters · 1 block$/ })).toBeTruthy()
     // A here-string is its own labelled block; the line after it is shell text, its reversal a code.
     expect(await ui.find({ type: 'Text', text: /^here-string \$s · 30 lines$/ })).toBeTruthy()
     expect(await ui.find({ type: 'Code', text: /^"@; Remove-Item C:\/demo\/x # \\u202Egnp\.exe$/ })).toBeTruthy()
@@ -248,6 +248,18 @@ test('the pane draws sessions, workers and every kind of request, on every surfa
   // An app ask's JSON is read as what it is: the command itself, its here-doc a labelled block, the
   // other fields as lines, a reading aid in plain words above. No JSON escapes are left to read.
   expect(await ui.find({ type: 'Code', text: /"command": "S=/ })).toBeFalsy()
+  // Over 6 lines it opens folded: the recap, what it touches, its size and its fields stay, and it can be
+  // approved as it is; its text is one press away.
+  expect(await ui.find({ type: 'Code', text: /chromium/ })).toBeFalsy()
+  expect(await ui.find({ type: 'Text', text: /^Touches \(always shown, read from the command\)$/ })).toBeTruthy()
+  for (const line of [/^writes {2}\$S\/shots\.js$/, /^goes to {2}\$S$/, /^url {2}https:\/\/example\.org$/, /^not read {2}‹1› \$S\/shots\.js · 2 lines$/])
+    expect(await ui.find({ type: 'Text', text: line })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /^timeout: 300000$/ })).toBeTruthy()
+  expect(await ui.find({ key: 'once-p6' })).toBeTruthy()
+  await ui.press({ key: 'full-p6' })
+  // Short, or read by no aid (p5's here-string): whole, as before, with nothing to unfold.
+  expect(await ui.find({ key: 'full-p1' })).toBeFalsy()
+  expect(await ui.find({ key: 'full-p5' })).toBeFalsy()
   expect(await ui.find({ type: 'Text', text: /^→ file \$S\/shots\.js · 2 lines · run later by node$/ })).toBeTruthy()
   expect(await ui.find({ type: 'Code', text: /^const \{ chromium \} = require\("playwright"\);\nconsole\.log\("demo"\);$/ })).toBeTruthy()
   expect(await ui.find({ type: 'Code', text: /^EOF\ncd \$S && node shots\.js/ })).toBeTruthy()
@@ -260,7 +272,7 @@ test('the pane draws sessions, workers and every kind of request, on every surfa
   }
   expect(await ui.find({ type: 'Text', text: /writes \$S\/shots\.js \(2 lines, run later by node\)/ })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /pipes into: tail -5/ })).toBeTruthy()
-  expect(await ui.find({ type: 'Text', text: /^Full request \(what you approve\) · 11 steps · 12 lines · \d+ characters$/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /^Full request \(what you approve\) · 11 steps · 12 lines · \d+ characters · 1 block$/ })).toBeTruthy()
   // The duplicate-key command shows as itself on both cards: no `ls -la` stands in for what runs.
   expect((await ui.findAll({ type: 'Code', text: /^\{"command":"\$\(evil\)","command":"ls -la"\}$/ })).length).toBe(2)
   expect((await ui.findAll({ type: 'Code' })).some(c => c.text === 'ls -la')).toBe(false)

@@ -407,3 +407,109 @@ export const viewOf = (tool: string, what: string): RequestView | null => {
   }
   return null
 }
+
+/** Something a shell request touches, as the collapsed card lists it: always shown, never summarised. */
+export type Touch = { kind: 'cd' | 'rm' | 'write' | 'append' | 'url' | 'host' | 'remote' | 'unread'; target: string }
+
+/**
+ * The words after `at` in `text`, quotes kept, up to the end of the command they belong to: an unquoted
+ * `;`, `&`, `|`, newline, `)` or backtick, or the close of a quote the command sits in (`ssh h "rm x"`).
+ */
+const wordsAt = (text: string, at: number): string[] => {
+  const before = text.slice(0, at)
+  const enclosing = ['"', "'"].find(q => (before.split(q).length - 1) % 2 === 1)
+  const words: string[] = []
+  let cur = ''
+  let quote = ''
+  for (let i = at; i < text.length; i++) {
+    const c = text[i] ?? ''
+    if (quote) {
+      cur += c
+      if (c === quote) quote = ''
+    } else if (c === enclosing || /[;&|\n)`]/.test(c)) break
+    else if (c === '"' || c === "'") {
+      quote = c
+      cur += c
+    } else if (/\s/.test(c)) {
+      if (cur) words.push(cur)
+      cur = ''
+    } else cur += c
+  }
+  if (cur) words.push(cur)
+  return words
+}
+
+const SSH_ARG = /^-[pilFJbcDEeILmOoQRSWw]$/
+
+/** Each place `text` (shell text, or a shell block) touches. Generous on purpose: an extra line costs less than a missed one. */
+const touchesIn = (text: string): Touch[] => {
+  const out: Touch[] = []
+  const each = (re: RegExp, fn: (m: RegExpExecArray, words: string[]) => void) => {
+    for (const m of text.matchAll(re)) fn(m, wordsAt(text, (m.index ?? 0) + m[0].length))
+  }
+  const cmd = (names: string) => new RegExp(String.raw`(?:^|[\s;&|(${'`'}'"])(?:${names})(?=[ \t])`, 'gim')
+  const args = (words: string[]) => words.filter(w => !w.startsWith('-'))
+  each(cmd('cd|pushd|chdir|Set-Location|sl'), (_, w) => {
+    const to = args(w)[0]
+    if (to) out.push({ kind: 'cd', target: to })
+  })
+  each(cmd('rm|rmdir|unlink|shred|Remove-Item|ri|del|erase'), (_, w) => {
+    for (const to of args(w)) out.push({ kind: 'rm', target: to })
+  })
+  // Not an arrow (`=>`, `->`) in a short inline script, a duplicated descriptor or a process substitution.
+  each(/(?<![=>-])(\d*|&)(>>|>\|?)(?![&(>])[ \t]*/g, (m, w) => {
+    const to = w[0]
+    if (to && !/^(\/dev\/null|\$null|nul)$/i.test(to)) out.push({ kind: m[2] === '>>' ? 'append' : 'write', target: to })
+  })
+  each(cmd('tee'), (_, w) => {
+    for (const to of args(w)) out.push({ kind: w.some(x => x === '-a' || x === '--append') ? 'append' : 'write', target: to })
+  })
+  each(cmd('Out-File|Set-Content|Add-Content|sc|ac'), (m, w) => {
+    const at = w.findIndex(x => /^-(Path|FilePath|LiteralPath)$/i.test(x))
+    const to = at >= 0 ? w[at + 1] : args(w)[0]
+    const isAppend = /Add-Content|ac$/i.test(m[0]) || w.some(x => /^-Append$/i.test(x))
+    if (to) out.push({ kind: isAppend ? 'append' : 'write', target: to })
+  })
+  each(cmd('curl|wget'), (_, w) => {
+    const at = w.findIndex(x => /^(-o|--output|-O|--output-document)$/.test(x))
+    if (at >= 0 && w[at + 1] && w[at + 1] !== '-') out.push({ kind: 'write', target: w[at + 1] ?? '' })
+  })
+  each(/[a-z][a-z0-9+.-]*:\/\/[^\s'"`<>|;&()]+/gi, m => out.push({ kind: 'url', target: m[0] }))
+  each(cmd('ssh|mosh'), (_, w) => {
+    const host = w.find((x, i) => !x.startsWith('-') && !SSH_ARG.test(w[i - 1] ?? ''))
+    if (host) out.push({ kind: 'host', target: host.replace(/^[^@]*@/, '') })
+  })
+  each(cmd('scp|sftp|rsync'), (_, w) => {
+    for (const x of w) {
+      const host = /^(?:[^@\s:]+@)?([A-Za-z0-9][\w.-]+):/.exec(x)?.[1]
+      if (host && !x.includes('://')) out.push({ kind: 'host', target: host })
+    }
+  })
+  each(/\bgit[ \t]+(?:push|pull|fetch|clone)(?=[ \t])/g, (_, w) => {
+    const to = args(w)[0]
+    if (to) out.push({ kind: 'remote', target: to })
+  })
+  return out
+}
+
+/**
+ * What a shell request touches, every part of it read: its shell text and each shell block (here-doc
+ * into bash, an inline `sh -c` script) by the same scan; a block of other code by the URLs in it and a
+ * line saying its contents are not read. Drawn through `visible()` like all the rest.
+ */
+export const touchesOf = (cmd: string, shell: Shell = 'bash'): Touch[] => {
+  const segs = segmentsOf(cmd, shell)
+  const out: Touch[] = []
+  let n = 0
+  for (const sg of segs) {
+    if (sg.kind === 'shell' || sg.language === 'bash' || sg.language === 'powershell') out.push(...touchesIn(sg.text))
+    else for (const m of sg.text.matchAll(/[a-z][a-z0-9+.-]*:\/\/[^\s'"`<>|;&()]+/gi)) out.push({ kind: 'url', target: m[0] })
+    if (sg.kind === 'block') {
+      n++
+      if (sg.path) out.push({ kind: 'write', target: sg.path })
+      if (sg.language !== 'bash' && sg.language !== 'powershell') out.push({ kind: 'unread', target: `‹${n}› ${sg.to} · ${sg.lines} ${sg.lines === 1 ? 'line' : 'lines'}` })
+    }
+  }
+  const seen = new Set<string>()
+  return out.filter(t => !seen.has(`${t.kind} ${t.target}`) && !!seen.add(`${t.kind} ${t.target}`))
+}

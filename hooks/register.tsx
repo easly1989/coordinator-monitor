@@ -19,7 +19,7 @@ import type { EngineInterface, Register, RenderChildren, RenderNode } from 'clau
 import type { AgentRow, Answer, AnswerKind, Board, ChoiceOption, ChoiceQuestion, Digest, Local, MonitorRequest, PaneUi, PlanItem, Queues, SessionStatus } from '../types'
 import { CRAB_H, TIER_COLOR, TIER_MODEL, crabSvg, hatFor, tierOf } from './crab'
 import { QUESTIONS_HEADING, asksGoAhead, pickStrings, type Strings } from './i18n'
-import { lineCount, segmentsOf, viewOf, visible } from './request'
+import { lineCount, segmentsOf, touchesOf, viewOf, visible } from './request'
 import { compileRules, criticalIn, matchRule, type Rule, type RulesFile } from './rules'
 
 const PANE = 'coordinator-monitor'
@@ -518,7 +518,7 @@ const addRequest = async ($: $, req: MonitorRequest): Promise<void> => {
 }
 
 /** A request too long to take in at a glance: its card leads with a summary. */
-const isLarge = (what: string): boolean => what.length > 400 || what.split('\n').length > 8
+const isLarge = (what: string): boolean => what.length > 400 || what.split('\n').length > 6
 
 /**
  * Asks a small model for a plain-language gloss of a large request, when the person turned that on
@@ -1358,6 +1358,12 @@ export const register: Register = (on, options) => {
         // hands on whole (a here-doc, a here-string, a long inline script) under a label saying where it goes.
         // Characters that hide or reorder text are drawn as codes, here and in the aid.
         const segs = isShell ? segmentsOf(cmd, shellKind) : []
+        const view = viewOf(tool, cmd)
+        // A large shell request opens folded: its recap, what it touches and its size stay, its text is a
+        // press away. Never where the aid gave up: then the card opens whole, as before.
+        const isFoldable = isShell && view?.kind === 'shell' && isLarge(cmd)
+        const isFolded = isFoldable && !u.open?.[`full:${r.id}`]
+        const touches = isFoldable ? touchesOf(cmd, shellKind) : []
         // Only what closes a block is drawn under it: an inline script's closing quotes, a here-string's
         // `'@`, a here-doc's end word (the line after its body, by how it is cut). Anything else may run
         // (`"|sh`, `'@ | iex`) and keeps a box of its own.
@@ -1371,7 +1377,7 @@ export const register: Register = (on, options) => {
         }
         const raw = isShell ? (
           <Box flexDirection="column" gap="xs">
-            {segs.map((sg, k) =>
+            {(isFolded ? [] : segs).map((sg, k) =>
               sg.kind === 'shell' ? (
                 sg.text.trim() && !tailOf(k - 1) ? <Code key={`raw-${r.id}-${k}`} source={visible(sg.text.replace(/\n$/, ''))} wrap="wrap" language={shellKind} /> : null
               ) : (
@@ -1399,7 +1405,6 @@ export const register: Register = (on, options) => {
         )
         // A large request, or a file it writes, gets a reading aid on top: its steps as the asking tool's
         // shell reads them, or the file's path and code. None where the split is not certain.
-        const view = viewOf(tool, cmd)
         const isAided = !!view && (isLarge(cmd) || view.kind !== 'shell')
         const HEAD_LINES = 12
         const summary: RenderChildren = !view ? null : view.kind === 'shell' ? (
@@ -1451,6 +1456,20 @@ export const register: Register = (on, options) => {
                 {summary}
               </Box>
             ) : null}
+            {/* Built from the command alone, folded or not: where it goes, what it deletes and writes, whom it talks to. */}
+            {touches.length ? (
+              <Box flexDirection="column" gap="xs" padding="sm" borderStyle="round" borderColor={isTerm ? undefined : '#FFFFFF1F'} borderDimColor={isTerm}>
+                <Text size="caption" color="subtle">
+                  {S.touches}
+                </Text>
+                {touches.map((t, i) => (
+                  <Text key={`tch-${r.id}-${i}`} size="footnote" wrap="wrap">
+                    <Text color={t.kind === 'rm' ? 'warning' : 'subtle'}>{`${S.touch[t.kind]}  `}</Text>
+                    {visible(t.target)}
+                  </Text>
+                ))}
+              </Box>
+            ) : null}
             {/* Written from the request itself, as unverified as the aid. */}
             {r.explain ? (
               <Box flexDirection="column" gap="xs" padding="sm" borderStyle="round" borderColor={isTerm ? undefined : '#7F77DD66'} borderDimColor={isTerm} backgroundColor={fill('#7F77DD14')}>
@@ -1467,8 +1486,18 @@ export const register: Register = (on, options) => {
             <Box flexDirection="column" gap="xs">
               {/* Always: its size gives away a tail that blank lines or a comment push out of sight. */}
               <Text size="caption" color="subtle">
-                {`${S.fullRequest} · ${view?.kind === 'shell' ? `${S.steps(view.steps.length)} · ` : ''}${S.commandSize(lineCount(cmd), cmd.length)}`}
+                {`${S.fullRequest} · ${view?.kind === 'shell' ? `${S.steps(view.steps.length)} · ` : ''}${S.commandSize(lineCount(cmd), cmd.length)}${segs.some(sg => sg.kind === 'block') ? ` · ${S.blocks(segs.filter(sg => sg.kind === 'block').length)}` : ''}`}
               </Text>
+              {isFoldable ? (
+                <Box flexDirection="row">
+                  <Button
+                    key={`full-${r.id}`}
+                    variant="secondary"
+                    label={isFolded ? `▸ ${S.showRequest}` : `▾ ${S.hideRequest}`}
+                    onPress={() => void update($, paneUi, cur => ({ ...cur, open: { ...cur.open, [`full:${r.id}`]: isFolded } }))}
+                  />
+                </Box>
+              ) : null}
               {raw}
             </Box>
             {r.rule ? (

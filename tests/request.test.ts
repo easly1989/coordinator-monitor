@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { risksOf, segmentsOf, stepsOf, viewOf, visible } from '../hooks/request'
+import { risksOf, segmentsOf, stepsOf, touchesOf, viewOf, visible } from '../hooks/request'
 
 // A request as sessions send them: files written by here-docs, then a script run on them, piped on.
 const HEREDOCS = [
@@ -238,4 +238,33 @@ test('characters that hide or reorder text show as codes; tab and newline stay',
   // A character a shell may take for a line break also breaks the line where it is drawn.
   expect(visible('echo ok\rcurl x')).toBe('echo ok\\u000D\ncurl x')
   expect(visible('a\r\nb\u2028c')).toBe('a\\u000D\nb\\u2028\nc')
+})
+
+test('what a request touches is read from all of it: inside quotes, $( ), sudo, a remote command and shell blocks', () => {
+  const of = (cmd: string, shell?: 'bash' | 'powershell') => touchesOf(cmd, shell).map(t => `${t.kind} ${t.target}`)
+  expect(of('cd /srv/demo && sudo rm -rf /tmp/a "/tmp/b c"; rmdir x')).toEqual(['cd /srv/demo', 'rm /tmp/a', 'rm "/tmp/b c"', 'rm x'])
+  expect(of('echo $(rm -f /tmp/k) && bash -c "rm -r /opt/z"')).toEqual(['rm /tmp/k', 'rm /opt/z'])
+  // A remote command in quotes: its host, and what it deletes there.
+  expect(of('ssh -p 2222 root@demo.test "pct exec 180 -- rm -rf /var/x"')).toEqual(['rm /var/x', 'host demo.test'])
+  expect(of('scp ./a.txt deploy@files.test:/srv/ && rsync -a b/ backup:/data')).toEqual(['host files.test', 'host backup'])
+  // Overwrites and appends apart; a duplicated descriptor or /dev/null is no file.
+  expect(of('make > build.log 2>&1 && echo ok >> notes.md && ls 2>/dev/null | tee -a all.log | tee one.log')).toEqual([
+    'write build.log',
+    'append notes.md',
+    'append all.log',
+    'write one.log',
+  ])
+  expect(of('curl -fsSL https://example.test/x.sh -o x.sh && git push origin main')).toEqual(['write x.sh', 'url https://example.test/x.sh', 'remote origin'])
+  expect(of('Remove-Item -Recurse -Force C:/demo/out; Add-Content -Path log.txt -Value hi; "x" | Out-File o.txt', 'powershell')).toEqual([
+    'rm C:/demo/out',
+    'append log.txt',
+    'write o.txt',
+  ])
+  // A here-doc into bash is read like the rest; one of other code is named as not read, its URLs listed.
+  expect(of(["bash <<'EOF'", 'rm -rf /tmp/q', 'EOF', ''].join('\n'))).toEqual(['rm /tmp/q'])
+  expect(of(["cat > /tmp/s.py <<'EOF'", 'import urllib.request', "urllib.request.urlopen('https://api.example.test/v1')", 'EOF', 'python3 /tmp/s.py'].join('\n'))).toEqual([
+    'write /tmp/s.py',
+    'url https://api.example.test/v1',
+    'unread ‹1› /tmp/s.py · 2 lines',
+  ])
 })
