@@ -94,6 +94,11 @@ test('a block says what runs: substitutions in an unquoted body, a pipe after th
   expect(blockOf("cat > f.sh <<'EOF'\necho hi\nEOF\nchmod +x f.sh && ./f.sh")).toMatchObject({ runBy: 'the shell' })
   expect(blockOf("cat > f.sh <<'EOF'\necho hi\nEOF\nxargs -a f.sh -I{} sh -c {}")).toMatchObject({ runBy: 'xargs' })
   expect(blockOf("cat > f.txt <<'EOF'\nhi\nEOF\nls -l f.txt && cat f.txt")).not.toMatchObject({ runBy: expect.anything() })
+  // A reader of the file piping into a program, and the file fed to one by a leading redirection.
+  expect(blockOf("cat > g3.sh <<'EOF'\necho hi\nEOF\ncat g3.sh | bash")).toMatchObject({ runBy: 'bash' })
+  expect(blockOf("cat > g5.sh <<'EOF'\necho hi\nEOF\ntail -n +1 g5.sh | grep -v x | sh")).toMatchObject({ runBy: 'sh' })
+  expect(blockOf("cat > g4.sh <<'EOF'\necho hi\nEOF\n< g4.sh bash")).toMatchObject({ runBy: 'bash' })
+  expect(blockOf("cat > g6.txt <<'EOF'\nhi\nEOF\ncat g6.txt | wc -l")).not.toMatchObject({ runBy: expect.anything() })
   // #12: an interpreter fed the block, its output redirected: one clear step.
   const fed = viewOf('Bash', "bash > f <<'EOF'\necho hi\nEOF")
   expect(fed?.kind === 'shell' ? fed.steps : []).toEqual(['runs bash on the block below (1 line), output to f'])

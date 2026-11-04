@@ -132,16 +132,33 @@ const targetOf = (part: string, after: string): { to: string; path?: string; lan
 // Commands that read or move a file without running it.
 const INERT = /^(?:cat|ls|chmod|chown|rm|cp|mv|wc|head|tail|stat|file|diff|grep|echo|printf|test|\[|touch|git)$/
 
-/** The first command in `text` that uses the file `base` and may run it: its program, or `the shell` when it is the file itself. */
+/** A step's program: its first word past assignments and leading redirections (`< f bash` is bash). */
+const programOf = (step: string): string =>
+  step
+    .trim()
+    .replace(/^(?:(?:[A-Za-z_]\w*=\S*|\d*[<>]{1,2}[ \t]*[^\s;&|<>]+)[ \t]*)*/, '')
+    .split(/\s+/)[0] ?? ''
+
+/**
+ * The first command in `text` that uses the file `base` and may run it: its program, `the shell` when
+ * it is the file itself, or the program a reader of it pipes into (`cat f | bash`).
+ */
 const laterRunner = (text: string, base: string): string | undefined => {
   const esc = base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  for (const step of text.split(/\n|&&|\|\||[;&|]/)) {
-    const words = step.trim().replace(/^(?:[A-Za-z_]\w*=\S*\s+)*/, '').split(/\s+/)
-    const first = words[0] ?? ''
-    if (/^[<>]/.test(first) || !new RegExp(`(^|[\\s/'"=])${esc}(?=$|[\\s'";&|)])`).test(step)) continue
+  // Steps and the separators between them: a `|` hands the step's output to the next.
+  const parts = text.split(/(\n|&&|\|\||[;&|])/)
+  for (let i = 0; i < parts.length; i += 2) {
+    const step = parts[i] ?? ''
+    const first = programOf(step)
+    if (!first || !new RegExp(`(^|[\\s/'"=<>])${esc}(?=$|[\\s'";&|)<>])`).test(step)) continue
     if (new RegExp(`(^|/)${esc}$`).test(first)) return 'the shell'
     if (first === '.' || first === 'source') return 'source'
     if (!INERT.test(first)) return first.replace(/\.exe$/i, '').toLowerCase()
+    // A reader of the file piping on: the first program down the pipe that is not a reader runs it.
+    for (let j = i; parts[j + 1] === '|'; j += 2) {
+      const next = programOf(parts[j + 2] ?? '')
+      if (next && !INERT.test(next)) return next.replace(/\.exe$/i, '').toLowerCase()
+    }
   }
   return undefined
 }

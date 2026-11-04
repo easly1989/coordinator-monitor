@@ -1281,11 +1281,16 @@ export const register: Register = (on, options) => {
         // hands on whole (a here-doc, a here-string, a long inline script) under a label saying where it goes.
         // Characters that hide or reorder text are drawn as codes, here and in the aid.
         const segs = isShell ? segmentsOf(cmd, shellKind) : []
-        // A tiny shell remnant right after a block (`'"`, `EOF`) is drawn under that block, not in a box of its own.
+        // Only what closes a block is drawn under it: an inline script's closing quotes, a here-string's
+        // `'@`, a here-doc's end word (the line after its body, by how it is cut). Anything else may run
+        // (`"|sh`, `'@ | iex`) and keeps a box of its own.
         const tailOf = (k: number): string | null => {
+          const blk = segs[k]
           const next = segs[k + 1]
           const text = next?.kind === 'shell' ? next.text.replace(/\n$/, '') : ''
-          return segs[k]?.kind === 'block' && text.trim() && text.length < 10 && !/[\r\n]/.test(text) ? text : null
+          if (blk?.kind !== 'block' || text.length >= 10) return null
+          const closer = blk.isInline ? /^\s*["')]+\s*$/ : blk.isString ? /^\s*["']@\s*$/ : /^\t*[A-Za-z_]\w*$/
+          return closer.test(text) ? text : null
         }
         const raw = isShell ? (
           <Box flexDirection="column" gap="xs">

@@ -106,6 +106,10 @@ const FILES: Record<string, SessionStatus> = {
       { id: 'p8', kind: 'ask', createdAt: now + 10, tool: 'Bash', command: '{"command":"$(evil)","command":"ls -la"}', isInput: true },
       // An inline script whose closing quotes are all that follows it: they sit under the block, not alone.
       { id: 'p9', kind: 'permission', createdAt: now + 11, tool: 'Bash', command: `ssh demo "pct exec 180 -- sh -c '\n${'echo step\n'.repeat(3)}'"`, rule: 'ssh' },
+      // A short remnant that runs something keeps its own box: it is not a closer.
+      { id: 'p10', kind: 'permission', createdAt: now + 12, tool: 'Bash', command: 'python -c "\nprint(1)\n"|sh', rule: 'exec' },
+      { id: 'p11', kind: 'permission', createdAt: now + 13, tool: 'Bash', command: 'bash -c "\necho a\n"&&bash x', rule: 'exec' },
+      { id: 'p12', kind: 'permission', createdAt: now + 14, tool: 'PowerShell', command: "@'\nWrite-Output 1\n'@ | iex", rule: 'exec' },
       { id: 'p5', kind: 'permission', createdAt: now + 7, tool: 'PowerShell', command: `$s = @"\n${'line\n'.repeat(30)}"@; Remove-Item C:/demo/x # \u202Egnp.exe`, rule: 'delete' },
     ],
   }),
@@ -250,6 +254,10 @@ test('the pane draws sessions, workers and every kind of request, on every surfa
   expect(await ui.find({ type: 'Text', text: /^timeout: 300000$/ })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /^followed by: '"$/ })).toBeTruthy()
   expect((await ui.findAll({ type: 'Code' })).some(c => c.text === `'"`)).toBe(false)
+  for (const rest of ['"|sh', '"&&bash x', "'@ | iex"]) {
+    expect((await ui.findAll({ type: 'Code' })).some(c => c.text === rest)).toBe(true)
+    expect(await ui.find({ type: 'Text', text: `followed by: ${rest}` } as never)).toBeFalsy()
+  }
   expect(await ui.find({ type: 'Text', text: /writes \$S\/shots\.js \(2 lines, run later by node\)/ })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /pipes into: tail -5/ })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /^Full request \(what you approve\) · 11 steps · 12 lines · \d+ characters$/ })).toBeTruthy()

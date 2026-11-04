@@ -7,7 +7,8 @@
   - `cat` given files (`cat notes.txt <<EOF`) reads them, not the body: no block.
   - A file written by a here-doc is marked `run later by …` when the request uses it again in a way that may run it, on the opener line (`; bash f.sh`) or after the body. That covers running it directly (`./f.sh`, marked "the shell"), sourcing it, and any command not known only to read files.
   - An interpreter fed the block with its output redirected (`bash > f <<EOF`) reads as one step: "runs bash on the block below, output to f".
-- **A tiny shell remnant after a block sits under it.** Text of under 10 characters on one line right after a block (the `'"` closing an `sh -c '…'`, a lone `EOF`) shows as `followed by: '"` at the foot of the block's box instead of in a box of its own.
+- **What closes a block sits under it.** An inline script's closing quotes (the `'"` after `sh -c '…'`), a here-string's `'@` or a here-doc's end word shows as `followed by: '"` at the foot of the block's box instead of in a box of its own. Anything else after a block, however short (`"|sh`, `'@ | iex`), keeps its own box.
+- **`run later by` also catches a file piped or redirected into a program**: `cat f.sh | bash`, `tail -n +1 f.sh | sh`, `< f.sh bash`.
 
 ## 0.6.2 — 2026-11-03
 
