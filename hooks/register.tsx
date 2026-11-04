@@ -16,7 +16,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderChildren, RenderNode } from 'claude-code'
 
-import type { AgentRow, Answer, AnswerKind, Board, ChoiceOption, ChoiceQuestion, Local, MonitorRequest, PaneUi, PlanItem, Queues, SessionStatus } from '../types'
+import type { AgentRow, Answer, AnswerKind, Board, ChoiceOption, ChoiceQuestion, Digest, Local, MonitorRequest, PaneUi, PlanItem, Queues, SessionStatus } from '../types'
 import { CRAB_H, TIER_COLOR, TIER_MODEL, crabSvg, hatFor, tierOf } from './crab'
 import { QUESTIONS_HEADING, asksGoAhead, pickStrings, type Strings } from './i18n'
 import { lineCount, segmentsOf, viewOf, visible } from './request'
@@ -29,7 +29,7 @@ const FAST_MS = 1000
 const STALE_MS = 15 * 60 * 1000
 const ENDED_KEEP_MS = 60 * 60 * 1000
 /** Published in every status, so the pane can flag a session still running an older copy. Keep in step with plugin.json. */
-const MOD_VERSION = '0.6.3'
+const MOD_VERSION = '0.6.4'
 const SHELL_TOOLS = new Set(['Bash', 'PowerShell'])
 const STEP_TOOL = 'mcp__savvy-progress__step'
 const FLOW_TOOL = 'mcp__savvy-progress__progress'
@@ -91,6 +91,11 @@ let wrap: { recap?: string; ask?: string } | null = null
 let turnStartedAt = 0
 // The answers this mod sends the session in the person's voice: they reach its own prompt.submit hook.
 const ownPrompts = new Set<string>()
+// How long the quiet notes (a record of an approval, a read receipt) wait to be delivered together; 0 delivers each at once.
+let digestMs = 0
+// When the oldest queued note was made, or 0 with none: read from the file at start, kept in step by every change to it.
+let pendingSince = 0
+let digestChain: Promise<unknown> = Promise.resolve()
 
 const norm = (p: string): string => p.replace(/\\/g, '/').replace(/\/+$/, '')
 const baseName = (p: string): string => norm(p).split('/').pop() || p
@@ -238,7 +243,7 @@ const applyAnswers = async ($: $): Promise<void> => {
       isMine = !cur.applied.includes(a.requestId)
       return isMine ? { ...cur, applied: [...cur.applied, a.requestId].slice(-300) } : cur
     })
-    if (isMine) await appendNote($, S.orderMsg(a.text ?? ''))
+    if (isMine) await queueNote($, S.orderMsg(a.text ?? ''))
   }
   // An app ask, and a protected command held in its call, are answered by the hook that waits on them.
   const fresh = answers.filter(
@@ -274,7 +279,7 @@ const applyAnswers = async ($: $): Promise<void> => {
     }
     return next
   })
-  for (const text of notes) await appendNote($, text)
+  for (const text of notes) await queueNote($, text)
   for (const p of prompts) {
     // A subagent's request is answered to that agent. Only when it cannot be reached does the parent
     // hear of it, told whose it is, so the parent does not run another agent's command as its own.
@@ -283,6 +288,8 @@ const applyAnswers = async ($: $): Promise<void> => {
       if (sent.isDelivered) continue
     }
     const text = p.agentId ? S.forAgentMsg(await agentLabel($, p.agentId), p.text) : p.text
+    // Heard at once, and after the notes that came before it.
+    await flushDigest($)
     ownPrompts.add(text)
     await $.prompt.submit({ text, asUser: true })
   }
@@ -295,9 +302,65 @@ const agentLabel = async ($: $, id: string): Promise<string> => {
   return JSON.stringify(visible(a?.description ? `${id} (${a.description})` : id))
 }
 
-/** A row the model reads at its next request, in a running turn or the next one, without starting one. */
+/**
+ * A row the model reads at its next request, in a running turn or the next one. Added to a session that
+ * is idle it wakes it all the same, and a wake re-reads the whole conversation: so the quiet notes go
+ * through `queueNote`, and only what must be heard at once goes through here.
+ */
 const appendNote = async ($: $, text: string): Promise<void> => {
   await $.session.append({ message: { type: 'user', content: [{ type: 'text', text }] } }).catch(() => undefined)
+}
+
+/**
+ * The quiet notes waiting for delivery: the mod's own text, made when the person answered. They live in
+ * the session's state, not in the bus folder, where any process could write a line the model would read
+ * as the mod's.
+ */
+const digest = atom({ plugin: 'coordinator-monitor', key: 'digest' } as const, { seq: 0, rows: [] } as Digest, { shape: 'digest-1' })
+
+/** A quiet note, kept until the next time the model is going to read anyway (see `flushDigest`). */
+const queueNote = async ($: $, text: string): Promise<void> => {
+  if (!digestMs) return appendNote($, text)
+  const at = Date.now()
+  // A digest that cannot be kept must not lose the note: it goes out now, as it did before.
+  await update($, digest, d => ({ seq: d.seq + 1, rows: [...d.rows, { seq: d.seq + 1, at, text }] })).then(
+    () => {
+      pendingSince = pendingSince || at
+    },
+    () => appendNote($, text),
+  )
+}
+
+/** The queued notes as one row, oldest first; a single note reads as itself. */
+const digestText = (rows: Digest['rows']): string =>
+  rows.length === 1
+    ? (rows[0]?.text ?? '')
+    : S.digestMsg(rows.length, fmtTime(rows[0]?.at ?? 0), fmtTime(rows.at(-1)?.at ?? 0), rows.map((r, i) => `${i + 1}. ${r.text}`).join('\n\n'))
+
+/**
+ * Delivers every queued note as one row, in the order they were made, one flush at a time. A note made
+ * while the append runs has a higher `seq` and stays for the next flush; one the append failed on stays too.
+ */
+const flushDigest = async ($: $): Promise<void> => {
+  const run = async (): Promise<void> => {
+    const d = await read($, digest)
+    const last = d.rows.at(-1)
+    if (!last) return
+    const sent = await $.session.append({ message: { type: 'user', content: [{ type: 'text', text: digestText(d.rows) }] } }).catch(() => ({ deny: 'failed' }))
+    if (sent.deny) return
+    await update($, digest, cur => {
+      const rows = cur.rows.filter(r => r.seq > last.seq)
+      pendingSince = rows[0]?.at ?? 0
+      return { ...cur, rows }
+    })
+  }
+  digestChain = digestChain.then(run, run).catch(() => undefined)
+  await digestChain
+}
+
+/** While a turn runs the notes join it at no cost; idle, they wait for the digest interval since the oldest. */
+const flushDue = async ($: $): Promise<void> => {
+  if (pendingSince && (isBusy || Date.now() - pendingSince >= digestMs)) await flushDigest($)
 }
 
 /** `text` as the object `askWhat` wrote it from, or `null` when it is anything else, written as it would be. */
@@ -598,7 +661,13 @@ const answer = async ($: $, target: SessionStatus, req: MonitorRequest, kind: An
   // The session the pane sits in (the coordinator) keeps a record of every answer, read at its next request.
   // It carries nothing the other session wrote but its title, quoted: no question, no report text.
   // A dismiss tells no one, so it leaves no record either.
-  if (target.sessionId !== sessionId && kind !== 'dismiss') await appendNote($, answeredNote(target, req.id, kind, text))
+  // A free-text answer is heard at once, after the notes before it; an approval, a denial or a receipt waits for the digest.
+  if (target.sessionId !== sessionId && kind !== 'dismiss') {
+    if (kind === 'answer') {
+      await flushDigest($)
+      await appendNote($, answeredNote(target, req.id, kind, text))
+    } else await queueNote($, answeredNote(target, req.id, kind, text))
+  }
   $.ui.toast(S.sentToast(target.title))
   // Read again now: the session's next status shows the card gone sooner than the next tick would.
   void gather($)
@@ -662,7 +731,7 @@ const movePlanned = async ($: $, s: SessionStatus, i: number, to: number): Promi
   const id = `order-${newId()}`
   await postAnswer($, s, { requestId: id, at: Date.now(), kind: 'order', text })
   // Not the list: its tasks are the session's own words.
-  if (s.sessionId !== sessionId) await appendNote($, answeredNote(s, id, 'order'))
+  if (s.sessionId !== sessionId) await queueNote($, answeredNote(s, id, 'order'))
 }
 
 const newer = (a: string, b: string): boolean => a.localeCompare(b, undefined, { numeric: true }) > 0
@@ -688,6 +757,7 @@ const tick = async ($: $): Promise<void> => {
   if (ticking) return
   ticking = true
   try {
+    await flushDue($)
     // Every second only the answers are looked for, and only while a card waits; the rest every three.
     const isDue = Date.now() - lastFull >= TICK_MS - 100
     if (!isDue && !(await read($, local)).requests.length) return
@@ -787,6 +857,10 @@ export const register: Register = (on, options) => {
     forward = (options.forwardQuestions as string | undefined) !== 'off' && !isCoordinator
     // An ask left from before a reload has no hook waiting on it any more.
     await update($, local, cur => ({ ...cur, requests: cur.requests.filter(r => r.kind !== 'ask') }))
+    const minutes = Number(options.digestMinutes ?? 15)
+    digestMs = Number.isFinite(minutes) && minutes > 0 ? Math.min(minutes, 240) * 60_000 : 0
+    // Notes queued before a reload or a restart are still owed: read, so the timer counts from the oldest.
+    pendingSince = (await read($, digest).catch(() => undefined))?.rows[0]?.at ?? 0
     const rulesFile = await readJson<RulesFile>($, `${base}/rules.json`)
     if (!rulesFile && (await $.fs.exists(`${base}/rules.json`).catch(() => false))) $.ui.toast(S.rulesBroken(`${base}/rules.json`))
     const compiled = compileRules(rulesFile)
@@ -824,6 +898,7 @@ export const register: Register = (on, options) => {
   })
 
   on('session.end', async ($, e, next) => {
+    await flushDigest($)
     await publish($, 'ended').catch(() => undefined)
     return next(e)
   })
@@ -837,6 +912,8 @@ export const register: Register = (on, options) => {
 
   on('turn.start', async ($, e, next) => {
     if (!e.agentId) {
+      // The turn is starting anyway: the notes ride in it, the last thing the model reads before this prompt.
+      await flushDigest($)
       isBusy = true
       wrap = null
       turnStartedAt = Date.now()

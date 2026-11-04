@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.4 — 2026-11-04
+
+- **Quiet pane answers no longer wake an idle session** (#16). A note added to an idle session wakes it, and a wake re-reads the whole conversation. So the notes that are only a record now wait and go together:
+  - queued: the coordinator's record of an approval, a denial, a read receipt or a reorder, the read receipt and the order note a session gets;
+  - delivered as one row, oldest first (`N notes from the pane`; a single note reads as itself): in the next turn that starts anyway (the row before the prompt), at once while a turn is running, after `digestMinutes` (default 15) idle counted from the oldest note, and when the session ends;
+  - never held: a free-text answer, a choice, or a reply to a report. It goes out at once, after the queued notes, so the order is the order of the answers. What a waiting tool call or a subagent needs is not a note and is not touched.
+  - Nothing is lost: the queue is the session's state (not a file in the bus folder, where another process could write a line the model would read as the mod's), a note made while a flush runs stays for the next one, and a flush that fails keeps its notes. If the queue cannot be kept, the note goes out at once.
+  - `digestMinutes` `0` delivers each note at once, as before.
+
 ## 0.6.3 — 2026-11-03
 
 - **Here-doc labels that could mislead are gone** (#12). The rule stays fail closed: when in doubt, shell text, and never a "→ file" label on something that runs.

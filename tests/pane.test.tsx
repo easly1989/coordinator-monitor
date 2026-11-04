@@ -115,7 +115,7 @@ const FILES: Record<string, SessionStatus> = {
   }),
 }
 
-test('the pane draws sessions, workers and every kind of request, on every surface', async ($, on) => {
+test('the pane draws sessions, workers and every kind of request, on every surface', { options: { digestMinutes: '0' } }, async ($, on) => {
   on('command.register', () => ({ value: { command: 'agents-monitor' } }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
@@ -187,7 +187,7 @@ test('the pane draws sessions, workers and every kind of request, on every surfa
   expect(mine.title).toBe('Coordinatore')
   expect(mine.folder).toBe('coordinator')
   expect(mine.effort).toBe('high')
-  expect(mine.version).toBe('0.6.3')
+  expect(mine.version).toBe('0.6.4')
 
   for (const surface of ['terminal', 'desktop', 'vscode', 'mobile'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface })
@@ -417,7 +417,7 @@ describe('a session reporting', () => {
     expect(mine().requests[0]?.awaits).toBe(true)
   })
 
-  test('a read receipt tells the session as a note, starts no turn, and the report leaves', async ($, on) => {
+  test('a read receipt tells the session as a note, starts no turn, and the report leaves', { options: { digestMinutes: '0' } }, async ($, on) => {
     const { mine, settle, prompts } = setup(on)
     on('ui.open', () => ({ value: { isPlaced: true } }))
     const notes: string[] = []
@@ -604,7 +604,7 @@ describe('a session reporting', () => {
     await ui.unmount()
   })
 
-  test("a session's tasks, queue and progress show on its card, reorder without removal, fold, and the card locks", async ($, on) => {
+  test("a session's tasks, queue and progress show on its card, reorder without removal, fold, and the card locks", { options: { digestMinutes: '0' } }, async ($, on) => {
     const { mine, settle, prompts, written } = setup(on)
     on('ui.open', () => ({ value: { isPlaced: true } }))
     const notes: string[] = []
@@ -689,6 +689,125 @@ describe('a session reporting', () => {
     expect((await queue({ action: 'remove', session: 'project', text: 'Profile' })).result).not.toMatch(/Profile/)
     expect(JSON.parse(written[`${bus}/queues.json`] ?? '{}')).toEqual({ p: ['Benchmark the parser'] })
     await settle()
+  })
+
+  describe('quiet notes (an approval, a denial, a read receipt) are delivered together', () => {
+    type Row = { seq: number; at: number; text: string }
+    // The queue is the session's state, not a file in the bus where another process could write it: the
+    // tests hold that value themselves, so they can read it and seed what an earlier run left.
+    const track = (on: TestOn) => {
+      // As the engine stores a shaped value: the value under its shape's name.
+      type Stored = { shape: string; value: { seq: number; rows: Row[] } }
+      let cur: Stored | undefined
+      let version = 0
+      const isDigest = (e: unknown) => (e as { key?: string }).key === 'digest'
+      on('state.get', (_, e, next) => (isDigest(e) ? ({ value: { value: cur, version } } as never) : next(e)))
+      on('state.set', (_, e, next) => {
+        if (!isDigest(e)) return next(e)
+        const w = e as unknown as { value: Stored; ifVersion?: number }
+        if (w.ifVersion !== undefined && w.ifVersion !== version) return { value: { isSet: false, version } } as never
+        cur = w.value
+        return { value: { isSet: true, version: ++version } } as never
+      })
+      return {
+        rows: (): Row[] => cur?.value.rows ?? [],
+        seed: (v: Stored['value']) => {
+          cur = { shape: 'digest-1', value: v }
+          version++
+        },
+      }
+    }
+    const watch = (on: TestOn) => {
+      const notes: string[] = []
+      on('session.append', (_, e, next) => {
+        notes.push(((e as unknown as { message: { content: { text: string }[] } }).message.content[0]?.text) ?? '')
+        return next(e)
+      })
+      return notes
+    }
+
+    test('a read receipt waits in the session state, and is read in the turn that starts anyway', async ($, on) => {
+      const { mine, settle } = setup(on)
+      on('ui.open', () => ({ value: { isPlaced: true } }))
+      const notes = watch(on)
+      const queue = track(on)
+      await $.session.start({ cwd: '/repos/project', surface: 'desktop', isInteractive: true })
+      await $.turn.start({ turnId: 't1' } as never)
+      await $.turn.complete({ turnId: 't1', answer: 'Migrated the schema; all tests pass.', isAborted: false } as never)
+      await settle()
+      const [r] = mine().requests
+      await $.command.run({ command: 'agents-monitor', args: '' } as never)
+      const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+      await ui.press({ key: `read-${r?.id}` })
+      await settle()
+      // Nothing was added to the conversation: an idle session would have been woken by it.
+      expect(notes).toEqual([])
+      expect(queue.rows().map(x => x.text)).toEqual([expect.stringMatching(/Read receipt: .*Do not reply to this/)])
+      // The next turn starts for its own reasons: the note is the row before it.
+      await $.turn.start({ turnId: 't2' } as never)
+      await settle()
+      expect(notes).toEqual([expect.stringMatching(/Read receipt: .*Do not reply to this/)])
+      expect(queue.rows()).toEqual([])
+      await ui.unmount()
+    })
+
+    test('the coordinator hears free text at once, after the notes before it, in order', { options: { coordinatorFolder: 'coordinator' } }, async ($, on) => {
+      const { settle, written } = setup(on, [], '/repos/coordinator')
+      on('ui.open', () => ({ value: { isPlaced: true } }))
+      const notes = watch(on)
+      const queue = track(on)
+      on('ui.toast', () => ({ value: undefined }))
+      await $.session.start({ cwd: '/repos/coordinator', surface: 'desktop', isInteractive: true })
+      await settle()
+      const bus = Object.keys(written).find(k => k.endsWith('/sessions/me.json'))?.replace(/\/sessions\/me\.json$/, '') ?? ''
+      const ask = '1. Merge #319, then #320?\n   - **Done, clean up:** remove both worktrees and branches.\n   - **Not now:** leave everything as is.'
+      written[`${bus}/sessions/p.json`] = JSON.stringify(
+        status({
+          sessionId: 'p',
+          title: 'project',
+          heartbeat: Date.now(),
+          requests: [
+            { id: 'a1', kind: 'permission', createdAt: Date.now(), tool: 'Bash', command: 'npm test', rule: 'x' },
+            { id: 'a2', kind: 'permission', createdAt: Date.now() + 1, tool: 'Bash', command: 'npm run lint', rule: 'x' },
+            { id: 'q1', kind: 'questions', createdAt: Date.now() + 2, text: ask },
+          ],
+        }),
+      )
+      await $.command.run({ command: 'agents-monitor', args: '' } as never)
+      const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+      await ui.press({ key: 'once-a1' })
+      await ui.press({ key: 'deny-a2' })
+      await settle()
+      expect(notes).toEqual([])
+      expect(queue.rows().map(x => x.seq)).toEqual([1, 2])
+      await ui.press({ key: 'opt-q1-0-0' })
+      await settle()
+      // One row for the two quiet notes, oldest first, then the answer; none kept back.
+      expect(notes.length).toBe(2)
+      expect(notes[0]).toMatch(/^\[coordinator-monitor\] 2 notes from the pane, oldest first[\s\S]*1\. .*request a1[\s\S]*approved once[\s\S]*2\. .*request a2[\s\S]*denied$/)
+      expect(notes[1]).toMatch(/request q1 \(#q1\) of the session titled \\?"project\\?" in the pane: [\s\S]*Done, clean up/)
+      expect(queue.rows()).toEqual([])
+      await ui.unmount()
+    })
+
+    test('notes left from before a restart are delivered once they are old enough, and not before', async ($, on) => {
+      const { settle } = setup(on)
+      const notes = watch(on)
+      const queue = track(on)
+      const minutes = (n: number) => Date.now() - n * 60_000
+      // What a session left in its state: a note from 20 minutes ago and one from 2 minutes ago.
+      queue.seed({ seq: 2, rows: [{ seq: 1, at: minutes(20), text: 'old note' }, { seq: 2, at: minutes(2), text: 'newer note' }] })
+      await $.session.start({ cwd: '/repos/project', surface: 'desktop', isInteractive: true })
+      await settle()
+      expect(notes).toEqual([expect.stringMatching(/^\[coordinator-monitor\] 2 notes from the pane[\s\S]*1\. old note\n\n2\. newer note$/)])
+      expect(queue.rows()).toEqual([])
+      // Younger than the interval, a note stays.
+      queue.seed({ seq: 3, rows: [{ seq: 3, at: minutes(2), text: 'fresh note' }] })
+      await $.session.start({ cwd: '/repos/project', surface: 'desktop', isInteractive: true })
+      await settle()
+      expect(notes.length).toBe(1)
+      expect(queue.rows().map(x => x.text)).toEqual(['fresh note'])
+    })
   })
 
   test("a subagent's request is answered to that agent; when it is gone, the parent is told whose it is", async ($, on) => {
