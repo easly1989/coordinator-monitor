@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.6 — 2026-11-04
+
+- **Digest follow-ups** (#19). Failure paths and one timing change; nothing else moves.
+  - **No duplicate delivery.** If a flush appends its row and the write that removes the notes from the state then fails, the notes are marked delivered in memory and the next flush only cleans up, instead of sending them again.
+  - **Free text never overtakes older notes.** When the flush before a free-text answer fails, the answer is queued behind the notes and goes out with them, in order.
+  - **A note made while a turn runs waits 10 seconds** for the others of its burst, so a run of approvals goes in one row and not one row each. Idle behaviour (`digestMinutes`, the turn that starts anyway, session end) is as before. This is the reading of the lone approval seen at 11:17: the flush woke the session, the turn was running, and the busy path added that note by itself; a note added to a running turn costs no wake, so it was an ordering and noise question, not a cost one.
+  - **`$.state` and restarts: a recorded limit, not a proof.** The engine documents that state survives a hot reload of the plugin's code and says nothing of `--resume` or a restart; this was not run against a real restart. The tests prove the mod re-reads the queue at session start. Treat the queue as surviving a reload, and a normal exit as delivering it (the session-end flush); a crash or kill may lose notes up to `digestMinutes` old, which are only a record. A reload with a removal still pending may repeat that one row.
+
 ## 0.6.5 — 2026-11-04
 
 - **A large shell request opens folded behind a reveal** (#14). A request over 6 lines or 400 characters shows a recap and a reveal button; the full text, drawn exactly as before, is one press away. Short requests show in full as always.

@@ -26,10 +26,12 @@ const PANE = 'coordinator-monitor'
 const TICK_MS = 3000
 // While a card waits, the session looks for its answer this often.
 const FAST_MS = 1000
+// While a turn runs, how long a quiet note waits for the others of its burst before it is added.
+const BUSY_GRACE_MS = 10_000
 const STALE_MS = 15 * 60 * 1000
 const ENDED_KEEP_MS = 60 * 60 * 1000
 /** Published in every status, so the pane can flag a session still running an older copy. Keep in step with plugin.json. */
-const MOD_VERSION = '0.6.5'
+const MOD_VERSION = '0.6.6'
 const SHELL_TOOLS = new Set(['Bash', 'PowerShell'])
 const STEP_TOOL = 'mcp__savvy-progress__step'
 const FLOW_TOOL = 'mcp__savvy-progress__progress'
@@ -95,6 +97,9 @@ const ownPrompts = new Set<string>()
 let digestMs = 0
 // When the oldest queued note was made, or 0 with none: read from the file at start, kept in step by every change to it.
 let pendingSince = 0
+// The last queued note a flush has appended: a note up to it is in the conversation, whatever the state still holds.
+// Reset at session start, when the state is the session's own again (shortcut: a reload with a failed removal pending may repeat that one row).
+let deliveredSeq = 0
 let digestChain: Promise<unknown> = Promise.resolve()
 
 const norm = (p: string): string => p.replace(/\\/g, '/').replace(/\/+$/, '')
@@ -341,31 +346,46 @@ const digestText = (rows: Digest['rows']): string =>
 /**
  * Delivers every queued note as one row, in the order they were made, one flush at a time. A note made
  * while the append runs has a higher `seq` and stays for the next flush; one the append failed on stays too.
+ * Resolves `false` when the queue could not be delivered (the notes are still waiting, in order), so a
+ * caller that must come after them can queue itself behind them instead.
  */
-const flushDigest = async ($: $): Promise<void> => {
-  const run = async (): Promise<void> => {
+const flushDigest = async ($: $): Promise<boolean> => {
+  const run = async (): Promise<boolean> => {
     const d = await read($, digest)
-    const last = d.rows.at(-1)
-    if (!last) {
+    // What an earlier flush already appended, whose removal from the state failed, is in the conversation.
+    const fresh = d.rows.filter(r => r.seq > deliveredSeq)
+    const last = fresh.at(-1)
+    if (last) {
+      const sent = await $.session.append({ message: { type: 'user', content: [{ type: 'text', text: digestText(fresh) }] } }).catch(() => ({ deny: 'failed' }))
+      if (sent.deny) return false
+      deliveredSeq = last.seq
+    }
+    if (!d.rows.length) {
       // Nothing waits: a stale timer must not send the tick to read the state every second.
       pendingSince = 0
-      return
+      return true
     }
-    const sent = await $.session.append({ message: { type: 'user', content: [{ type: 'text', text: digestText(d.rows) }] } }).catch(() => ({ deny: 'failed' }))
-    if (sent.deny) return
+    // Delivered either way: a failed removal is tried again by the next flush, and sends nothing twice.
     await update($, digest, cur => {
-      const rows = cur.rows.filter(r => r.seq > last.seq)
+      const rows = cur.rows.filter(r => r.seq > deliveredSeq)
       pendingSince = rows[0]?.at ?? 0
       return { ...cur, rows }
-    })
+    }).catch(() => undefined)
+    return true
   }
-  digestChain = digestChain.then(run, run).catch(() => undefined)
-  await digestChain
+  const done = digestChain.then(run, run).catch(() => false)
+  digestChain = done
+  return done
 }
 
-/** While a turn runs the notes join it at no cost; idle, they wait for the digest interval since the oldest. */
+/**
+ * While a turn runs the notes join it at no cost, but a note is let age a few seconds first, so the
+ * answers of a burst (the person going down a list of cards) go in one row and not one each; idle, they
+ * wait for the digest interval since the oldest.
+ */
 const flushDue = async ($: $): Promise<void> => {
-  if (pendingSince && (isBusy || Date.now() - pendingSince >= digestMs)) await flushDigest($)
+  const age = Date.now() - pendingSince
+  if (pendingSince && (isBusy ? age >= BUSY_GRACE_MS : age >= digestMs)) await flushDigest($)
 }
 
 /** `text` as the object `askWhat` wrote it from, or `null` when it is anything else, written as it would be. */
@@ -667,11 +687,10 @@ const answer = async ($: $, target: SessionStatus, req: MonitorRequest, kind: An
   // It carries nothing the other session wrote but its title, quoted: no question, no report text.
   // A dismiss tells no one, so it leaves no record either.
   // A free-text answer is heard at once, after the notes before it; an approval, a denial or a receipt waits for the digest.
+  // If the notes before it cannot be delivered it waits behind them, so it never comes first.
   if (target.sessionId !== sessionId && kind !== 'dismiss') {
-    if (kind === 'answer') {
-      await flushDigest($)
-      await appendNote($, answeredNote(target, req.id, kind, text))
-    } else await queueNote($, answeredNote(target, req.id, kind, text))
+    if (kind === 'answer' && (await flushDigest($))) await appendNote($, answeredNote(target, req.id, kind, text))
+    else await queueNote($, answeredNote(target, req.id, kind, text))
   }
   $.ui.toast(S.sentToast(target.title))
   // Read again now: the session's next status shows the card gone sooner than the next tick would.
@@ -865,6 +884,7 @@ export const register: Register = (on, options) => {
     const minutes = Number(options.digestMinutes ?? 15)
     digestMs = Number.isFinite(minutes) && minutes > 0 ? Math.min(minutes, 240) * 60_000 : 0
     // Notes queued before a reload or a restart are still owed: read, so the timer counts from the oldest.
+    deliveredSeq = 0
     pendingSince = (await read($, digest).catch(() => undefined))?.rows[0]?.at ?? 0
     const rulesFile = await readJson<RulesFile>($, `${base}/rules.json`)
     if (!rulesFile && (await $.fs.exists(`${base}/rules.json`).catch(() => false))) $.ui.toast(S.rulesBroken(`${base}/rules.json`))
