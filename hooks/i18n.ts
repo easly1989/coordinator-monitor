@@ -82,7 +82,7 @@ const en = {
   steps: (n: number) => `${n} steps`,
   fullRequest: 'Full request (what you approve)',
   blockLabel: (kind: 'file' | 'input' | 'inline' | 'string', to: string, lines: number, runBy?: string, isRunning?: boolean, isPiped?: boolean) =>
-    `${kind === 'file' ? `→ file ${to}` : kind === 'inline' ? `inline ${to} script` : kind === 'string' ? `here-string ${to}`.trim() : `→ input of ${to}`} · ${lines} ${lines === 1 ? 'line' : 'lines'}${isRunning ? ' · runs the $( ) in it now' : ''}${runBy ? ` · run later by ${runBy}` : isPiped ? ' · may run later (piped to a later command)' : ''}`,
+    `${kind === 'file' ? `→ file ${to}` : kind === 'inline' ? `inline ${to} script` : kind === 'string' ? `here-string ${to}`.trim() : `→ input of ${to}`} · ${lines} ${lines === 1 ? 'line' : 'lines'}${isRunning ? ' · runs the $( ) in it now' : ''}${runBy ? ` · run later by ${runBy}` : isPiped ? ' · may run later (a later command may run it)' : ''}`,
   followedBy: (text: string) => `followed by: ${text}`,
   showRequest: 'Show full request',
   hideRequest: 'Hide full request',
@@ -192,7 +192,7 @@ const it: typeof en = {
   steps: n => `${n} passi`,
   fullRequest: 'Richiesta completa (quello che approvi)',
   blockLabel: (kind, to, lines, runBy, isRunning, isPiped) =>
-    `${kind === 'file' ? `→ file ${to}` : kind === 'inline' ? `script ${to} in linea` : kind === 'string' ? `here-string ${to}`.trim() : `→ input di ${to}`} · ${lines} ${lines === 1 ? 'riga' : 'righe'}${isRunning ? ' · esegue subito i $( ) che contiene' : ''}${runBy ? ` · eseguito poi da ${runBy}` : isPiped ? ' · potrebbe essere eseguito poi (passato a un comando in pipe)' : ''}`,
+    `${kind === 'file' ? `→ file ${to}` : kind === 'inline' ? `script ${to} in linea` : kind === 'string' ? `here-string ${to}`.trim() : `→ input di ${to}`} · ${lines} ${lines === 1 ? 'riga' : 'righe'}${isRunning ? ' · esegue subito i $( ) che contiene' : ''}${runBy ? ` · eseguito poi da ${runBy}` : isPiped ? ' · potrebbe essere eseguito poi (da un comando successivo)' : ''}`,
   followedBy: text => `seguito da: ${text}`,
   showRequest: 'Mostra richiesta completa',
   hideRequest: 'Nascondi richiesta completa',
