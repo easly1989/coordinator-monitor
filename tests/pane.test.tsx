@@ -187,7 +187,7 @@ test('the pane draws sessions, workers and every kind of request, on every surfa
   expect(mine.title).toBe('Coordinatore')
   expect(mine.folder).toBe('coordinator')
   expect(mine.effort).toBe('high')
-  expect(mine.version).toBe('0.6.4')
+  expect(mine.version).toBe('0.6.5')
 
   for (const surface of ['terminal', 'desktop', 'vscode', 'mobile'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface })
@@ -252,7 +252,7 @@ test('the pane draws sessions, workers and every kind of request, on every surfa
   // approved as it is; its text is one press away.
   expect(await ui.find({ type: 'Code', text: /chromium/ })).toBeFalsy()
   expect(await ui.find({ type: 'Text', text: /^Touches \(always shown, read from the command\)$/ })).toBeTruthy()
-  for (const line of [/^writes {2}\$S\/shots\.js$/, /^goes to {2}\$S$/, /^url {2}https:\/\/example\.org$/, /^not read {2}‹1› \$S\/shots\.js · 2 lines$/])
+  for (const line of [/^writes {2}\$S\/shots\.js$/, /^goes to {2}\$S$/, /^url {2}https:\/\/example\.org$/, /^code not read, open the full request to read it {2}‹1› \$S\/shots\.js · 2 lines$/])
     expect(await ui.find({ type: 'Text', text: line })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /^timeout: 300000$/ })).toBeTruthy()
   expect(await ui.find({ key: 'once-p6' })).toBeTruthy()

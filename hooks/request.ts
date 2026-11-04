@@ -470,6 +470,25 @@ const touchesIn = (text: string): Touch[] => {
     const isAppend = /Add-Content|ac$/i.test(m[0]) || w.some(x => /^-Append$/i.test(x))
     if (to) out.push({ kind: isAppend ? 'append' : 'write', target: to })
   })
+  // Copies and moves write their last argument; a move also takes the others away.
+  each(cmd('cp|mv|install|ln'), (m, w) => {
+    const files = args(w)
+    const to = files.at(-1)
+    if (to && files.length > 1) {
+      out.push({ kind: 'write', target: to })
+      if (/mv$/i.test(m[0])) for (const from of files.slice(0, -1)) out.push({ kind: 'rm', target: from })
+    }
+  })
+  each(cmd('touch|mkdir|truncate|chmod|chown'), (m, w) => {
+    const files = /chmod|chown/i.test(m[0]) ? args(w).slice(1) : args(w)
+    for (const to of files) out.push({ kind: 'write', target: to })
+  })
+  each(cmd('dd'), (_, w) => {
+    for (const x of w) if (x.startsWith('of=')) out.push({ kind: 'write', target: x.slice(3) })
+  })
+  each(cmd('sed|perl'), (_, w) => {
+    if (w.some(x => /^-[A-Za-z]*i/.test(x)) && args(w).length > 1) out.push({ kind: 'write', target: args(w).at(-1) ?? '' })
+  })
   each(cmd('curl|wget'), (_, w) => {
     const at = w.findIndex(x => /^(-o|--output|-O|--output-document)$/.test(x))
     if (at >= 0 && w[at + 1] && w[at + 1] !== '-') out.push({ kind: 'write', target: w[at + 1] ?? '' })

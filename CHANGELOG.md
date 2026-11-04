@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.5 — 2026-11-04
+
+- **A large shell request opens folded behind a reveal** (#14). A request over 6 lines or 400 characters shows a recap and a reveal button; the full text, drawn exactly as before, is one press away. Short requests show in full as always.
+  - **The recap is built by the mod from the command alone**, never from model text and never from the request's own description: the reading aid's steps, in plain words, each step whole.
+  - **Always shown, folded or not:** a "Touches" list read from the whole command, block bodies included: where it goes (`cd`), what it deletes (`rm`, and the source of a `mv`), what it writes (`>`, `tee`, `cp`/`mv` destinations, `touch`, `dd of=`, `sed -i`, `curl -o`, the file a here-doc writes) with appends (`>>`, `tee -a`) told apart, URLs, ssh/scp hosts and git remotes. A block of code in another language (python, node) is named as "code not read": its body shows on reveal. The risk chips, the protected-rule line and the size caption (`17 lines · 1806 characters · 1 block`) stay too.
+  - **The approve and deny buttons work folded.** Where the reading aid gives up (a here-string it cannot place, a comment, a continuation, over 40 steps) the card opens whole, with no recap, as before.
+- **Two follow-ups to the quiet-notes digest** (#17 review). The order note a session gets is now drawn through `visible()` and fenced, as the text of the bus answers file is data and now sits inside numbered digest rows. The wake timer is reset when a flush finds nothing, so a stale value no longer makes the tick read the state every second.
+
 ## 0.6.4 — 2026-11-04
 
 - **Quiet pane answers no longer wake an idle session** (#16). A note added to an idle session wakes it, and a wake re-reads the whole conversation. So the notes that are only a record now wait and go together:

@@ -29,7 +29,7 @@ const FAST_MS = 1000
 const STALE_MS = 15 * 60 * 1000
 const ENDED_KEEP_MS = 60 * 60 * 1000
 /** Published in every status, so the pane can flag a session still running an older copy. Keep in step with plugin.json. */
-const MOD_VERSION = '0.6.4'
+const MOD_VERSION = '0.6.5'
 const SHELL_TOOLS = new Set(['Bash', 'PowerShell'])
 const STEP_TOOL = 'mcp__savvy-progress__step'
 const FLOW_TOOL = 'mcp__savvy-progress__progress'
@@ -243,7 +243,8 @@ const applyAnswers = async ($: $): Promise<void> => {
       isMine = !cur.applied.includes(a.requestId)
       return isMine ? { ...cur, applied: [...cur.applied, a.requestId].slice(-300) } : cur
     })
-    if (isMine) await queueNote($, S.orderMsg(a.text ?? ''))
+    // The list is the bus answers file's text, and sits inside a numbered digest row: data, fenced.
+    if (isMine) await queueNote($, S.orderMsg(fence(visible(a.text ?? ''))))
   }
   // An app ask, and a protected command held in its call, are answered by the hook that waits on them.
   const fresh = answers.filter(
@@ -345,7 +346,11 @@ const flushDigest = async ($: $): Promise<void> => {
   const run = async (): Promise<void> => {
     const d = await read($, digest)
     const last = d.rows.at(-1)
-    if (!last) return
+    if (!last) {
+      // Nothing waits: a stale timer must not send the tick to read the state every second.
+      pendingSince = 0
+      return
+    }
     const sent = await $.session.append({ message: { type: 'user', content: [{ type: 'text', text: digestText(d.rows) }] } }).catch(() => ({ deny: 'failed' }))
     if (sent.deny) return
     await update($, digest, cur => {

@@ -247,6 +247,19 @@ test('what a request touches is read from all of it: inside quotes, $( ), sudo, 
   // A remote command in quotes: its host, and what it deletes there.
   expect(of('ssh -p 2222 root@demo.test "pct exec 180 -- rm -rf /var/x"')).toEqual(['rm /var/x', 'host demo.test'])
   expect(of('scp ./a.txt deploy@files.test:/srv/ && rsync -a b/ backup:/data')).toEqual(['host files.test', 'host backup'])
+  // Copies, moves, touches and in-place edits write; a move also takes the source away.
+  expect(of('cp a.txt b.txt && mv old.log /var/arch/ && touch t1 t2 && dd if=/dev/zero of=img.bin bs=1 count=1 && sed -i s/a/b/ conf.ini && chmod +x run.sh')).toEqual([
+    'write b.txt',
+    'write /var/arch/',
+    'rm old.log',
+    'write t1',
+    'write t2',
+    'write run.sh',
+    'write img.bin',
+    'write conf.ini',
+  ])
+  // An arrow or a duplicated descriptor in code is no redirection.
+  expect(of('node -e "const f = x => x + 1; console.log(f(1))" 2>&1 | tail -1; echo done >&2; ls > /dev/null')).toEqual([])
   // Overwrites and appends apart; a duplicated descriptor or /dev/null is no file.
   expect(of('make > build.log 2>&1 && echo ok >> notes.md && ls 2>/dev/null | tee -a all.log | tee one.log')).toEqual([
     'write build.log',
