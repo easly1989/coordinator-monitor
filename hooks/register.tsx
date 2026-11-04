@@ -29,7 +29,7 @@ const FAST_MS = 1000
 const STALE_MS = 15 * 60 * 1000
 const ENDED_KEEP_MS = 60 * 60 * 1000
 /** Published in every status, so the pane can flag a session still running an older copy. Keep in step with plugin.json. */
-const MOD_VERSION = '0.6.2'
+const MOD_VERSION = '0.6.3'
 const SHELL_TOOLS = new Set(['Bash', 'PowerShell'])
 const STEP_TOOL = 'mcp__savvy-progress__step'
 const FLOW_TOOL = 'mcp__savvy-progress__progress'
@@ -1280,17 +1280,34 @@ export const register: Register = (on, options) => {
         // A shell command is drawn in its parts, every character of it: shell text, and each block it
         // hands on whole (a here-doc, a here-string, a long inline script) under a label saying where it goes.
         // Characters that hide or reorder text are drawn as codes, here and in the aid.
+        const segs = isShell ? segmentsOf(cmd, shellKind) : []
+        // Only what closes a block is drawn under it: an inline script's closing quotes, a here-string's
+        // `'@`, a here-doc's end word (the line after its body, by how it is cut). Anything else may run
+        // (`"|sh`, `'@ | iex`) and keeps a box of its own.
+        const tailOf = (k: number): string | null => {
+          const blk = segs[k]
+          const next = segs[k + 1]
+          const text = next?.kind === 'shell' ? next.text.replace(/\n$/, '') : ''
+          if (blk?.kind !== 'block' || text.length >= 10) return null
+          const closer = blk.isInline ? /^\s*["')]+\s*$/ : blk.isString ? /^\s*["']@\s*$/ : /^\t*[A-Za-z_]\w*$/
+          return closer.test(text) ? text : null
+        }
         const raw = isShell ? (
           <Box flexDirection="column" gap="xs">
-            {segmentsOf(cmd, shellKind).map((sg, k) =>
+            {segs.map((sg, k) =>
               sg.kind === 'shell' ? (
-                sg.text.trim() ? <Code key={`raw-${r.id}-${k}`} source={visible(sg.text.replace(/\n$/, ''))} wrap="wrap" language={shellKind} /> : null
+                sg.text.trim() && !tailOf(k - 1) ? <Code key={`raw-${r.id}-${k}`} source={visible(sg.text.replace(/\n$/, ''))} wrap="wrap" language={shellKind} /> : null
               ) : (
                 <Box key={`blk-${r.id}-${k}`} flexDirection="column" gap="xs" paddingLeft="sm" borderStyle="round" borderColor={isTerm ? undefined : CARD_LINE} borderDimColor={isTerm}>
                   <Text size="caption" color="subtle">
-                    {visible(S.blockLabel(sg.isInline ? 'inline' : sg.isString ? 'string' : sg.path ? 'file' : 'input', sg.to, sg.lines, sg.runBy, sg.isRunning))}
+                    {visible(S.blockLabel(sg.isInline ? 'inline' : sg.isString ? 'string' : sg.path ? 'file' : 'input', sg.to, sg.lines, sg.runBy, sg.isRunning, sg.isPiped))}
                   </Text>
                   <Code key={`raw-${r.id}-${k}`} source={visible(sg.text.replace(/\n$/, ''))} wrap="wrap" language={sg.language} path={sg.path} startLine={1} />
+                  {tailOf(k) !== null ? (
+                    <Text size="caption" color="subtle">
+                      {visible(S.followedBy(tailOf(k) ?? ''))}
+                    </Text>
+                  ) : null}
                 </Box>
               ),
             )}
