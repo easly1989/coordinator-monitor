@@ -101,7 +101,7 @@ const splitSteps = (cmd: string, shell: Shell): { text: string; isPiped: boolean
  */
 export type Segment =
   | { kind: 'shell'; text: string }
-  | { kind: 'block'; text: string; to: string; lines: number; isInline?: boolean; isString?: boolean; isRunning?: boolean; language?: string; path?: string; runBy?: string }
+  | { kind: 'block'; text: string; to: string; lines: number; isInline?: boolean; isString?: boolean; isRunning?: boolean; language?: string; path?: string; runBy?: string; isPiped?: boolean }
 
 // A here-doc opener: `<<` or `<<-`, the word, quoted or not, then what may end a word (no CR, which bash keeps in it).
 const DOC_OPENER = /<<(-?)[ \t]*(['"]?)([A-Za-z_]\w*)\2(?=[ \t;&|<>)]|$)/
@@ -143,7 +143,7 @@ const programOf = (step: string): string =>
  * The first command in `text` that uses the file `base` and may run it: its program, `the shell` when
  * it is the file itself, or the program a reader of it pipes into (`cat f | bash`).
  */
-const laterRunner = (text: string, base: string): string | undefined => {
+const runnerOf = (text: string, base: string): string | undefined => {
   const esc = base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
   // Steps and the separators between them: a `|` hands the step's output to the next.
   const parts = text.split(/(\n|&&|\|\||[;&|])/)
@@ -161,6 +161,20 @@ const laterRunner = (text: string, base: string): string | undefined => {
     }
   }
   return undefined
+}
+
+/**
+ * How `text` may use the file `base` later. A runner it can name: `runBy`. Otherwise, fail closed
+ * rather than parse smarter: a `|` anywhere after the first mention of the file may carry it to a
+ * program (`2>&1 |`, `|&`, a quoted `;`, a line break before the next step), so the block is `isPiped`.
+ * A false "may run" costs a word; a missed one costs the label.
+ */
+const laterUse = (text: string, base: string): { runBy?: string; isPiped?: boolean } => {
+  const runBy = runnerOf(text, base)
+  if (runBy) return { runBy }
+  const esc = base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const at = new RegExp(`(^|[\\s/'"=<>])${esc}(?=$|[\\s'";&|)<>])`).exec(text)?.index
+  return at !== undefined && text.slice(at).includes('|') ? { isPiped: true } : {}
 }
 
 /**
@@ -226,8 +240,8 @@ export const segmentsOf = (cmd: string, shell: Shell = 'bash'): Segment[] => {
     // that use may run it. Fail closed: any command but a known reader of files counts as running it.
     const base = t.path?.split(/[\\/]/).pop() ?? ''
     const op = DOC_OPENER.exec(line)
-    const runBy = base ? laterRunner(`${line.slice(op ? op.index + op[0].length : line.length)}\n${cmd.slice(bodyEnd)}`, base) : undefined
-    out.push({ kind: 'block', text: body, lines: lineCount(body.replace(/\n$/, '')), ...t, ...(runBy ? { runBy, language: t.language ?? LANGUAGE[runBy] } : {}) })
+    const later = base ? laterUse(`${line.slice(op ? op.index + op[0].length : line.length)}\n${cmd.slice(bodyEnd)}`, base) : {}
+    out.push({ kind: 'block', text: body, lines: lineCount(body.replace(/\n$/, '')), ...t, ...(later.runBy ? { runBy: later.runBy, language: t.language ?? LANGUAGE[later.runBy] } : {}), ...(later.isPiped ? { isPiped: true } : {}) })
     from = bodyEnd
     i = end - 1
   }
@@ -295,7 +309,7 @@ export const describeStep = (step: string, blocks: Segment[]): string => {
   }
   const size = (k: string | undefined) => {
     const b = block(k)
-    return b ? ` (${b.lines} ${b.lines === 1 ? 'line' : 'lines'}${b.isRunning ? ', runs the $( ) in it now' : ''}${b.runBy ? `, run later by ${b.runBy}` : ''})` : ''
+    return b ? ` (${b.lines} ${b.lines === 1 ? 'line' : 'lines'}${b.isRunning ? ', runs the $( ) in it now' : ''}${b.runBy ? `, run later by ${b.runBy}` : b.isPiped ? ', may run later (piped to a later command)' : ''})` : ''
   }
   const env = /^((?:[A-Za-z_]\w*=\S*\s+)+)(\S.*)$/.exec(step)
   if (env?.[1] && env[2]) return `${describeStep(env[2], blocks)} (with ${env[1].trim()})`

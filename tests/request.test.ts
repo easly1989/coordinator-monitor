@@ -98,7 +98,30 @@ test('a block says what runs: substitutions in an unquoted body, a pipe after th
   expect(blockOf("cat > g3.sh <<'EOF'\necho hi\nEOF\ncat g3.sh | bash")).toMatchObject({ runBy: 'bash' })
   expect(blockOf("cat > g5.sh <<'EOF'\necho hi\nEOF\ntail -n +1 g5.sh | grep -v x | sh")).toMatchObject({ runBy: 'sh' })
   expect(blockOf("cat > g4.sh <<'EOF'\necho hi\nEOF\n< g4.sh bash")).toMatchObject({ runBy: 'bash' })
+  // Fail closed: a `|` anywhere after the file's mention may carry it on, so it is marked even when no
+  // runner can be named. A reader piping into a reader only gets that mark, never a made-up runner.
+  expect(blockOf("cat > g6.txt <<'EOF'\nhi\nEOF\ncat g6.txt | wc -l")).toMatchObject({ isPiped: true })
   expect(blockOf("cat > g6.txt <<'EOF'\nhi\nEOF\ncat g6.txt | wc -l")).not.toMatchObject({ runBy: expect.anything() })
+  // No pipe after the mention, no mark: a pipe before it does not count.
+  expect(blockOf("cat > g6.txt <<'EOF'\nhi\nEOF\necho x | wc -c; wc -l g6.txt")).not.toMatchObject({ isPiped: true })
+  // Splits the runner hides from a smarter parse: a `&` in `2>&1` or `|&`, a break before the next
+  // step, a `;` or `&` in quotes, a `|` in a substitution. Each is marked, named or not.
+  for (const after of [
+    'cat g.sh 2>&1 | bash',
+    'cat g.sh |& bash',
+    'cat g.sh | grep -v x |& sh',
+    'cat g.sh |\nbash',
+    'cat g.sh \\\n| bash',
+    'cat g.sh ";" | bash',
+    "cat g.sh '&' | bash",
+    'echo "$(cat g.sh;)" | bash',
+  ]) {
+    const b = blockOf(`cat > g.sh <<'EOF'\necho hi\nEOF\n${after}`)
+    expect(b?.kind === 'block' && !!(b.runBy || b.isPiped), after).toBe(true)
+  }
+  // The aid says so in words when no runner is named.
+  const aid = viewOf('Bash', "cat > g.sh <<'EOF'\necho hi\nEOF\ncat g.sh 2>&1 | bash")
+  expect(aid?.kind === 'shell' && aid.steps[0]).toContain('may run later (piped to a later command)')
   // #12: an interpreter fed the block, its output redirected: one clear step.
   const fed = viewOf('Bash', "bash > f <<'EOF'\necho hi\nEOF")
   expect(fed?.kind === 'shell' ? fed.steps : []).toEqual(['runs bash on the block below (1 line), output to f'])
