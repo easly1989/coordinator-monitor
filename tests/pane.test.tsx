@@ -933,6 +933,63 @@ describe('a session reporting', () => {
       await ui.unmount()
     })
 
+    test('free text that could not be added is tried again on the next tick, not after the interval (#19)', { options: { coordinatorFolder: 'coordinator' } }, async ($, on) => {
+      const { settle, written } = setup(on, [], '/repos/coordinator')
+      on('ui.open', () => ({ value: { isPlaced: true } }))
+      let isDenied = true
+      const notes = watch(on, () => isDenied)
+      const queue = track(on)
+      on('ui.toast', () => ({ value: undefined }))
+      await $.session.start({ cwd: '/repos/coordinator', surface: 'desktop', isInteractive: true })
+      await settle()
+      const bus = Object.keys(written).find(k => k.endsWith('/sessions/me.json'))?.replace(/\/sessions\/me\.json$/, '') ?? ''
+      written[`${bus}/sessions/p.json`] = JSON.stringify(
+        status({ sessionId: 'p', title: 'project', heartbeat: Date.now(), requests: [{ id: 'q1', kind: 'questions', createdAt: Date.now(), text: '1. Ship it?\n   - **Yes:** ship.\n   - **No:** wait.' }] }),
+      )
+      await $.command.run({ command: 'agents-monitor', args: '' } as never)
+      const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+      // Nothing waits before it, and the append itself is refused: the record is queued, not lost.
+      await ui.press({ key: 'opt-q1-0-0' })
+      await settle()
+      expect(notes).toEqual([])
+      expect(queue.rows().map(x => x.text)).toEqual([expect.stringMatching(/request q1/)])
+      // A tick while it is still refused changes nothing; once allowed, the next tick delivers it, a young note though it is.
+      await $.session.start({ cwd: '/repos/coordinator', surface: 'desktop', isInteractive: true })
+      await settle()
+      expect(notes).toEqual([])
+      isDenied = false
+      await $.session.start({ cwd: '/repos/coordinator', surface: 'desktop', isInteractive: true })
+      await settle()
+      expect(notes).toEqual([expect.stringMatching(/request q1/)])
+      expect(queue.rows()).toEqual([])
+      await ui.unmount()
+    })
+
+    test("a session's answer prompt waits behind notes that could not be delivered (#19)", async ($, on) => {
+      const { mine, settle, written, answersFile, prompts } = setup(on)
+      let isDenied = true
+      const notes = watch(on, () => isDenied)
+      const queue = track(on)
+      on('ui.open', () => ({ value: { isPlaced: true } }))
+      queue.seed({ seq: 1, rows: [{ seq: 1, at: Date.now() - 1000, text: 'earlier approval' }] })
+      await $.session.start({ cwd: '/repos/project', surface: 'desktop', isInteractive: true })
+      await $.turn.start({ turnId: 't1' } as never)
+      await $.turn.complete({ turnId: 't1', answer: 'Migrated the schema; all tests pass.', isAborted: false } as never)
+      await settle()
+      const [r] = mine().requests
+      written[answersFile()] = JSON.stringify([{ requestId: r?.id, at: Date.now(), kind: 'answer', text: 'go ahead' }])
+      await $.session.start({ cwd: '/repos/project', surface: 'desktop', isInteractive: true })
+      await settle()
+      // Not submitted ahead of the note: both wait, in order.
+      expect(prompts).toEqual([])
+      expect(queue.rows().map(x => x.text)).toEqual(['earlier approval', expect.stringMatching(/go ahead/)])
+      isDenied = false
+      await $.session.start({ cwd: '/repos/project', surface: 'desktop', isInteractive: true })
+      await settle()
+      expect(notes).toEqual([expect.stringMatching(/2 notes from the pane[\s\S]*1\. earlier approval\n\n2\. [\s\S]*go ahead/)])
+      expect(queue.rows()).toEqual([])
+    })
+
     test('while a turn runs a young note waits for the others of its burst, an older one is added (#19)', async ($, on) => {
       const { settle } = setup(on)
       const notes = watch(on)

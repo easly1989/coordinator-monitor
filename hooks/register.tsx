@@ -100,6 +100,8 @@ let pendingSince = 0
 // The last queued note a flush has appended: a note up to it is in the conversation, whatever the state still holds.
 // Reset at session start, when the state is the session's own again (shortcut: a reload with a failed removal pending may repeat that one row).
 let deliveredSeq = 0
+// Set while a note that must be heard at once is queued: the tick delivers without waiting for the interval.
+let isUrgent = false
 let digestChain: Promise<unknown> = Promise.resolve()
 
 const norm = (p: string): string => p.replace(/\\/g, '/').replace(/\/+$/, '')
@@ -294,8 +296,11 @@ const applyAnswers = async ($: $): Promise<void> => {
       if (sent.isDelivered) continue
     }
     const text = p.agentId ? S.forAgentMsg(await agentLabel($, p.agentId), p.text) : p.text
-    // Heard at once, and after the notes that came before it.
-    await flushDigest($)
+    // Heard at once, and after the notes that came before it: if they cannot be delivered, it waits behind them.
+    if (!(await flushDigest($))) {
+      await queueUrgent($, text)
+      continue
+    }
     ownPrompts.add(text)
     await $.prompt.submit({ text, asUser: true })
   }
@@ -313,8 +318,9 @@ const agentLabel = async ($: $, id: string): Promise<string> => {
  * is idle it wakes it all the same, and a wake re-reads the whole conversation: so the quiet notes go
  * through `queueNote`, and only what must be heard at once goes through here.
  */
-const appendNote = async ($: $, text: string): Promise<void> => {
-  await $.session.append({ message: { type: 'user', content: [{ type: 'text', text }] } }).catch(() => undefined)
+const appendNote = async ($: $, text: string): Promise<boolean> => {
+  const sent = await $.session.append({ message: { type: 'user', content: [{ type: 'text', text }] } }).catch(() => ({ deny: 'failed' }))
+  return !sent.deny
 }
 
 /**
@@ -326,15 +332,27 @@ const digest = atom({ plugin: 'coordinator-monitor', key: 'digest' } as const, {
 
 /** A quiet note, kept until the next time the model is going to read anyway (see `flushDigest`). */
 const queueNote = async ($: $, text: string): Promise<void> => {
-  if (!digestMs) return appendNote($, text)
+  if (!digestMs) {
+    await appendNote($, text)
+    return
+  }
   const at = Date.now()
   // A digest that cannot be kept must not lose the note: it goes out now, as it did before.
   await update($, digest, d => ({ seq: d.seq + 1, rows: [...d.rows, { seq: d.seq + 1, at, text }] })).then(
     () => {
       pendingSince = pendingSince || at
     },
-    () => appendNote($, text),
+    async () => void (await appendNote($, text)),
   )
+}
+
+/**
+ * A note that must be heard at once but cannot go out now (a refused append, notes before it still
+ * waiting): queued, and the next tick tries again instead of waiting for `digestMinutes`.
+ */
+const queueUrgent = async ($: $, text: string): Promise<void> => {
+  await queueNote($, text)
+  isUrgent = true
 }
 
 /** The queued notes as one row, oldest first; a single note reads as itself. */
@@ -363,12 +381,14 @@ const flushDigest = async ($: $): Promise<boolean> => {
     if (!d.rows.length) {
       // Nothing waits: a stale timer must not send the tick to read the state every second.
       pendingSince = 0
+      isUrgent = false
       return true
     }
     // Delivered either way: a failed removal is tried again by the next flush, and sends nothing twice.
     await update($, digest, cur => {
       const rows = cur.rows.filter(r => r.seq > deliveredSeq)
       pendingSince = rows[0]?.at ?? 0
+      if (!rows.length) isUrgent = false
       return { ...cur, rows }
     }).catch(() => undefined)
     return true
@@ -381,11 +401,12 @@ const flushDigest = async ($: $): Promise<boolean> => {
 /**
  * While a turn runs the notes join it at no cost, but a note is let age a few seconds first, so the
  * answers of a burst (the person going down a list of cards) go in one row and not one each; idle, they
- * wait for the digest interval since the oldest.
+ * wait for the digest interval since the oldest. A note that must be heard at once (`isUrgent`) is tried
+ * on every tick until it is out.
  */
 const flushDue = async ($: $): Promise<void> => {
   const age = Date.now() - pendingSince
-  if (pendingSince && (isBusy ? age >= BUSY_GRACE_MS : age >= digestMs)) await flushDigest($)
+  if (pendingSince && (isUrgent || (isBusy ? age >= BUSY_GRACE_MS : age >= digestMs))) await flushDigest($)
 }
 
 /** `text` as the object `askWhat` wrote it from, or `null` when it is anything else, written as it would be. */
@@ -689,8 +710,9 @@ const answer = async ($: $, target: SessionStatus, req: MonitorRequest, kind: An
   // A free-text answer is heard at once, after the notes before it; an approval, a denial or a receipt waits for the digest.
   // If the notes before it cannot be delivered it waits behind them, so it never comes first.
   if (target.sessionId !== sessionId && kind !== 'dismiss') {
-    if (kind === 'answer' && (await flushDigest($))) await appendNote($, answeredNote(target, req.id, kind, text))
-    else await queueNote($, answeredNote(target, req.id, kind, text))
+    const note = answeredNote(target, req.id, kind, text)
+    if (kind !== 'answer') await queueNote($, note)
+    else if (!((await flushDigest($)) && (await appendNote($, note)))) await queueUrgent($, note)
   }
   $.ui.toast(S.sentToast(target.title))
   // Read again now: the session's next status shows the card gone sooner than the next tick would.
