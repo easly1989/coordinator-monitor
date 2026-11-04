@@ -50,6 +50,23 @@ const HEREDOC_ASK = JSON.stringify(
   2,
 )
 
+// A large ask whose only block is a file of data: nothing in it can run, so its card may open folded.
+const FOLD_ASK = JSON.stringify(
+  {
+    command: [
+      'S=C:/tmp/demo',
+      "cat > $S/cfg.json <<'EOF'",
+      '{"url": "https://example.org/feed"}',
+      'EOF',
+      'cd $S && ls',
+      ...Array.from({ length: 6 }, (_, n) => `echo "line ${n}"`),
+    ].join('\n'),
+    timeout: 60000,
+  },
+  null,
+  2,
+)
+
 // Two sessions publishing: one waits on a permission and a choice, one runs a worker.
 const FILES: Record<string, SessionStatus> = {
   'a.json': status({
@@ -100,6 +117,9 @@ const FILES: Record<string, SessionStatus> = {
       // A large command whose split is not certain (a here-string), with a hidden reversal: no summary, the
       // whole command shown, the reversal as a code.
       { id: 'p6', kind: 'ask', createdAt: now + 8, tool: 'Bash', command: HEREDOC_ASK, isInput: true },
+      { id: 'p13', kind: 'ask', createdAt: now + 15, tool: 'Bash', command: FOLD_ASK, isInput: true },
+      // An explanation is the request's own text: drawn through visible() like every other.
+      { id: 'p14', kind: 'permission', createdAt: now + 16, tool: 'Bash', command: 'npm run lint', rule: 'x', explain: `Runs the linter${String.fromCharCode(0x202e)}gnp` },
       // A bare command that looks like JSON with two `command` keys: it is a command, never decoded,
       // whatever the request claims about it.
       { id: 'p7', kind: 'ask', createdAt: now + 9, tool: 'Bash', command: '{"command":"$(evil)","command":"ls -la"}' },
@@ -248,18 +268,22 @@ test('the pane draws sessions, workers and every kind of request, on every surfa
   // An app ask's JSON is read as what it is: the command itself, its here-doc a labelled block, the
   // other fields as lines, a reading aid in plain words above. No JSON escapes are left to read.
   expect(await ui.find({ type: 'Code', text: /"command": "S=/ })).toBeFalsy()
-  // Over 6 lines it opens folded: the recap, what it touches, its size and its fields stay, and it can be
-  // approved as it is; its text is one press away.
-  expect(await ui.find({ type: 'Code', text: /chromium/ })).toBeFalsy()
+  // Over 6 lines, with nothing in it that can run (p13: a file of data), it opens folded: the recap, what it
+  // touches, its size and its fields stay, and it can be approved as it is; its text is one press away.
+  expect(await ui.find({ type: 'Code', text: /example\.org\/feed/ })).toBeFalsy()
   expect(await ui.find({ type: 'Text', text: /^Touches \(always shown, read from the command\)$/ })).toBeTruthy()
-  for (const line of [/^writes {2}\$S\/shots\.js$/, /^goes to {2}\$S$/, /^url {2}https:\/\/example\.org$/, /^code not read, open the full request to read it {2}‹1› \$S\/shots\.js · 2 lines$/])
+  for (const line of [/^writes {2}\$S\/cfg\.json$/, /^goes to {2}\$S$/, /^url {2}https:\/\/example\.org\/feed$/])
     expect(await ui.find({ type: 'Text', text: line })).toBeTruthy()
-  expect(await ui.find({ type: 'Text', text: /^timeout: 300000$/ })).toBeTruthy()
-  expect(await ui.find({ key: 'once-p6' })).toBeTruthy()
-  await ui.press({ key: 'full-p6' })
-  // Short, or read by no aid (p5's here-string): whole, as before, with nothing to unfold.
-  expect(await ui.find({ key: 'full-p1' })).toBeFalsy()
-  expect(await ui.find({ key: 'full-p5' })).toBeFalsy()
+  expect(await ui.find({ type: 'Text', text: /^timeout: 60000$/ })).toBeTruthy()
+  expect(await ui.find({ key: 'once-p13' })).toBeTruthy()
+  await ui.press({ key: 'full-p13' })
+  expect(await ui.find({ type: 'Code', text: /example\.org\/feed/ })).toBeTruthy()
+  // A block that runs keeps the card open, however large (p6: a script run later by node): its body is
+  // on screen at once and there is nothing to unfold. So with short asks, and a request the aid gave up on.
+  expect(await ui.find({ type: 'Code', text: /chromium/ })).toBeTruthy()
+  for (const id of ['p6', 'p1', 'p5']) expect(await ui.find({ key: `full-${id}` })).toBeFalsy()
+  // An explanation is drawn through visible(): a reversal shows as its code.
+  expect(await ui.find({ type: 'Text', text: /^Runs the linter\\u202Egnp$/ })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /^→ file \$S\/shots\.js · 2 lines · run later by node$/ })).toBeTruthy()
   expect(await ui.find({ type: 'Code', text: /^const \{ chromium \} = require\("playwright"\);\nconsole\.log\("demo"\);$/ })).toBeTruthy()
   expect(await ui.find({ type: 'Code', text: /^EOF\ncd \$S && node shots\.js/ })).toBeTruthy()

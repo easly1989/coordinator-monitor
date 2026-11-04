@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { risksOf, segmentsOf, stepsOf, touchesOf, viewOf, visible } from '../hooks/request'
+import { canFold, risksOf, segmentsOf, stepsOf, touchesOf, viewOf, visible } from '../hooks/request'
 
 // A request as sessions send them: files written by here-docs, then a script run on them, piped on.
 const HEREDOCS = [
@@ -273,11 +273,43 @@ test('what a request touches is read from all of it: inside quotes, $( ), sudo, 
     'append log.txt',
     'write o.txt',
   ])
-  // A here-doc into bash is read like the rest; one of other code is named as not read, its URLs listed.
-  expect(of(["bash <<'EOF'", 'rm -rf /tmp/q', 'EOF', ''].join('\n'))).toEqual(['rm /tmp/q'])
-  expect(of(["cat > /tmp/s.py <<'EOF'", 'import urllib.request', "urllib.request.urlopen('https://api.example.test/v1')", 'EOF', 'python3 /tmp/s.py'].join('\n'))).toEqual([
-    'write /tmp/s.py',
-    'url https://api.example.test/v1',
-    'unread ‹1› /tmp/s.py · 2 lines',
-  ])
+  // A block gives its file and the URLs in it; a block that runs never folds, so its body is not scanned here.
+  expect(of(["cat > /tmp/cfg.json <<'EOF'", '{"u": "https://api.example.test/v1"}', 'EOF', ''].join('\n'))).toEqual(['write /tmp/cfg.json', 'url https://api.example.test/v1'])
+  expect(of(["bash <<'EOF'", 'rm -rf /tmp/q', 'EOF', ''].join('\n'))).toEqual([])
+  // A quote in an earlier word, inside the other kind of quote, opens nothing: what follows is read.
+  expect(of(`echo "it's done"; rm -r '/srv/data'`)).toEqual(['rm \'/srv/data\''])
+  expect(of(`echo 'say "hi"' && cd /srv && ssh h "rm -f /x"`)).toEqual(['cd /srv', 'rm /x', 'host h'])
+})
+
+test('the risk chips know the destructive tools of this setup and an encoded command', () => {
+  expect(risksOf('find / -name x -delete')).toContain('del')
+  expect(risksOf('zfs destroy tank/data')).toContain('del')
+  expect(risksOf('qm destroy 101')).toContain('del')
+  expect(risksOf('pct destroy 101 --purge')).toContain('del')
+  expect(risksOf('pwsh -EncodedCommand AAAA')).toContain('exec')
+  expect(risksOf('ls -la')).toEqual([])
+})
+
+test('a card folds only when no block of it can run', () => {
+  const pad = Array.from({ length: 6 }, (_, n) => `echo ${n}`).join('\n')
+  const folds = (cmd: string, shell?: 'bash' | 'powershell') => canFold(segmentsOf(cmd, shell))
+  // Plain shell text, and a file of data that nothing uses as code: may fold.
+  expect(folds(`cd /srv\n${pad}`)).toBe(true)
+  expect(folds(`cat > /tmp/cfg.json <<'EOF'\n{"a": 1}\nEOF\n${pad}`)).toBe(true)
+  // A body that runs, in any language and any form: the card stays open.
+  expect(folds(`bash <<'EOF'\npct destroy 101\nEOF\n${pad}`)).toBe(false)
+  expect(folds(`${pad}\nbash -c "${'x'.repeat(80)}; pct destroy 101"`)).toBe(false)
+  expect(folds(`${pad}\npwsh -Command "${'x'.repeat(80)}; Remove-Item -Recurse /srv"`, 'bash')).toBe(false)
+  expect(folds(`${pad}\npwsh -Command "${'x'.repeat(80)}; Remove-Item -Recurse /srv"`, 'powershell')).toBe(false)
+  expect(folds(`python3 <<'EOF'\nimport shutil\nshutil.rmtree("/srv")\nEOF\n${pad}`)).toBe(false)
+  expect(folds(`node -e "${'a'.repeat(80)}"\n${pad}`)).toBe(false)
+  // A file written, then run: directly, by name, sourced, or piped (isPiped), and a file that is code by its name.
+  expect(folds(`cat > x.sh <<'EOF'\npct destroy 101\nEOF\n./x.sh\n${pad}`)).toBe(false)
+  expect(folds(`cat > g.sh <<'EOF'\npct destroy 101\nEOF\ncat g.sh 2>&1 | bash\n${pad}`)).toBe(false)
+  expect(folds(`cat > cfg.json <<'EOF'\n{}\nEOF\nbash cfg.json\n${pad}`)).toBe(false)
+  expect(folds(`cat > run.sh <<'EOF'\npct destroy 101\nEOF\n${pad}`)).toBe(false)
+  // An unquoted body whose $( ) run as it is written.
+  expect(folds(`cat > cfg.json <<EOF\n$(pct destroy 101)\nEOF\n${pad}`)).toBe(false)
+  // A PowerShell here-string.
+  expect(folds(`$s = @"\nbody\n"@\n${pad}`, 'powershell')).toBe(false)
 })

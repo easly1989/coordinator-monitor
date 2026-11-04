@@ -344,8 +344,8 @@ export const describeStep = (step: string, blocks: Segment[]): string => {
 // shortcut: word lists for the common tools on this machine; a step they miss shows with no chip.
 const RISKS: [string, RegExp][] = [
   ['net', /\b(curl|wget|gh|scp|ssh|rsync|Invoke-WebRequest|iwr|Invoke-RestMethod|irm)\b|\bgit\s+(push|pull|fetch|clone)\b|\b(npm|pnpm|yarn)\s+(i|install|add|publish)\b|\bpip3?\s+install\b/i],
-  ['exec', /\b(python3?|node|bash|sh|pwsh|powershell)(\.exe)?\s+-(c|e|Command)\b|\b(eval|iex|Invoke-Expression)\b|(^|[\s;&|])\.{1,2}[\\/]\S+|\|\s*(sh|bash)\b/i],
-  ['del', /\b(rm|rmdir|del|Remove-Item)\b|\bgit\s+(reset\s+--hard|clean)\b/i],
+  ['exec', /\b(python3?|node|bash|sh|pwsh|powershell)(\.exe)?\s+-(c|e|Command|EncodedCommand|enc)\b|\b(eval|iex|Invoke-Expression)\b|(^|[\s;&|])\.{1,2}[\\/]\S+|\|\s*(sh|bash)\b/i],
+  ['del', /\b(rm|rmdir|del|Remove-Item)\b|\bgit\s+(reset\s+--hard|clean)\b|\s-delete\b|\b(zfs|zpool|qm|pct|lxc|virsh|docker)\s+(destroy|delete|rm|undefine)\b|\bmkfs(\.\w+)?\b/i],
   ['write', /(?<![\d&])>>?(?!&)\s*(?!\/dev\/null|\$null\b|nul\b)\S|\b(mv|cp|mkdir|tee|touch|Set-Content|Out-File|Add-Content|unzip|tar)\b/i],
 ]
 
@@ -409,15 +409,27 @@ export const viewOf = (tool: string, what: string): RequestView | null => {
 }
 
 /** Something a shell request touches, as the collapsed card lists it: always shown, never summarised. */
-export type Touch = { kind: 'cd' | 'rm' | 'write' | 'append' | 'url' | 'host' | 'remote' | 'unread'; target: string }
+export type Touch = { kind: 'cd' | 'rm' | 'write' | 'append' | 'url' | 'host' | 'remote'; target: string }
+
+/** The quote that is open at `at` in `text`, as the shell reads it: a `'` inside `"…"` (or the other way round) opens nothing. */
+const openQuoteAt = (text: string, at: number): string => {
+  let q = ''
+  for (let i = 0; i < at; i++) {
+    const c = text[i] ?? ''
+    if (q === "'") q = c === "'" ? '' : q
+    else if (c === '\\') i++
+    else if (q) q = c === q ? '' : q
+    else if (c === '"' || c === "'") q = c
+  }
+  return q
+}
 
 /**
  * The words after `at` in `text`, quotes kept, up to the end of the command they belong to: an unquoted
  * `;`, `&`, `|`, newline, `)` or backtick, or the close of a quote the command sits in (`ssh h "rm x"`).
  */
 const wordsAt = (text: string, at: number): string[] => {
-  const before = text.slice(0, at)
-  const enclosing = ['"', "'"].find(q => (before.split(q).length - 1) % 2 === 1)
+  const enclosing = openQuoteAt(text, at)
   const words: string[] = []
   let cur = ''
   let quote = ''
@@ -511,22 +523,34 @@ const touchesIn = (text: string): Touch[] => {
   return out
 }
 
+// Files that hold data: a block written to one of these is not code, whatever the request does with it later.
+const DATA_FILE = /\.(?:json|ya?ml|toml|ini|conf|cfg|txt|md|csv|xml|html?|css|log|properties)$/i
+
 /**
- * What a shell request touches, every part of it read: its shell text and each shell block (here-doc
- * into bash, an inline `sh -c` script) by the same scan; a block of other code by the URLs in it and a
- * line saying its contents are not read. Drawn through `visible()` like all the rest.
+ * Whether a card may open folded: only when no block of it can run. Shell text is all in the recap, but
+ * the body of a block is not, and any block that runs (an interpreter's input, an inline `-c` / `-e`
+ * script of any language, a body whose `$( )` run as it is read, a file run or maybe piped on later)
+ * would hide code behind a summary. So a block folds only if it is a plain file of data written to a
+ * path, with nothing that uses it as code. Fail closed: a block of any other kind keeps the card open.
+ */
+export const canFold = (segs: Segment[]): boolean =>
+  segs.every(
+    sg => sg.kind === 'shell' || (!!sg.path && DATA_FILE.test(sg.path) && !sg.language && !sg.runBy && !sg.isPiped && !sg.isRunning && !sg.isInline && !sg.isString),
+  )
+
+/**
+ * What a shell request touches, read from its shell text by a generous scan (an extra line costs less
+ * than a missed one), and from a block only the file it writes and the URLs in it: a block that folds
+ * is a file of data, and a block that runs keeps the card open (see `canFold`). Drawn through
+ * `visible()` like all the rest.
  */
 export const touchesOf = (cmd: string, shell: Shell = 'bash'): Touch[] => {
-  const segs = segmentsOf(cmd, shell)
   const out: Touch[] = []
-  let n = 0
-  for (const sg of segs) {
-    if (sg.kind === 'shell' || sg.language === 'bash' || sg.language === 'powershell') out.push(...touchesIn(sg.text))
-    else for (const m of sg.text.matchAll(/[a-z][a-z0-9+.-]*:\/\/[^\s'"`<>|;&()]+/gi)) out.push({ kind: 'url', target: m[0] })
-    if (sg.kind === 'block') {
-      n++
+  for (const sg of segmentsOf(cmd, shell)) {
+    if (sg.kind === 'shell') out.push(...touchesIn(sg.text))
+    else {
       if (sg.path) out.push({ kind: 'write', target: sg.path })
-      if (sg.language !== 'bash' && sg.language !== 'powershell') out.push({ kind: 'unread', target: `‹${n}› ${sg.to} · ${sg.lines} ${sg.lines === 1 ? 'line' : 'lines'}` })
+      for (const m of sg.text.matchAll(/[a-z][a-z0-9+.-]*:\/\/[^\s'"`<>|;&()]+/gi)) out.push({ kind: 'url', target: m[0] })
     }
   }
   const seen = new Set<string>()

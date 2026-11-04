@@ -19,7 +19,7 @@ import type { EngineInterface, Register, RenderChildren, RenderNode } from 'clau
 import type { AgentRow, Answer, AnswerKind, Board, ChoiceOption, ChoiceQuestion, Digest, Local, MonitorRequest, PaneUi, PlanItem, Queues, SessionStatus } from '../types'
 import { CRAB_H, TIER_COLOR, TIER_MODEL, crabSvg, hatFor, tierOf } from './crab'
 import { QUESTIONS_HEADING, asksGoAhead, pickStrings, type Strings } from './i18n'
-import { lineCount, segmentsOf, touchesOf, viewOf, visible } from './request'
+import { canFold, lineCount, segmentsOf, touchesOf, viewOf, visible } from './request'
 import { compileRules, criticalIn, matchRule, type Rule, type RulesFile } from './rules'
 
 const PANE = 'coordinator-monitor'
@@ -1365,8 +1365,9 @@ export const register: Register = (on, options) => {
         const segs = isShell ? segmentsOf(cmd, shellKind) : []
         const view = viewOf(tool, cmd)
         // A large shell request opens folded: its recap, what it touches and its size stay, its text is a
-        // press away. Never where the aid gave up: then the card opens whole, as before.
-        const isFoldable = isShell && view?.kind === 'shell' && isLarge(cmd)
+        // press away. Never where the aid gave up, nor where any block could run (a body the recap does
+        // not read): then the card opens whole, as before.
+        const isFoldable = isShell && view?.kind === 'shell' && isLarge(cmd) && canFold(segs)
         const isFolded = isFoldable && !u.open?.[`full:${r.id}`]
         const touches = isFoldable ? touchesOf(cmd, shellKind) : []
         // Only what closes a block is drawn under it: an inline script's closing quotes, a here-string's
@@ -1481,7 +1482,7 @@ export const register: Register = (on, options) => {
                 <Text size="caption" weight="semibold" color="#B3ADF0">
                   {S.explainLabel}
                 </Text>
-                <Text size="footnote">{r.explain}</Text>
+                <Text size="footnote">{visible(r.explain)}</Text>
                 <Text size="caption" color="subtle">
                   {S.explainWarn}
                 </Text>
