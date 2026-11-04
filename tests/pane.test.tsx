@@ -802,6 +802,31 @@ describe('a session reporting', () => {
       await ui.unmount()
     })
 
+    test('the text of an order from the bus answers file is data: drawn through visible() and fenced in the queued note', async ($, on) => {
+      const { mine, settle, written, answersFile } = setup(on)
+      const queue = track(on)
+      // A hidden reversal and a code fence in a task, the two things that could pass for the digest's own structure.
+      const text = `1. ship it ${String.fromCharCode(0x202e)}gnp\n2. \`\`\`\nnot a row`
+      on('ui.open', () => ({ value: { isPlaced: true } }))
+      await $.session.start({ cwd: '/repos/project', surface: 'desktop', isInteractive: true })
+      await $.turn.start({ turnId: 't1' } as never)
+      await $.turn.complete({ turnId: 't1', answer: 'Migrated the schema; all tests pass.', isAborted: false } as never)
+      await settle()
+      const [r] = mine().requests
+      // The answers file as the pane left it; the person's next answer applies everything in it.
+      written[answersFile()] = JSON.stringify([{ requestId: 'order-1', at: Date.now(), kind: 'order', text }])
+      await $.command.run({ command: 'agents-monitor', args: '' } as never)
+      const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+      await ui.press({ key: `read-${r?.id}` })
+      await settle()
+      const [row] = queue.rows()
+      await ui.unmount()
+      expect(row?.text).toContain('\\u202Egnp')
+      expect(row?.text).not.toContain(String.fromCharCode(0x202e))
+      // Fenced by a longer fence than the three backticks in the text, so nothing in it can close the fence early.
+      expect(row?.text).toMatch(/\n````\n1\. ship it [\s\S]*\n2\. ```\nnot a row\n````$/)
+    })
+
     test('notes left from before a restart are delivered once they are old enough, and not before', async ($, on) => {
       const { settle } = setup(on)
       const notes = watch(on)
