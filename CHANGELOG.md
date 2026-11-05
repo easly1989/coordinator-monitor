@@ -2,9 +2,9 @@
 
 ## 0.6.8 — 2026-11-05
 
-- **An empty "Domande per te" raises no card** (#25). A section with no numbered list was judged line by line, so "Nessuna per ora." became a QUESTIONS card. Without a numbered list only bullets and lines containing a question mark count; numbered items are unchanged.
-- **Closed sessions leave the pane** (#26). A closed session goes 5 minutes after it ends (time to read a last report). It stays while a planned-task queue is held for it, until the queue is empty, and for up to an hour while a card waits. Its status file is not deleted: the plugin file API cannot delete, and files past the hour are ignored anyway.
-- **Digest follow-ups** (#23). A digest state reset under a loaded module (sequence restarting below the delivered mark) no longer hides new notes as delivered. A refused `prompt.submit` while applying answers queues that answer urgent and the rest of the batch still goes out.
+- **An empty "Domande per te" raises no card** (#25). A section with no numbered list was judged line by line, so "Nessuna per ora." became a QUESTIONS card. A heading with nothing under it, or only a "nothing to ask" line (Nessuna…, None…), is now treated as if the heading were absent: the turn's report card. Any other body is the QUESTIONS card as written; numbered items are unchanged.
+- **Closed sessions leave the pane** (#26). A closed session goes 5 minutes after it ends (time to read a last report). It stays while a planned-task queue is held for it, until the queue is empty, and for up to an hour while a card that awaits an answer (not a report) is held. Its status file is not deleted: the plugin file API cannot delete, and files past the hour are ignored anyway.
+- **Digest follow-ups** (#23). A digest state reset under a loaded module (sequence restarting below the delivered mark) no longer hides new notes as delivered. A refused `prompt.submit` while applying answers queues that answer urgent and the rest of the batch still goes out; if that answer cannot be queued either, a toast says so.
 
 ## 0.6.7 — 2026-11-04
 
