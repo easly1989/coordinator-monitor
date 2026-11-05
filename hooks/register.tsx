@@ -1484,18 +1484,25 @@ export const register: Register = (on, options) => {
           const closer = blk.isInline ? /^\s*["')]+\s*$/ : blk.isString ? /^\s*["']@\s*$/ : /^\t*[A-Za-z_]\w*$/
           return closer.test(text) ? text : null
         }
+        const HEAD_LINES = 12
         const raw = isShell ? (
           <Box flexDirection="column" gap="xs">
-            {(isFolded ? [] : segs).map((sg, k) =>
+            {segs.map((sg, k) =>
               sg.kind === 'shell' ? (
-                sg.text.trim() && !tailOf(k - 1) ? <Code key={`raw-${r.id}-${k}`} source={visible(sg.text.replace(/\n$/, ''))} wrap="wrap" language={shellKind} /> : null
+                !isFolded && sg.text.trim() && !tailOf(k - 1) ? <Code key={`raw-${r.id}-${k}`} source={visible(sg.text.replace(/\n$/, ''))} wrap="wrap" language={shellKind} /> : null
               ) : (
                 <Box key={`blk-${r.id}-${k}`} flexDirection="column" gap="xs" paddingLeft="sm" borderStyle="round" borderColor={isTerm ? undefined : CARD_LINE} borderDimColor={isTerm}>
                   <Text size="caption" color="subtle">
                     {visible(S.blockLabel(sg.isInline ? 'inline' : sg.isString ? 'string' : sg.path ? 'file' : 'input', sg.to, sg.lines, sg.runBy, sg.isRunning, sg.isPiped))}
                   </Text>
-                  <Code key={`raw-${r.id}-${k}`} source={visible(sg.text.replace(/\n$/, ''))} wrap="wrap" language={sg.language} path={sg.path} startLine={1} />
-                  {tailOf(k) !== null ? (
+                  {/* Folded, a block still shows its first lines, as the Write view does: the body is never fully hidden. */}
+                  <Code key={`raw-${r.id}-${k}`} source={visible((isFolded ? sg.text.replace(/\n$/, '').split('\n').slice(0, HEAD_LINES).join('\n') : sg.text.replace(/\n$/, '')))} wrap="wrap" language={sg.language} path={sg.path} startLine={1} />
+                  {isFolded && sg.lines > HEAD_LINES ? (
+                    <Text size="caption" color="subtle">
+                      {S.firstLines(HEAD_LINES, sg.lines)}
+                    </Text>
+                  ) : null}
+                  {!isFolded && tailOf(k) !== null ? (
                     <Text size="caption" color="subtle">
                       {visible(S.followedBy(tailOf(k) ?? ''))}
                     </Text>
@@ -1515,7 +1522,6 @@ export const register: Register = (on, options) => {
         // A large request, or a file it writes, gets a reading aid on top: its steps as the asking tool's
         // shell reads them, or the file's path and code. None where the split is not certain.
         const isAided = !!view && (isLarge(cmd) || view.kind !== 'shell')
-        const HEAD_LINES = 12
         const summary: RenderChildren = !view ? null : view.kind === 'shell' ? (
           <Box flexDirection="column" gap="xs">
             <Box flexDirection="row" flexWrap="wrap" gap="sm" alignItems="center">

@@ -55,7 +55,7 @@ const FOLD_ASK = JSON.stringify(
   {
     command: [
       'mkdir -p /tmp/demo',
-      "cat > /tmp/demo/cfg.json <<'EOF'",
+      "cat > cfg.json <<'EOF'",
       '{"url": "https://example.org/feed"}',
       'EOF',
       'cd /tmp/demo && ls',
@@ -279,9 +279,11 @@ test('the pane draws sessions, workers and every kind of request, on every surfa
   expect(await ui.find({ type: 'Code', text: /"command": "S=/ })).toBeFalsy()
   // Over 6 lines, with nothing in it that can run (p13: a file of data), it opens folded: the recap, what it
   // touches, its size and its fields stay, and it can be approved as it is; its text is one press away.
-  expect(await ui.find({ type: 'Code', text: /example\.org\/feed/ })).toBeFalsy()
+  // Folded, the shell text is hidden but the block keeps its first lines on screen.
+  expect(await ui.find({ type: 'Code', text: /mkdir -p \/tmp\/demo/ })).toBeFalsy()
+  expect(await ui.find({ type: 'Code', text: /example\.org\/feed/ })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /^Touches \(always shown, read from the command\)$/ })).toBeTruthy()
-  for (const line of [/^writes {2}\/tmp\/demo\/cfg\.json$/, /^goes to {2}\/tmp\/demo$/, /^url {2}https:\/\/example\.org\/feed$/])
+  for (const line of [/^writes {2}cfg\.json$/, /^goes to {2}\/tmp\/demo$/, /^url {2}https:\/\/example\.org\/feed$/])
     expect(await ui.find({ type: 'Text', text: line })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /^timeout: 60000$/ })).toBeTruthy()
   expect(await ui.find({ key: 'once-p13' })).toBeTruthy()
@@ -1113,6 +1115,16 @@ describe('a session reporting', () => {
         expect(await ui.find({ type: 'Code', text: BIG })).toBeTruthy()
         expect((await ui.find({ key: 'full-k1' }))?.text).toBe('▾ Full request · 8 lines')
         expect(await ui.find({ key: 'once-k1' })).toBeTruthy()
+        await ui.unmount()
+      })
+
+      test('folded, a block still shows its first 12 lines, and says how many there are', async ($, on) => {
+        const body = Array.from({ length: 20 }, (_, n) => `row ${n + 1}`).join('\n')
+        const ui = await open($ as never, on, [perm({}, `cat > notes.md <<'EOF'\n${body}\nEOF\ncd /srv\nls\necho a\necho b\necho c\necho d`)])
+        expect((await ui.find({ key: 'full-k1' }))?.text).toMatch(/^▸ Full request/)
+        expect(await ui.find({ type: 'Code', text: /^row 1\n[\s\S]*row 12$/ })).toBeTruthy()
+        expect(await ui.find({ type: 'Text', text: 'first 12 of 20 lines' })).toBeTruthy()
+        expect(await ui.find({ text: /row 13/ })).toBeFalsy()
         await ui.unmount()
       })
 

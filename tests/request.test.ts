@@ -360,12 +360,33 @@ test('canFold bypasses: PowerShell, network devices and files that configure wha
   expect(folds(`cd /srv\n${pad}`)).toBe(true)
 })
 
+test('canFold is an allowlist: a typed block marker, look-alike paths and double redirects never fold', () => {
+  const pad = Array.from({ length: 6 }, (_, n) => `echo ${n}`).join('\n')
+  const folds = (cmd: string) => canFold(segmentsOf(cmd, 'bash'), 'bash')
+  const doc = (target: string) => `cat > ${target} <<'EOF'\nhi\nEOF\n${pad}`
+  // The marker typed by the session: no block is cut, nothing folds, the step is shown as written.
+  const typed = `cat ~/.claude-env/secrets.env ‹1›\n${pad}`
+  expect(segmentsOf(typed, 'bash').every(sg => sg.kind === 'shell')).toBe(true)
+  expect(folds(typed)).toBe(false)
+  expect(viewOf('Bash', typed)?.kind === 'shell' && viewOf('Bash', typed)?.steps[0]).toBe('cat ~/.claude-env/secrets.env ‹1›')
+  // Targets that are not a plain relative data file, however they are spelled.
+  for (const t of ['~/.Claude/settings.json', "~/.cla''ude/settings.json", '~/.claude.json', '.mcp.json', 'x.service.d/y.conf', 'apt.conf.d/z.conf', '/tmp/notes.md', 'a/b.md', '../n.md', '$HOME/n.md', 'settings.md', 'my-hook.txt', 'run.sh', 'N.CONF'])
+    expect([t, folds(doc(t))]).toEqual([t, false])
+  // More than one output redirect on the opener: no block is cut out, so nothing folds.
+  const twice = `cat > a.md > b.md <<'EOF'\nx\nEOF\n${pad}`
+  expect(segmentsOf(twice, 'bash').some(sg => sg.kind === 'block')).toBe(false)
+  expect(folds(twice)).toBe(false)
+  // A plain relative file of the data list folds, whatever its case.
+  expect(folds(doc('notes.md'))).toBe(true)
+  expect(folds(doc('Notes.JSON'))).toBe(true)
+})
+
 test('a card folds only when no block of it can run', () => {
   const pad = Array.from({ length: 6 }, (_, n) => `echo ${n}`).join('\n')
   const folds = (cmd: string, shell: 'bash' | 'powershell' = 'bash') => canFold(segmentsOf(cmd, shell), shell)
   // Plain shell text, and a file of data that nothing uses as code: may fold.
   expect(folds(`cd /srv\n${pad}`)).toBe(true)
-  expect(folds(`cat > /tmp/cfg.json <<'EOF'\n{"a": 1}\nEOF\n${pad}`)).toBe(true)
+  expect(folds(`cat > cfg.json <<'EOF'\n{"a": 1}\nEOF\n${pad}`)).toBe(true)
   // A body that runs, in any language and any form: the card stays open.
   expect(folds(`bash <<'EOF'\npct destroy 101\nEOF\n${pad}`)).toBe(false)
   expect(folds(`${pad}\nbash -c "${'x'.repeat(80)}; pct destroy 101"`)).toBe(false)
@@ -390,7 +411,7 @@ test('a card folds only when every step is a file mover, and a data file is not 
   // The allowlist: cat, ls, mkdir, cd, echo, cp, mv, touch, chmod, tee with one file (no printf: `printf -v` sets a variable).
   expect(folds(`mkdir -p /srv/a && cd /srv/a && ls -la\ncp a.txt b.txt; mv b.txt c.txt\ntouch d\nchmod 600 d\necho x\ncat c.txt\n${pad}`)).toBe(true)
   expect(folds(`printf -v PATH /tmp\n${pad}`)).toBe(false)
-  expect(folds(`tee /srv/a/x.txt <<'EOF'\nhello\nEOF\n${pad}`)).toBe(true)
+  expect(folds(`tee x.txt <<'EOF'\nhello\nEOF\n${pad}`)).toBe(true)
   expect(folds(`echo hi | tee out.txt\n${pad}`)).toBe(true)
   // A data file that a later command reads as configuration or as a manifest.
   expect(folds(`cat > x.conf <<'EOF'\n[core]\nfsmonitor = ./hook.sh\nEOF\nGIT_CONFIG_GLOBAL=x.conf git status\n${pad}`)).toBe(false)

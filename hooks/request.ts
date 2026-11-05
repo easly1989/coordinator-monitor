@@ -209,6 +209,9 @@ const laterUse = (text: string, base: string): { runBy?: string; isPiped?: boole
  * below), an inline script only when its closing quote is found; anything else stays shell text.
  */
 export const segmentsOf = (cmd: string, shell: Shell = 'bash'): Segment[] => {
+  // The reading marks a block as ‹n›: a command that holds those characters itself could pose as a block,
+  // so it is cut into no block at all.
+  if (/[‹›]/.test(cmd)) return cmd ? [{ kind: 'shell', text: cmd }] : []
   const out: Segment[] = []
   const lines = cmd.split('\n')
   const starts: number[] = []
@@ -240,6 +243,8 @@ export const segmentsOf = (cmd: string, shell: Shell = 'bash'): Segment[] => {
       const part = stepsOf(head, 'bash')?.at(-1) ?? ''
       // A process substitution or a duplicated descriptor (`>(bash)`, `<(…)`, `>&3`) may run the body.
       if (/[<>]\(|>&/.test(head + after)) continue
+      // More than one output redirect (`> a > b`): the body goes to a file the reading may not name.
+      if ((`${head}${after}`.match(/>+/g) ?? []).length > 1) continue
       if (!READER.test(part) || (after.trim() && !stepsOf(after, 'bash')) || /[|\\]|&&[ \t]*$/.test(after)) continue
       const word = m[3] ?? ''
       // Exactly the word, as bash wants it: `EOF` with a CR after it is not the end.
@@ -330,6 +335,8 @@ const aidTextOf = (segs: Segment[], shell: Shell): string => {
 
 /** A step in plain words, where its form is a common one; else the step itself. */
 export const describeStep = (step: string, blocks: Segment[]): string => {
+  // A marker typed into the command (no block carries one): the step is shown as written, never read as a block.
+  if (!blocks.length && /[‹›]/.test(step)) return step
   const block = (k: string | undefined) => {
     const b = blocks[Number(k) - 1]
     return b?.kind === 'block' ? b : undefined
@@ -567,7 +574,15 @@ const touchesIn = (text: string): Touch[] => {
 }
 
 // Files that hold data: a block written to one of these is not code, whatever the request does with it later.
-const DATA_FILE = /\.(?:json|ya?ml|toml|ini|conf|cfg|txt|md|csv|xml|html?|css|log|properties)$/i
+// A block folds only into a plain relative file name (no path, `~`, `$`, quote, `..`, leading dot) of a short
+// data list, never one named for this tool's config: the allowlist decides, NO_FOLD_TEXT is an extra guard.
+const blockFolds = (sg: Extract<Segment, { kind: 'block' }>): boolean =>
+  !!sg.path &&
+  /^[A-Za-z0-9_][\w.@+-]*$/.test(sg.path) &&
+  !sg.path.includes('..') &&
+  /\.(?:md|txt|json|csv|ya?ml)$/i.test(sg.path) &&
+  !/claude|settings|hook/i.test(sg.path) &&
+  !sg.language && !sg.runBy && !sg.isPiped && !sg.isRunning && !sg.isInline && !sg.isString
 
 // The programs a folded card may run: they move, make or show files and run nothing they are handed.
 const FOLD_PROGRAMS = new Set(['cat', 'ls', 'mkdir', 'cd', 'echo', 'cp', 'mv', 'touch', 'chmod'])
@@ -575,7 +590,7 @@ const FOLD_PROGRAMS = new Set(['cat', 'ls', 'mkdir', 'cd', 'echo', 'cp', 'mv', '
 // Never folded, whatever the program: a network pseudo-device, or a place that configures what runs later
 // (this tool's own folder, a repo's hooks and workflows, an editor's tasks, ssh keys, shell start-up files).
 const NO_FOLD_TEXT =
-  /\/dev\/(?:tcp|udp)\/|(?:^|[\/\\~\s'"=:])\.(?:claude|git|github|vscode|ssh)(?:[\/\\\s'"]|$)|\.(?:bash_profile|bash_login|bash_logout|bashrc|profile|zshrc|zprofile|zshenv|zlogin)\b|\/etc\/(?:profile|bash)/
+  /\/dev\/(?:tcp|udp)\/|\.claude|(?:^|[\/\\~\s'"=:])\.(?:git|github|vscode|ssh)(?:[\/\\\s'"]|$)|\.mcp\.json|\.service\.d\b|apt\.conf\.d|\.(?:bash_profile|bash_login|bash_logout|bashrc|profile|zshrc|zprofile|zshenv|zlogin)\b|\/etc\/(?:profile|bash|sudoers|cron|systemd|apt|ssh)/i
 
 /** Whether one step of a folded card is on the allowlist (see `canFold`). */
 const stepFolds = (step: string): boolean => {
@@ -585,7 +600,14 @@ const stepFolds = (step: string): boolean => {
   const prefix = /^(?:(?:[A-Za-z_]\w*=\S*|\d*[<>]{1,2}[ \t]*[^\s;&|<>]+)[ \t]*)*/.exec(step.trim())?.[0] ?? ''
   if (/[A-Za-z_]\w*=/.test(prefix)) return false
   const program = programOf(step)
-  if (FOLD_PROGRAMS.has(program)) return true
+  if (FOLD_PROGRAMS.has(program)) {
+    // Every redirect target, and every argument of a mover but echo, is one plain file name: no `~`, `$`, quote or glob.
+    const redirects = [...step.matchAll(/\d*[<>]{1,2}[ \t]*([^\s;&|<>]+)/g)].map(m => m[1] ?? '')
+    if (!redirects.every(w => isPlainName(w) && !/^\/(dev|proc)\//.test(w))) return false
+    if (program === 'echo') return true
+    const args = wordsOf(step).slice(1).filter(w => w && !/^\d*[<>]/.test(w) && !redirects.includes(w) && !w.startsWith('-') && !/^‹\d+›$/.test(w))
+    return args.every(isPlainName)
+  }
   if (program !== 'tee') return false
   // `tee` writes every file it is given: one only, the one the block goes to.
   const rest = step.trim().slice(prefix.length).split(/\s+/).slice(1)
@@ -608,7 +630,7 @@ export const canFold = (segs: Segment[], shell: Shell = 'bash'): boolean => {
   if (shell === 'powershell') return false
   if (NO_FOLD_TEXT.test(segs.map(sg => (sg.kind === 'shell' ? sg.text : `${sg.path ?? ''}\n${sg.text}`)).join('\n'))) return false
   const isInert = segs.every(
-    sg => sg.kind === 'shell' || (!!sg.path && DATA_FILE.test(sg.path) && !sg.language && !sg.runBy && !sg.isPiped && !sg.isRunning && !sg.isInline && !sg.isString),
+    sg => sg.kind === 'shell' || blockFolds(sg),
   )
   const steps = splitSteps(aidTextOf(segs, shell), shell)
   return isInert && !!steps && steps.every(st => stepFolds(st.text))
