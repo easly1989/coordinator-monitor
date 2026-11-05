@@ -626,7 +626,7 @@ const gather = async ($: $): Promise<void> => {
     // A closed session leaves the pane after a short grace, so a last report can be read. It stays while a
     // planned-task queue is held for it (the coordinator moves or empties it), and for an hour while a card waits.
     if (s.state === 'ended') {
-      const pending = Array.isArray(s.requests) && s.requests.length > 0
+      const pending = Array.isArray(s.requests) && s.requests.some(r => r?.kind !== 'report')
       if (age > ENDED_GRACE_MS && !queued(s.sessionId) && !(pending && age <= ENDED_KEEP_MS)) continue
     } else if (age > STALE_MS) continue
     // Another session wrote it: its texts are drawn only as the strings they should be, every hidden
