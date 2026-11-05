@@ -729,6 +729,27 @@ describe('a session reporting', () => {
     await ui.unmount()
   })
 
+  test('a closed session leaves the pane after a grace, unless a card or a queue is held for it (#26)', { options: { coordinatorFolder: 'coordinator' } }, async ($, on) => {
+    const { settle, written } = setup(on, [], '/repos/coordinator')
+    on('ui.open', () => ({ value: { isPlaced: true } }))
+    await $.session.start({ cwd: '/repos/coordinator', surface: 'desktop', isInteractive: true })
+    await settle()
+    const bus = Object.keys(written).find(k => k.endsWith('/sessions/me.json'))?.replace(/\/sessions\/me\.json$/, '') ?? ''
+    const ended = (id: string, minutes: number, requests: SessionStatus['requests'] = []) => {
+      written[`${bus}/sessions/${id}.json`] = JSON.stringify(status({ sessionId: id, title: id, state: 'ended', heartbeat: Date.now() - minutes * 60_000, requests }))
+    }
+    ended('fresh', 1)
+    ended('gone', 10)
+    ended('queued', 10)
+    ended('card', 10, [{ id: 'q1', kind: 'questions', createdAt: now, text: '1. Ship it?' }])
+    ended('report', 10, [{ id: 'r1', kind: 'report', createdAt: now, text: 'Done.' }])
+    ended('stale-card', 90, [{ id: 'q2', kind: 'questions', createdAt: now, text: '1. Ship it?' }])
+    written[`${bus}/queues.json`] = JSON.stringify({ queued: ['Benchmark the parser'] })
+    await $.command.run({ command: 'agents-monitor', args: '' } as never)
+    const known = async (id: string) => !/No session/.test(((await ($.tool.call({ tool: 'mcp__coordinator-monitor__queue', action: 'list', session: id } as never) as Promise<{ result?: string }>)).result) ?? '')
+    expect(await Promise.all(['fresh', 'gone', 'queued', 'card', 'report', 'stale-card'].map(known))).toEqual([true, false, true, true, false, false])
+  })
+
   test('the coordinator queues tasks for a session; two at once both land', { options: { coordinatorFolder: 'coordinator' } }, async ($, on) => {
     const { settle, written } = setup(on, [], '/repos/coordinator')
     on('ui.open', () => ({ value: { isPlaced: true } }))
