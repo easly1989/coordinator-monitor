@@ -33,7 +33,7 @@ const ENDED_KEEP_MS = 60 * 60 * 1000
 // How long a closed session without a pending card or a queue stays in the pane.
 const ENDED_GRACE_MS = 5 * 60 * 1000
 /** Published in every status, so the pane can flag a session still running an older copy. Keep in step with plugin.json. */
-const MOD_VERSION = '0.6.7'
+const MOD_VERSION = '0.6.8'
 const SHELL_TOOLS = new Set(['Bash', 'PowerShell'])
 const STEP_TOOL = 'mcp__savvy-progress__step'
 const FLOW_TOOL = 'mcp__savvy-progress__progress'
