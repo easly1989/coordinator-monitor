@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { canFold, risksOf, segmentsOf, stepsOf, touchesOf, viewOf, visible } from '../hooks/request'
+import { canFold, lineCount, risksOf, segmentsOf, stepsOf, touchesOf, viewOf, visible } from '../hooks/request'
 
 // A request as sessions send them: files written by here-docs, then a script run on them, piped on.
 const HEREDOCS = [
@@ -330,6 +330,13 @@ test('the risk chips know the destructive tools of this setup and an encoded com
   expect(risksOf('pct destroy 101 --purge')).toContain('del')
   expect(risksOf('pwsh -EncodedCommand AAAA')).toContain('exec')
   expect(risksOf('ls -la')).toEqual([])
+})
+
+test('lineCount counts every kind of line break once', () => {
+  expect(lineCount('')).toBe(0)
+  expect(lineCount('a')).toBe(1)
+  expect(lineCount('a\r\nb')).toBe(2)
+  expect(lineCount(`a\rb${String.fromCharCode(0x2028)}c${String.fromCharCode(0x2029)}d\ne`)).toBe(5)
 })
 
 test('a card folds only when no block of it can run', () => {

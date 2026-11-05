@@ -19,7 +19,7 @@ import type { EngineInterface, Register, RenderChildren, RenderNode } from 'clau
 import type { AgentRow, Answer, AnswerKind, Board, ChoiceOption, ChoiceQuestion, Digest, Local, MonitorRequest, PaneUi, PlanItem, Queues, SessionStatus } from '../types'
 import { CRAB_H, TIER_COLOR, TIER_MODEL, crabSvg, hatFor, tierOf } from './crab'
 import { NO_QUESTIONS, QUESTIONS_HEADING, asksGoAhead, pickStrings, type Strings } from './i18n'
-import { lineCount, segmentsOf, touchesOf, viewOf, visible } from './request'
+import { canFold, lineCount, segmentsOf, touchesOf, viewOf, visible } from './request'
 import { compileRules, criticalIn, matchRule, type Rule, type RulesFile } from './rules'
 
 const PANE = 'coordinator-monitor'
@@ -490,6 +490,8 @@ const recapOf = (s: string): string => {
 /** A command shown inline, with no fold: a single line of at most this many characters. */
 const INLINE_MAX = 160
 const BODY_LINES = 6
+/** Steps of the reading kept in sight on a folded permission card. */
+const FOLDED_STEPS = 3
 
 /** A Markdown fence no backtick run inside `s` can close, so the text stays quoted. */
 const fence = (s: string): string => {
@@ -1406,7 +1408,8 @@ export const register: Register = (on, options) => {
       if (r.kind === 'report') {
         const isOpen = !!u.open?.[r.id]
         const text = r.text ?? ''
-        const body = bodyOf(text)
+        // A report that waits for a go-ahead has a button that acts: its text is never folded.
+        const body = r.awaits ? { shown: text, toggle: null } : bodyOf(text)
         // Collapsed it reads as one glance: the wrap-up's question or recap, else the report's first paragraph.
         const gist = r.decision || r.summary || (text.split(/\n\s*\n/)[0] ?? '').replace(/^#+\s*/, '').slice(0, 280)
         return shell(
@@ -1467,7 +1470,9 @@ export const register: Register = (on, options) => {
         // press away. Never where the aid gave up, nor where any block could run (a body the recap does
         // not read): then the card opens whole, as before.
         // Every body folds, but a single short line, which reads at a glance and stays inline.
-        const isFoldable = cmd.includes('\n') || cmd.length > INLINE_MAX
+        // Only a shell request the aid reads for certain and where nothing can run (canFold): anything else,
+        // a pipe to an interpreter, a $( ), a file tool, an MCP call, is always shown whole.
+        const isFoldable = isShell && view?.kind === 'shell' && (cmd.includes('\n') || cmd.length > INLINE_MAX) && canFold(segs, shellKind)
         const isFolded = isFoldable && !u.open?.[`full:${r.id}`]
         const touches = isFoldable && isShell && view?.kind === 'shell' ? touchesOf(cmd, shellKind) : []
         // Only what closes a block is drawn under it: an inline script's closing quotes, a here-string's
@@ -1523,8 +1528,8 @@ export const register: Register = (on, options) => {
                 <Box key={`risk-${r.id}-${k}`}>{tag(S.risk[k] ?? k, RISK_COLOR[k] ?? BLUE)}</Box>
               ))}
             </Box>
-            {/* Every step, whole: a cut one could hide what runs after the cut. */}
-            {view.steps.map((st, i) => (
+            {/* Every step, whole: a cut one could hide what runs after the cut. Folded, the first FOLDED_STEPS stay in sight (the tags above cover all). */}
+            {(isFolded ? view.steps.slice(0, FOLDED_STEPS) : view.steps).map((st, i) => (
               <Text key={`st-${r.id}-${i}`} size="footnote" wrap="wrap">
                 <Text color="subtle">{`${i + 1}. `}</Text>
                 {visible(st)}
@@ -1550,18 +1555,19 @@ export const register: Register = (on, options) => {
             ) : null}
           </Box>
         )
-        const recap = recapOf(r.description ?? (isFoldable && view?.kind === 'shell' ? visible(view.steps[0] ?? '') : ''))
+        // The session's own claim, never the mod's reading: quoted, muted, and under its label.
+        const recap = r.description ? recapOf(r.description) : ''
         return shell(
           <Box flexDirection="column" gap="sm">
             {head(S.permission,`${s.title} · ${r.tool ?? 'Bash'}`)}
             {/* What the session says it is for, else the aid's first step: two lines at most, outside the fold. */}
             {recap ? (
-              <Text size="footnote" wrap="wrap">
-                {recap}
+              <Text size="footnote" color="subtle" wrap="wrap">
+                {`${S.sessionSays} «${recap}»`}
               </Text>
             ) : null}
             {/* A reading aid above the request, never in its place: the request itself is what is approved. */}
-            {isAided && !isFolded ? (
+            {isAided || isFolded ? (
               <Box flexDirection="column" gap="xs" padding="sm" borderStyle="round" borderColor={isTerm ? undefined : '#FFFFFF1F'} borderDimColor={isTerm}>
                 <Text size="caption" color="subtle">
                   {S.readingAid}
@@ -1612,7 +1618,7 @@ export const register: Register = (on, options) => {
                 </Box>
               ) : null}
               {/* Closed, a shell request keeps its other fields (timeout, background...) in sight: they too are approved. */}
-              {isFolded && !isShell ? null : raw}
+              {raw}
             </Box>
             {r.rule ? (
               <Text size="footnote" color={r.rule.includes('·') ? 'warning' : 'subtle'}>
@@ -1708,7 +1714,7 @@ export const register: Register = (on, options) => {
       // An item's bold-label bullets are its answers, as buttons: one item answers on a press, several
       // are picked one by one and sent together, each with its item's number.
       const { items } = itemsOf(r.text ?? '')
-      const body = bodyOf(r.text ?? '')
+      // Never folded: the person sees every question before answering.
       // Picks keyed by the item's place: a section may repeat a number.
       const offers = items.map((i, at) => ({ at, n: i.n, options: optionsOf(i.text) })).filter(o => o.options.length)
       const isMulti = items.length > 1
@@ -1723,8 +1729,7 @@ export const register: Register = (on, options) => {
         <Box flexDirection="column" gap="sm">
           {head(S.questions, s.title)}
           <Box flexDirection="column" padding="sm" backgroundColor={fill(CARD)}>
-            {Markdown ? <Markdown key={`md-${r.id}`} text={body.shown} /> : <Text>{body.shown}</Text>}
-            {body.toggle}
+            {Markdown ? <Markdown key={`md-${r.id}`} text={r.text ?? ''} /> : <Text>{r.text ?? ''}</Text>}
           </Box>
           {offers.map(o => (
             <Box key={`${r.id}-o${o.at}`} flexDirection="row" flexWrap="wrap" gap="sm" alignItems="center">

@@ -378,7 +378,7 @@ const RISKS: [string, RegExp][] = [
 
 export const risksOf = (cmd: string): string[] => RISKS.filter(([, re]) => re.test(cmd)).map(([k]) => k)
 
-export const lineCount = (s: string): number => (s ? s.split('\n').length : 0)
+export const lineCount = (s: string): number => (s ? s.split(/\r\n|[\n\r\u2028\u2029]/).length : 0)
 
 /**
  * `s` with every hidden character drawn as a visible code (`\u202E`, `\u{E0041}`), and so is a stack of
