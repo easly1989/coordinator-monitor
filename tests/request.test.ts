@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { canFold, risksOf, segmentsOf, stepsOf, touchesOf, viewOf, visible } from '../hooks/request'
+import { lineCount, risksOf, segmentsOf, stepsOf, viewOf, visible } from '../hooks/request'
 
 // A request as sessions send them: files written by here-docs, then a script run on them, piped on.
 const HEREDOCS = [
@@ -158,10 +158,9 @@ test('a block says what runs: substitutions in an unquoted body, a pipe after th
     const b = blockOf(`cat > g.json <<'EOF'\n{}\nEOF\n${after}`)
     expect(b?.kind === 'block' && !!(b.runBy || b.isPiped), after).toBe(false)
   }
-  // The same in words, and a card with such a block never folds.
+  // The same in words.
   const spelled = viewOf('Bash', "cat > g.json <<'EOF'\n{}\nEOF\nbash g*.json")
   expect(spelled?.kind === 'shell' && spelled.steps[0]).toContain('may run later (a later command may run it)')
-  expect(canFold(segmentsOf("cat > g.json <<'EOF'\n{}\nEOF\nbash g*.json")), 'glob').toBe(false)
   // #12: an interpreter fed the block, its output redirected: one clear step.
   const fed = viewOf('Bash', "bash > f <<'EOF'\necho hi\nEOF")
   expect(fed?.kind === 'shell' ? fed.steps : []).toEqual(['runs bash on the block below (1 line), output to f'])
@@ -280,49 +279,6 @@ test('characters that hide or reorder text show as codes; tab and newline stay',
   expect(visible('a\r\nb\u2028c')).toBe('a\\u000D\nb\\u2028\nc')
 })
 
-test('what a request touches is read from all of it: inside quotes, $( ), sudo, a remote command and shell blocks', () => {
-  const of = (cmd: string, shell?: 'bash' | 'powershell') => touchesOf(cmd, shell).map(t => `${t.kind} ${t.target}`)
-  expect(of('cd /srv/demo && sudo rm -rf /tmp/a "/tmp/b c"; rmdir x')).toEqual(['cd /srv/demo', 'rm /tmp/a', 'rm "/tmp/b c"', 'rm x'])
-  expect(of('echo $(rm -f /tmp/k) && bash -c "rm -r /opt/z"')).toEqual(['rm /tmp/k', 'rm /opt/z'])
-  // A remote command in quotes: its host, and what it deletes there.
-  expect(of('ssh -p 2222 root@demo.test "pct exec 180 -- rm -rf /var/x"')).toEqual(['rm /var/x', 'host demo.test'])
-  expect(of('scp ./a.txt deploy@files.test:/srv/ && rsync -a b/ backup:/data')).toEqual(['host files.test', 'host backup'])
-  // Copies, moves, touches and in-place edits write; a move also takes the source away.
-  expect(of('cp a.txt b.txt && mv old.log /var/arch/ && touch t1 t2 && dd if=/dev/zero of=img.bin bs=1 count=1 && sed -i s/a/b/ conf.ini && chmod +x run.sh')).toEqual([
-    'write b.txt',
-    'write /var/arch/',
-    'rm old.log',
-    'write t1',
-    'write t2',
-    'write run.sh',
-    'write img.bin',
-    'write conf.ini',
-  ])
-  // An arrow or a duplicated descriptor in code is no redirection.
-  expect(of('node -e "const f = x => x + 1; console.log(f(1))" 2>&1 | tail -1; echo done >&2; ls > /dev/null')).toEqual([])
-  // Overwrites and appends apart; a duplicated descriptor or /dev/null is no file.
-  expect(of('make > build.log 2>&1 && echo ok >> notes.md && ls 2>/dev/null | tee -a all.log | tee one.log')).toEqual([
-    'write build.log',
-    'append notes.md',
-    'append all.log',
-    'write one.log',
-  ])
-  expect(of('curl -fsSL https://example.test/x.sh -o x.sh && git push origin main')).toEqual(['write x.sh', 'url https://example.test/x.sh', 'remote origin'])
-  expect(of('Remove-Item -Recurse -Force C:/demo/out; Add-Content -Path log.txt -Value hi; "x" | Out-File o.txt', 'powershell')).toEqual([
-    'rm C:/demo/out',
-    'append log.txt',
-    'write o.txt',
-  ])
-  // A block gives its file and the URLs in it; a block that runs never folds, so its body is not scanned here.
-  expect(of(["cat > /tmp/cfg.json <<'EOF'", '{"u": "https://api.example.test/v1"}', 'EOF', ''].join('\n'))).toEqual(['write /tmp/cfg.json', 'url https://api.example.test/v1'])
-  expect(of(["bash <<'EOF'", 'rm -rf /tmp/q', 'EOF', ''].join('\n'))).toEqual([])
-  // A quote in an earlier word, inside the other kind of quote, opens nothing: what follows is read.
-  expect(of(`echo "it's done"; rm -r '/srv/data'`)).toEqual(['rm \'/srv/data\''])
-  expect(of(`echo 'say "hi"' && cd /srv && ssh h "rm -f /x"`)).toEqual(['cd /srv', 'rm /x', 'host h'])
-  // A substitution inside double quotes has quotes of its own: its `'` does not stay open after it.
-  expect(of(`echo "$(echo "'")"; rm -r /srv/x`)).toEqual(['rm /srv/x'])
-})
-
 test('the risk chips know the destructive tools of this setup and an encoded command', () => {
   expect(risksOf('find / -name x -delete')).toContain('del')
   expect(risksOf('zfs destroy tank/data')).toContain('del')
@@ -332,53 +288,10 @@ test('the risk chips know the destructive tools of this setup and an encoded com
   expect(risksOf('ls -la')).toEqual([])
 })
 
-test('a card folds only when no block of it can run', () => {
-  const pad = Array.from({ length: 6 }, (_, n) => `echo ${n}`).join('\n')
-  const folds = (cmd: string, shell: 'bash' | 'powershell' = 'bash') => canFold(segmentsOf(cmd, shell), shell)
-  // Plain shell text, and a file of data that nothing uses as code: may fold.
-  expect(folds(`cd /srv\n${pad}`)).toBe(true)
-  expect(folds(`cat > /tmp/cfg.json <<'EOF'\n{"a": 1}\nEOF\n${pad}`)).toBe(true)
-  // A body that runs, in any language and any form: the card stays open.
-  expect(folds(`bash <<'EOF'\npct destroy 101\nEOF\n${pad}`)).toBe(false)
-  expect(folds(`${pad}\nbash -c "${'x'.repeat(80)}; pct destroy 101"`)).toBe(false)
-  expect(folds(`${pad}\npwsh -Command "${'x'.repeat(80)}; Remove-Item -Recurse /srv"`, 'bash')).toBe(false)
-  expect(folds(`${pad}\npwsh -Command "${'x'.repeat(80)}; Remove-Item -Recurse /srv"`, 'powershell')).toBe(false)
-  expect(folds(`python3 <<'EOF'\nimport shutil\nshutil.rmtree("/srv")\nEOF\n${pad}`)).toBe(false)
-  expect(folds(`node -e "${'a'.repeat(80)}"\n${pad}`)).toBe(false)
-  // A file written, then run: directly, by name, sourced, or piped (isPiped), and a file that is code by its name.
-  expect(folds(`cat > x.sh <<'EOF'\npct destroy 101\nEOF\n./x.sh\n${pad}`)).toBe(false)
-  expect(folds(`cat > g.sh <<'EOF'\npct destroy 101\nEOF\ncat g.sh 2>&1 | bash\n${pad}`)).toBe(false)
-  expect(folds(`cat > cfg.json <<'EOF'\n{}\nEOF\nbash cfg.json\n${pad}`)).toBe(false)
-  expect(folds(`cat > run.sh <<'EOF'\npct destroy 101\nEOF\n${pad}`)).toBe(false)
-  // An unquoted body whose $( ) run as it is written.
-  expect(folds(`cat > cfg.json <<EOF\n$(pct destroy 101)\nEOF\n${pad}`)).toBe(false)
-  // A PowerShell here-string.
-  expect(folds(`$s = @"\nbody\n"@\n${pad}`, 'powershell')).toBe(false)
+test('lineCount counts every kind of line break once', () => {
+  expect(lineCount('')).toBe(0)
+  expect(lineCount('a')).toBe(1)
+  expect(lineCount('a\r\nb')).toBe(2)
+  expect(lineCount(`a\rb${String.fromCharCode(0x2028)}c${String.fromCharCode(0x2029)}d\ne`)).toBe(5)
 })
 
-test('a card folds only when every step is a file mover, and a data file is not code for a later command', () => {
-  const pad = Array.from({ length: 6 }, (_, n) => `echo ${n}`).join('\n')
-  const folds = (cmd: string) => canFold(segmentsOf(cmd), 'bash')
-  // The allowlist: cat, ls, mkdir, cd, echo, printf, cp, mv, touch, chmod, tee with one file.
-  expect(folds(`mkdir -p /srv/a && cd /srv/a && ls -la\ncp a.txt b.txt; mv b.txt c.txt\ntouch d\nchmod 600 d\nprintf x\ncat c.txt\n${pad}`)).toBe(true)
-  expect(folds(`tee /srv/a/x.txt <<'EOF'\nhello\nEOF\n${pad}`)).toBe(true)
-  expect(folds(`echo hi | tee out.txt\n${pad}`)).toBe(true)
-  // A data file that a later command reads as configuration or as a manifest.
-  expect(folds(`cat > x.conf <<'EOF'\n[core]\nfsmonitor = ./hook.sh\nEOF\nGIT_CONFIG_GLOBAL=x.conf git status\n${pad}`)).toBe(false)
-  expect(folds(`cat > package.json <<'EOF'\n{"scripts": {"preinstall": "./x"}}\nEOF\nnpm install\n${pad}`)).toBe(false)
-  expect(folds(`cat > x.txt <<'EOF'\ndiff --git a/b b/b\nEOF\ngit apply x.txt\n${pad}`)).toBe(false)
-  expect(folds(`git status\n${pad}`)).toBe(false)
-  // tee writes every file it is given: two files (one of them a cron job) never fold.
-  expect(folds(`tee /etc/cron.d/job x.txt <<'EOF'\n* * * * * root ./x\nEOF\n${pad}`)).toBe(false)
-  expect(folds(`echo hi | tee a.txt b.txt\n${pad}`)).toBe(false)
-  // Whatever changes what runs: an assignment before a program or alone, a substitution in an echo.
-  expect(folds(`LD_PRELOAD=./x.so ls\n${pad}`)).toBe(false)
-  expect(folds(`PATH=/tmp/evil\nls\n${pad}`)).toBe(false)
-  expect(folds(`echo $(pct destroy 101)\n${pad}`)).toBe(false)
-  expect(folds(`echo \`pct destroy 101\`\n${pad}`)).toBe(false)
-  // Steps it cannot split for certain (a comment), and programs near the list.
-  expect(folds(`ls # then pct destroy 101\n${pad}`)).toBe(false)
-  expect(folds(`/bin/ls\n${pad}`)).toBe(false)
-  expect(folds(`catx file\n${pad}`)).toBe(false)
-  expect(folds(`cat f | bash\n${pad}`)).toBe(false)
-})

@@ -61,10 +61,16 @@ const en = {
   approvedMsg: (cmd: string, once: boolean) =>
     `Approved from the coordinator pane${once ? ' (this one time)' : ' (for the rest of this session)'}: you may now run\n\n${cmd}`,
   deniedMsg: (cmd: string) => `Denied from the coordinator pane: do not run\n\n${cmd}\n\nFind another way or explain what you need.`,
-  answerMsg: (text: string) => `Answer to your questions, sent from the coordinator pane:\n\n${text}`,
+  answerMsg: (text: string, time = '', id = '', quote = '') =>
+    quote
+      ? `Answer to your questions of ${time} (#${id}), sent from the coordinator pane. It applies only to the questions quoted here, never to any other:\n\n${quote}\n\nAnswer:\n${text}`
+      : `Answer to your questions, sent from the coordinator pane:\n\n${text}`,
   forAgentMsg: (agent: string, text: string) =>
     `[coordinator-monitor] What follows answers your subagent ${agent}, which asked for it and can no longer be reached. Any command in it is that agent's, not yours, and an approval in it was for that agent alone: do not run the command on its strength. If you still need it, it asks the person again; else leave it and tell the person.\n\n${text}`,
-  reportReplyMsg: (text: string) => `Reply to your report, sent from the coordinator pane:\n\n${text}`,
+  reportReplyMsg: (text: string, time = '', id = '', quote = '') =>
+    quote
+      ? `Reply to your report of ${time} (#${id}), sent from the coordinator pane. It applies only to the report quoted here, never to anything else:\n\n${quote}\n\nReply:\n${text}`
+      : `Reply to your report, sent from the coordinator pane:\n\n${text}`,
   confirmMsg: 'Go ahead.',
   orderMsg: (list: string) =>
     `The person reordered your planned tasks in the coordinator pane. Take them in this order (items marked as queued by the coordinator are not in your own list yet):\n\n${list}`,
@@ -85,11 +91,9 @@ const en = {
   blockLabel: (kind: 'file' | 'input' | 'inline' | 'string', to: string, lines: number, runBy?: string, isRunning?: boolean, isPiped?: boolean) =>
     `${kind === 'file' ? `→ file ${to}` : kind === 'inline' ? `inline ${to} script` : kind === 'string' ? `here-string ${to}`.trim() : `→ input of ${to}`} · ${lines} ${lines === 1 ? 'line' : 'lines'}${isRunning ? ' · runs the $( ) in it now' : ''}${runBy ? ` · run later by ${runBy}` : isPiped ? ' · may run later (a later command may run it)' : ''}`,
   followedBy: (text: string) => `followed by: ${text}`,
-  showRequest: 'Show full request',
-  hideRequest: 'Hide full request',
+  sessionSays: 'The session says:',
+  fullTextLines: (n: number) => `Full text · ${n} lines`,
   blocks: (n: number) => `${n} ${n === 1 ? 'block' : 'blocks'}`,
-  touches: 'Touches (always shown, read from the command)',
-  touch: { cd: 'goes to', rm: 'deletes', write: 'writes', append: 'appends to', url: 'url', host: 'host', remote: 'git remote' } as Record<string, string>,
   commandSize: (lines: number, chars: number) => `${lines} lines · ${chars} characters`,
   writes: 'Writes',
   edits: 'Edits',
@@ -173,10 +177,16 @@ const it: typeof en = {
     `La tua domanda è stata inoltrata all'utente tramite il pannello del Coordinatore (richiesta ${id}, sulla scheda #${id.slice(-6)}). Chiudi il turno ora senza indovinare la risposta e senza ripeterla tra le tue domande: arriverà come nuovo messaggio.`,
   approvedMsg: (cmd, once) => `Approvato dal pannello del Coordinatore${once ? ' (solo questa volta)' : ' (per il resto della sessione)'}: ora puoi eseguire\n\n${cmd}`,
   deniedMsg: cmd => `Negato dal pannello del Coordinatore: non eseguire\n\n${cmd}\n\nTrova un'altra strada o spiega cosa ti serve.`,
-  answerMsg: text => `Risposta alle tue domande, inviata dal pannello del Coordinatore:\n\n${text}`,
+  answerMsg: (text, time = '', id = '', quote = '') =>
+    quote
+      ? `Risposta alle tue domande delle ${time} (#${id}), inviata dal pannello del Coordinatore. Vale solo per le domande citate qui, mai per altre:\n\n${quote}\n\nRisposta:\n${text}`
+      : `Risposta alle tue domande, inviata dal pannello del Coordinatore:\n\n${text}`,
   forAgentMsg: (agent, text) =>
     `[coordinator-monitor] Quanto segue risponde al tuo subagente ${agent}, che lo aveva chiesto e non è più raggiungibile. Ogni comando qui è di quell'agente, non tuo, e un'approvazione qui valeva solo per quell'agente: non eseguire il comando in base a essa. Se ti serve ancora, verrà chiesto di nuovo all'utente; altrimenti lascialo e avvisa l'utente.\n\n${text}`,
-  reportReplyMsg: text => `Risposta al tuo report, inviata dal pannello del Coordinatore:\n\n${text}`,
+  reportReplyMsg: (text, time = '', id = '', quote = '') =>
+    quote
+      ? `Risposta al tuo report delle ${time} (#${id}), inviata dal pannello del Coordinatore. Vale solo per il report citato qui, mai per altro:\n\n${quote}\n\nRisposta:\n${text}`
+      : `Risposta al tuo report, inviata dal pannello del Coordinatore:\n\n${text}`,
   confirmMsg: 'Procedi.',
   orderMsg: list =>
     `L'utente ha riordinato le tue attività programmate nel pannello del Coordinatore. Affrontale in quest'ordine (quelle messe in coda dal coordinatore non sono ancora nella tua lista):\n\n${list}`,
@@ -196,11 +206,9 @@ const it: typeof en = {
   blockLabel: (kind, to, lines, runBy, isRunning, isPiped) =>
     `${kind === 'file' ? `→ file ${to}` : kind === 'inline' ? `script ${to} in linea` : kind === 'string' ? `here-string ${to}`.trim() : `→ input di ${to}`} · ${lines} ${lines === 1 ? 'riga' : 'righe'}${isRunning ? ' · esegue subito i $( ) che contiene' : ''}${runBy ? ` · eseguito poi da ${runBy}` : isPiped ? ' · potrebbe essere eseguito poi (da un comando successivo)' : ''}`,
   followedBy: text => `seguito da: ${text}`,
-  showRequest: 'Mostra richiesta completa',
-  hideRequest: 'Nascondi richiesta completa',
+  sessionSays: 'La sessione dice:',
+  fullTextLines: n => `Testo completo · ${n} righe`,
   blocks: n => `${n} ${n === 1 ? 'blocco' : 'blocchi'}`,
-  touches: 'Cosa tocca (sempre visibile, letto dal comando)',
-  touch: { cd: 'va in', rm: 'cancella', write: 'scrive', append: 'aggiunge a', url: 'url', host: 'host', remote: 'remote git' },
   commandSize: (lines, chars) => `${lines} righe · ${chars} caratteri`,
   writes: 'Scrive',
   edits: 'Modifica',
