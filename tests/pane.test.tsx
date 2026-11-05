@@ -374,6 +374,12 @@ test('questions leave when the person replies in the session, or the session spe
   await $.turn.complete({ turnId: 't3', answer: 'Set the host to localhost.', isAborted: false } as never)
   await settle()
   expect(mine().requests.map(r => r.kind)).toEqual(['report'])
+
+  // An empty section ends the turn with a closing sentence, not a question: no card.
+  await $.turn.start({ turnId: 't4' } as never)
+  await $.turn.complete({ turnId: 't4', answer: 'Done.\n\n## Domande per te\n\nNessuna per ora.', isAborted: false } as never)
+  await settle()
+  expect(mine().requests).toEqual([])
 })
 
 describe('a session reporting', () => {

@@ -1004,9 +1004,10 @@ export const register: Register = (on, options) => {
         const raw = (end >= 0 ? rest.slice(0, end) : rest).trim()
         // An item asking the person to answer one of this session's own cards (approve request <id>)
         // only repeats that card, and would outlive its answer: left out, and with it a section of only those.
-        // A section with no numbered list is judged line by line.
+        // A section with no numbered list is judged line by line: only bullets and lines asking something
+        // count, so a closing sentence ("Nessuna per ora.") raises no card.
         const { lead, items } = itemsOf(raw)
-        const units = items.length ? items : raw.split('\n').map(line => ({ n: 0, text: line }))
+        const units = items.length ? items : raw.split('\n').filter(line => /^\s*[-*•]\s|\?/.test(line)).map(line => ({ n: 0, text: line }))
         const kept = units.filter(i => !asksOwn(i.text, own))
         const text = kept.some(i => i.text.trim()) ? [items.length ? lead : '', ...kept.map(i => i.text)].join('\n').trim() : ''
         if (text) await addRequest($, { id: newId(), kind: 'questions', createdAt: Date.now(), text })
