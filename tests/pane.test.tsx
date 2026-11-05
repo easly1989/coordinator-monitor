@@ -427,7 +427,12 @@ describe('a session reporting', () => {
     on('turn.complete', () => ({ text: '' }) as never)
     on('tool.call', () => ({ result: 'ok' }) as never)
     const prompts: string[] = []
+    const fault = { isNextRefused: false }
     on('prompt.submit', (_, e) => {
+      if (fault.isNextRefused) {
+        fault.isNextRefused = false
+        throw new Error('refused')
+      }
       prompts.push((e as { text: string }).text)
       return { text: (e as { text: string }).text } as never
     })
@@ -436,7 +441,7 @@ describe('a session reporting', () => {
       for (let i = 0; i < 20; i++) await new Promise<void>(r => setTimeout(r, 5))
     }
     const answersFile = () => Object.keys(written).find(k => k.endsWith('/sessions/me.json'))?.replace('/sessions/', '/answers/') ?? ''
-    return { mine, settle, written, prompts, answersFile }
+    return { mine, settle, written, prompts, answersFile, fault }
   }
 
   test('a turn that ends on a report shows it, waiting when it asks for a go-ahead', async ($, on) => {
@@ -1049,6 +1054,45 @@ describe('a session reporting', () => {
       await $.session.start({ cwd: '/repos/project', surface: 'desktop', isInteractive: true })
       await settle()
       expect(prompts.some(t => t.includes('go ahead'))).toBe(true)
+    })
+
+    test('a restarted sequence is not mistaken for delivered notes (#23)', async ($, on) => {
+      const { settle } = setup(on)
+      const notes = watch(on)
+      const queue = track(on)
+      queue.seed({ seq: 5, rows: [{ seq: 5, at: Date.now() - 20 * 60_000, text: 'old note' }] })
+      queue.fault.isWriteFailing = true
+      await $.session.start({ cwd: '/repos/project', surface: 'desktop', isInteractive: true })
+      await settle()
+      expect(notes.length).toBe(1)
+      // The state is reset under the loaded module: its sequence restarts below the mark the flush left.
+      queue.fault.isWriteFailing = false
+      queue.seed({ seq: 1, rows: [{ seq: 1, at: Date.now() - 20 * 60_000, text: 'new note' }] })
+      await $.turn.start({ turnId: 't1' } as never)
+      await settle()
+      expect(notes).toEqual([expect.stringMatching(/old note/), expect.stringMatching(/new note/)])
+      expect(queue.rows()).toEqual([])
+    })
+
+    test('a prompt the session refuses does not lose the answers after it (#23)', async ($, on) => {
+      const { mine, settle, written, answersFile, prompts, fault } = setup(on)
+      watch(on)
+      track(on)
+      await $.session.start({ cwd: '/repos/project', surface: 'desktop', isInteractive: true })
+      await $.tool.check({ tool: 'Bash', input: { command: 'gh pr merge 176' }, tool_use_id: 'u1' } as never)
+      await $.turn.start({ turnId: 't1' } as never)
+      await $.turn.complete({ turnId: 't1', answer: 'Done.\n\n## Questions for you\n\n1. Which port?', isAborted: false } as never)
+      await settle()
+      const ids = mine().requests.map(r => r.id)
+      expect(ids.length).toBe(2)
+      written[answersFile()] = JSON.stringify([
+        { requestId: ids[0], at: Date.now(), kind: 'answer', text: 'first answer' },
+        { requestId: ids[1], at: Date.now(), kind: 'answer', text: 'second answer' },
+      ])
+      fault.isNextRefused = true
+      await $.session.start({ cwd: '/repos/project', surface: 'desktop', isInteractive: true })
+      await settle()
+      expect(prompts.some(t => t.includes('second answer'))).toBe(true)
     })
 
     test('an urgent row is kept urgent across a reload, and a quiet one is not (#19)', async ($, on) => {

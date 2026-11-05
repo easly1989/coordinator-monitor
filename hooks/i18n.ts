@@ -50,6 +50,7 @@ const en = {
   thisSession: 'this session',
   coordinator: 'coordinator',
   sentToast: (title: string) => `Sent to «${title}»`,
+  answerLostToast: 'An answer could not be delivered to the session and was not kept',
   paneOpened: 'Agents pane opened.',
   rulesBroken: (path: string) => `coordinator-monitor: ${path} is not valid JSON; only the default rules apply.`,
   // what the model reads
@@ -163,6 +164,7 @@ const it: typeof en = {
   thisSession: 'questa sessione',
   coordinator: 'coordinatore',
   sentToast: title => `Inviato a «${title}»`,
+  answerLostToast: 'Una risposta non è stata recapitata alla sessione e non è stata conservata',
   paneOpened: 'Pannello Agenti aperto.',
   rulesBroken: path => `coordinator-monitor: ${path} non è un JSON valido; valgono solo le regole predefinite.`,
   waitApproval: (label, id) =>
