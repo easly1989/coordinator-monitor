@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.8 — 2026-11-05
+
+- **An empty "Domande per te" raises no card** (#25). A section with no numbered list was judged line by line, so "Nessuna per ora." became a QUESTIONS card. Without a numbered list only bullets and lines containing a question mark count; numbered items are unchanged.
+- **Closed sessions leave the pane** (#26). A closed session goes 5 minutes after it ends (time to read a last report). It stays while a planned-task queue is held for it, until the queue is empty, and for up to an hour while a card waits. Its status file is not deleted: the plugin file API cannot delete, and files past the hour are ignored anyway.
+- **Digest follow-ups** (#23). A digest state reset under a loaded module (sequence restarting below the delivered mark) no longer hides new notes as delivered. A refused `prompt.submit` while applying answers queues that answer urgent and the rest of the batch still goes out.
+
 ## 0.6.7 — 2026-11-04
 
 - **Run-later labels name the real runner and catch spelled-differently files** (#15). A file a block writes was marked "run later by X" only when a later step named it literally. Fail closed, as before: when unsure, the block is marked "may run later".
