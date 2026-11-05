@@ -301,7 +301,11 @@ const applyAnswers = async ($: $): Promise<void> => {
     // Out of order beats lost: only a prompt that could not even be queued is submitted over them.
     if (!(await flushDigest($)) && (await queueNote($, text, true))) continue
     ownPrompts.add(text)
-    await $.prompt.submit({ text, asUser: true })
+    // A refused submit must not lose the rest of the batch: the answer is queued urgent, to be tried again.
+    await $.prompt.submit({ text, asUser: true }).catch(async () => {
+      ownPrompts.delete(text)
+      await queueNote($, text, true)
+    })
   }
   await publish($)
 }
@@ -364,6 +368,8 @@ const digestText = (rows: Digest['rows']): string =>
 const flushDigest = async ($: $): Promise<boolean> => {
   const run = async (): Promise<boolean> => {
     const d = await read($, digest)
+    // A state reset under a loaded module restarts `seq` below the mark: new notes must not read as delivered.
+    if (d.seq < deliveredSeq) deliveredSeq = 0
     // What an earlier flush already appended, whose removal from the state failed, is in the conversation.
     const fresh = d.rows.filter(r => r.seq > deliveredSeq)
     const last = fresh.at(-1)
