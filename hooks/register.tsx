@@ -19,7 +19,7 @@ import type { EngineInterface, Register, RenderChildren, RenderNode } from 'clau
 import type { AgentRow, Answer, AnswerKind, Board, ChoiceOption, ChoiceQuestion, Digest, Local, MonitorRequest, PaneUi, PlanItem, Queues, SessionStatus } from '../types'
 import { CRAB_H, TIER_COLOR, TIER_MODEL, crabSvg, hatFor, tierOf } from './crab'
 import { NO_QUESTIONS, QUESTIONS_HEADING, asksGoAhead, pickStrings, type Strings } from './i18n'
-import { canFold, lineCount, segmentsOf, touchesOf, viewOf, visible } from './request'
+import { lineCount, segmentsOf, viewOf, visible } from './request'
 import { compileRules, criticalIn, matchRule, type Rule, type RulesFile } from './rules'
 
 const PANE = 'coordinator-monitor'
@@ -486,8 +486,6 @@ const recapOf = (s: string): string => {
   const t = s.replace(/[«»]/g, '').replace(/\s+/g, ' ').trim()
   return t.length > 200 ? `${t.slice(0, 200)}…` : t
 }
-/** A command shown inline, with no fold: a single line of at most this many characters. */
-const INLINE_MAX = 160
 const BODY_LINES = 6
 
 /** A Markdown fence no backtick run inside `s` can close, so the text stays quoted. */
@@ -1464,15 +1462,7 @@ export const register: Register = (on, options) => {
         // Characters that hide or reorder text are drawn as codes, here and in the aid.
         const segs = isShell ? segmentsOf(cmd, shellKind) : []
         const view = viewOf(tool, cmd)
-        // A large shell request opens folded: its recap, what it touches and its size stay, its text is a
-        // press away. Never where the aid gave up, nor where any block could run (a body the recap does
-        // not read): then the card opens whole, as before.
-        // Every body folds, but a single short line, which reads at a glance and stays inline.
-        // Only a shell request the aid reads for certain and where nothing can run (canFold): anything else,
-        // a pipe to an interpreter, a $( ), a file tool, an MCP call, is always shown whole.
-        const isFoldable = isShell && view?.kind === 'shell' && (cmd.includes('\n') || cmd.length > INLINE_MAX) && canFold(segs, shellKind)
-        const isFolded = isFoldable && !u.open?.[`full:${r.id}`]
-        const touches = isFoldable && isShell && view?.kind === 'shell' ? touchesOf(cmd, shellKind) : []
+        // A permission card never folds: the full command, every block and every step are always on screen.
         // Only what closes a block is drawn under it: an inline script's closing quotes, a here-string's
         // `'@`, a here-doc's end word (the line after its body, by how it is cut). Anything else may run
         // (`"|sh`, `'@ | iex`) and keeps a box of its own.
@@ -1489,20 +1479,14 @@ export const register: Register = (on, options) => {
           <Box flexDirection="column" gap="xs">
             {segs.map((sg, k) =>
               sg.kind === 'shell' ? (
-                !isFolded && sg.text.trim() && !tailOf(k - 1) ? <Code key={`raw-${r.id}-${k}`} source={visible(sg.text.replace(/\n$/, ''))} wrap="wrap" language={shellKind} /> : null
+                sg.text.trim() && !tailOf(k - 1) ? <Code key={`raw-${r.id}-${k}`} source={visible(sg.text.replace(/\n$/, ''))} wrap="wrap" language={shellKind} /> : null
               ) : (
                 <Box key={`blk-${r.id}-${k}`} flexDirection="column" gap="xs" paddingLeft="sm" borderStyle="round" borderColor={isTerm ? undefined : CARD_LINE} borderDimColor={isTerm}>
                   <Text size="caption" color="subtle">
                     {visible(S.blockLabel(sg.isInline ? 'inline' : sg.isString ? 'string' : sg.path ? 'file' : 'input', sg.to, sg.lines, sg.runBy, sg.isRunning, sg.isPiped))}
                   </Text>
-                  {/* Folded, a block still shows its first lines, as the Write view does: the body is never fully hidden. */}
-                  <Code key={`raw-${r.id}-${k}`} source={visible((isFolded ? sg.text.replace(/\n$/, '').split('\n').slice(0, HEAD_LINES).join('\n') : sg.text.replace(/\n$/, '')))} wrap="wrap" language={sg.language} path={sg.path} startLine={1} />
-                  {isFolded && sg.lines > HEAD_LINES ? (
-                    <Text size="caption" color="subtle">
-                      {S.firstLines(HEAD_LINES, sg.lines)}
-                    </Text>
-                  ) : null}
-                  {!isFolded && tailOf(k) !== null ? (
+                  <Code key={`raw-${r.id}-${k}`} source={visible(sg.text.replace(/\n$/, ''))} wrap="wrap" language={sg.language} path={sg.path} startLine={1} />
+                  {tailOf(k) !== null ? (
                     <Text size="caption" color="subtle">
                       {visible(S.followedBy(tailOf(k) ?? ''))}
                     </Text>
@@ -1532,7 +1516,7 @@ export const register: Register = (on, options) => {
                 <Box key={`risk-${r.id}-${k}`}>{tag(S.risk[k] ?? k, RISK_COLOR[k] ?? BLUE)}</Box>
               ))}
             </Box>
-            {/* Every step, whole, folded or not: a fold hides only the raw text, never what runs. */}
+            {/* Every step, whole: a cut one could hide what runs after the cut. */}
             {view.steps.map((st, i) => (
               <Text key={`st-${r.id}-${i}`} size="footnote" wrap="wrap">
                 <Text color="subtle">{`${i + 1}. `}</Text>
@@ -1564,33 +1548,19 @@ export const register: Register = (on, options) => {
         return shell(
           <Box flexDirection="column" gap="sm">
             {head(S.permission,`${s.title} · ${r.tool ?? 'Bash'}`)}
-            {/* What the session says it is for, else the aid's first step: two lines at most, outside the fold. */}
+            {/* What the session says it is for, one line. */}
             {recap ? (
               <Text size="footnote" color="subtle" wrap="wrap">
                 {`${S.sessionSays} «${recap}»`}
               </Text>
             ) : null}
             {/* A reading aid above the request, never in its place: the request itself is what is approved. */}
-            {isAided || isFolded ? (
+            {isAided ? (
               <Box flexDirection="column" gap="xs" padding="sm" borderStyle="round" borderColor={isTerm ? undefined : '#FFFFFF1F'} borderDimColor={isTerm}>
                 <Text size="caption" color="subtle">
                   {S.readingAid}
                 </Text>
                 {summary}
-              </Box>
-            ) : null}
-            {/* Built from the command alone, folded or not: where it goes, what it deletes and writes, whom it talks to. */}
-            {touches.length ? (
-              <Box flexDirection="column" gap="xs" padding="sm" borderStyle="round" borderColor={isTerm ? undefined : '#FFFFFF1F'} borderDimColor={isTerm}>
-                <Text size="caption" color="subtle">
-                  {S.touches}
-                </Text>
-                {touches.map((t, i) => (
-                  <Text key={`tch-${r.id}-${i}`} size="footnote" wrap="wrap">
-                    <Text color={t.kind === 'rm' ? 'warning' : 'subtle'}>{`${S.touch[t.kind]}  `}</Text>
-                    {visible(t.target)}
-                  </Text>
-                ))}
               </Box>
             ) : null}
             {/* Written from the request itself, as unverified as the aid. */}
@@ -1611,17 +1581,6 @@ export const register: Register = (on, options) => {
               <Text size="caption" color="subtle">
                 {`${S.fullRequest} · ${view?.kind === 'shell' ? `${S.steps(view.steps.length)} · ` : ''}${S.commandSize(lineCount(cmd), cmd.length)}${segs.some(sg => sg.kind === 'block') ? ` · ${S.blocks(segs.filter(sg => sg.kind === 'block').length)}` : ''}`}
               </Text>
-              {isFoldable ? (
-                <Box flexDirection="row">
-                  <Button
-                    key={`full-${r.id}`}
-                    variant="secondary"
-                    label={`${isFolded ? '▸' : '▾'} ${S.fullRequestLines(lineCount(cmd))}`}
-                    onPress={() => void update($, paneUi, cur => ({ ...cur, open: { ...cur.open, [`full:${r.id}`]: isFolded } }))}
-                  />
-                </Box>
-              ) : null}
-              {/* Closed, a shell request keeps its other fields (timeout, background...) in sight: they too are approved. */}
               {raw}
             </Box>
             {r.rule ? (
