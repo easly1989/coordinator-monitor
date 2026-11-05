@@ -91,8 +91,8 @@ const en = {
   blockLabel: (kind: 'file' | 'input' | 'inline' | 'string', to: string, lines: number, runBy?: string, isRunning?: boolean, isPiped?: boolean) =>
     `${kind === 'file' ? `→ file ${to}` : kind === 'inline' ? `inline ${to} script` : kind === 'string' ? `here-string ${to}`.trim() : `→ input of ${to}`} · ${lines} ${lines === 1 ? 'line' : 'lines'}${isRunning ? ' · runs the $( ) in it now' : ''}${runBy ? ` · run later by ${runBy}` : isPiped ? ' · may run later (a later command may run it)' : ''}`,
   followedBy: (text: string) => `followed by: ${text}`,
-  showRequest: 'Show full request',
-  hideRequest: 'Hide full request',
+  fullRequestLines: (n: number) => `Full request · ${n} ${n === 1 ? 'line' : 'lines'}`,
+  fullTextLines: (n: number) => `Full text · ${n} lines`,
   blocks: (n: number) => `${n} ${n === 1 ? 'block' : 'blocks'}`,
   touches: 'Touches (always shown, read from the command)',
   touch: { cd: 'goes to', rm: 'deletes', write: 'writes', append: 'appends to', url: 'url', host: 'host', remote: 'git remote' } as Record<string, string>,
@@ -208,8 +208,8 @@ const it: typeof en = {
   blockLabel: (kind, to, lines, runBy, isRunning, isPiped) =>
     `${kind === 'file' ? `→ file ${to}` : kind === 'inline' ? `script ${to} in linea` : kind === 'string' ? `here-string ${to}`.trim() : `→ input di ${to}`} · ${lines} ${lines === 1 ? 'riga' : 'righe'}${isRunning ? ' · esegue subito i $( ) che contiene' : ''}${runBy ? ` · eseguito poi da ${runBy}` : isPiped ? ' · potrebbe essere eseguito poi (da un comando successivo)' : ''}`,
   followedBy: text => `seguito da: ${text}`,
-  showRequest: 'Mostra richiesta completa',
-  hideRequest: 'Nascondi richiesta completa',
+  fullRequestLines: n => `Richiesta completa · ${n} ${n === 1 ? 'riga' : 'righe'}`,
+  fullTextLines: n => `Testo completo · ${n} righe`,
   blocks: n => `${n} ${n === 1 ? 'blocco' : 'blocchi'}`,
   touches: 'Cosa tocca (sempre visibile, letto dal comando)',
   touch: { cd: 'va in', rm: 'cancella', write: 'scrive', append: 'aggiunge a', url: 'url', host: 'host', remote: 'remote git' },

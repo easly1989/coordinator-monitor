@@ -2,6 +2,7 @@
 
 ## 0.6.9 — 2026-11-05
 
+- **Long cards fold behind a toggle, with a recap outside it.** A permission body (the full request and the reading aid) is closed behind "Full request · N lines ▸/▾", except a single line of at most 160 characters; above it a recap of at most 2 lines and 200 characters: the tool call's own `description` (new optional field, sanitised, stored cut at 300), else the first step of the reading. Its touches, other fields, rule and the approve/deny buttons stay in sight. QUESTIONS and report bodies over 6 lines show the first 6, then the same toggle.
 - **A forwarded answer quotes the questions it answers** (#33). The message to the session now carries the card's own text, with its time and short id (the ones the read receipt uses), above the answer, for QUESTIONS cards and report replies. The text is what the card showed, drawn like any text from another session (hidden characters as codes), cut at about 1,500 characters with an ellipsis. The message says the answer applies only to the quoted questions, so a session that asked again or compacted cannot read it against another set.
 
 ## 0.6.8 — 2026-11-05

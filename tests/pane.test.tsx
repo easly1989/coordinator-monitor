@@ -209,8 +209,16 @@ test('the pane draws sessions, workers and every kind of request, on every surfa
   expect(mine.effort).toBe('high')
   expect(mine.version).toBe('0.6.9')
 
+  // Every permission body is folded but a short line; open them, bar p13 (its folded state is checked below).
+  const openAll = async (ui: Awaited<ReturnType<typeof $.ui.mount>>) => {
+    for (const id of ['p4', 'p5', 'p6', 'p7', 'p8', 'p9', 'p10', 'p11', 'p12']) {
+      if ((await ui.find({ key: `full-${id}` }))?.text?.startsWith('▸')) await ui.press({ key: `full-${id}` })
+    }
+    await new Promise<void>(r => setTimeout(r, 50))
+  }
   for (const surface of ['terminal', 'desktop', 'vscode', 'mobile'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface })
+    await openAll(ui)
     expect(await ui.find({ type: 'Text', text: /HomeLab · Bash/ })).toBeTruthy()
     expect(await ui.find({ type: 'Text', text: /Migrate schema/ })).toBeTruthy()
     expect(await ui.find({ type: 'Text', text: /Update the console/ })).toBeTruthy()
@@ -265,6 +273,7 @@ test('the pane draws sessions, workers and every kind of request, on every surfa
   }
   // This session has no link to itself; one the desktop app does not know has none either.
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await openAll(ui)
   // An app ask's JSON is read as what it is: the command itself, its here-doc a labelled block, the
   // other fields as lines, a reading aid in plain words above. No JSON escapes are left to read.
   expect(await ui.find({ type: 'Code', text: /"command": "S=/ })).toBeFalsy()
@@ -281,7 +290,9 @@ test('the pane draws sessions, workers and every kind of request, on every surfa
   // A block that runs keeps the card open, however large (p6: a script run later by node): its body is
   // on screen at once and there is nothing to unfold. So with short asks, and a request the aid gave up on.
   expect(await ui.find({ type: 'Code', text: /chromium/ })).toBeTruthy()
-  for (const id of ['p6', 'p1', 'p5']) expect(await ui.find({ key: `full-${id}` })).toBeFalsy()
+  // Short single lines have no fold; every other body has one (here left open by openAll).
+  for (const id of ['p1', 'p2', 'p14']) expect(await ui.find({ key: `full-${id}` })).toBeFalsy()
+  for (const id of ['p6', 'p5']) expect((await ui.find({ key: `full-${id}` }))?.text).toMatch(/^▾ Full request · \d+ lines$/)
   // An explanation is drawn through visible(): a reversal shows as its code.
   expect(await ui.find({ type: 'Text', text: /^Runs the linter\\u202Egnp$/ })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /^→ file \$S\/shots\.js · 2 lines · run later by node$/ })).toBeTruthy()
@@ -1022,6 +1033,66 @@ describe('a session reporting', () => {
       expect(notes[0]).toMatch(/^\[coordinator-monitor\] 2 notes from the pane[\s\S]*1\. .*request a1[\s\S]*approved once[\s\S]*2\. .*request q1/)
       expect(queue.rows()).toEqual([])
       await ui.unmount()
+    })
+
+    describe('long cards fold behind a toggle, with a recap outside it', () => {
+      const BIG = ['echo one', 'echo two', 'echo three', 'echo four', 'echo five', 'echo six', 'echo seven', 'echo eight'].join('\n')
+      const open = async ($: Parameters<Parameters<typeof test>[2]>[0], on: TestOn, requests: unknown[]) => {
+        const { settle, written } = setup(on, [], '/repos/coordinator')
+        on('ui.open', () => ({ value: { isPlaced: true } }))
+        await $.session.start({ cwd: '/repos/coordinator', surface: 'desktop', isInteractive: true })
+        await settle()
+        const bus = Object.keys(written).find(k => k.endsWith('/sessions/me.json'))?.replace(/\/sessions\/me\.json$/, '') ?? ''
+        written[`${bus}/sessions/p.json`] = JSON.stringify(status({ sessionId: 'p', title: 'project', heartbeat: Date.now(), requests } as never))
+        await $.command.run({ command: 'agents-monitor', args: '' } as never)
+        return $.ui.mount({ ...PANE, surface: 'desktop' })
+      }
+      const perm = (extra: object = {}, command = BIG) => ({ id: 'k1', kind: 'permission', createdAt: Date.now(), tool: 'Bash', command, rule: 'x', ...extra })
+
+      test('the tool call description is the recap, sanitised and cut at 200 characters', async ($, on) => {
+        const ui = await open($ as never, on, [perm({ description: `Print eight words${String.fromCharCode(0x202e)}gnp ${'y'.repeat(400)}` })])
+        const recap = await ui.find({ type: 'Text', text: /^Print eight words\\u202Egnp / })
+        expect(recap?.text?.endsWith('…')).toBe(true)
+        expect(recap?.text?.length).toBe(201)
+        await ui.unmount()
+      })
+
+      test('with no description the first step of the assisted reading is the recap', async ($, on) => {
+        const ui = await open($ as never, on, [perm()])
+        expect(await ui.find({ type: 'Text', text: /echo one/ })).toBeTruthy()
+        expect(await ui.find({ type: 'Text', text: /echo two/ })).toBeFalsy()
+        await ui.unmount()
+      })
+
+      test('the body is closed by default and, opened, is the exact command; the buttons stay in sight', async ($, on) => {
+        const ui = await open($ as never, on, [perm({ description: 'Print words' })])
+        expect(await ui.find({ type: 'Code', text: BIG })).toBeFalsy()
+        expect((await ui.find({ key: 'full-k1' }))?.text).toBe('▸ Full request · 8 lines')
+        expect(await ui.find({ key: 'once-k1' })).toBeTruthy()
+        await ui.press({ key: 'full-k1' })
+        expect(await ui.find({ type: 'Code', text: BIG })).toBeTruthy()
+        expect((await ui.find({ key: 'full-k1' }))?.text).toBe('▾ Full request · 8 lines')
+        expect(await ui.find({ key: 'once-k1' })).toBeTruthy()
+        await ui.unmount()
+      })
+
+      test('a single short line stays inline, with no fold', async ($, on) => {
+        const ui = await open($ as never, on, [perm({}, 'npm run lint')])
+        expect(await ui.find({ type: 'Code', text: 'npm run lint' })).toBeTruthy()
+        expect(await ui.find({ key: 'full-k1' })).toBeFalsy()
+        await ui.unmount()
+      })
+
+      test('a QUESTIONS body over 6 lines shows its first 6 and folds the rest', async ($, on) => {
+        const text = Array.from({ length: 10 }, (_, n) => `Line ${n + 1}`).join('\n')
+        const ui = await open($ as never, on, [{ id: 'k1', kind: 'questions', createdAt: Date.now(), text }])
+        expect(await ui.find({ text: /Line 6/ })).toBeTruthy()
+        expect(await ui.find({ text: /Line 7/ })).toBeFalsy()
+        expect((await ui.find({ key: 'full-k1' }))?.text).toBe('▸ Full text · 10 lines')
+        await ui.press({ key: 'full-k1' })
+        expect(await ui.find({ text: /Line 10/ })).toBeTruthy()
+        await ui.unmount()
+      })
     })
 
     test('free text that could not be added is tried again on the next tick, not after the interval (#19)', { options: { coordinatorFolder: 'coordinator' } }, async ($, on) => {

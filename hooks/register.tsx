@@ -19,7 +19,7 @@ import type { EngineInterface, Register, RenderChildren, RenderNode } from 'clau
 import type { AgentRow, Answer, AnswerKind, Board, ChoiceOption, ChoiceQuestion, Digest, Local, MonitorRequest, PaneUi, PlanItem, Queues, SessionStatus } from '../types'
 import { CRAB_H, TIER_COLOR, TIER_MODEL, crabSvg, hatFor, tierOf } from './crab'
 import { NO_QUESTIONS, QUESTIONS_HEADING, asksGoAhead, pickStrings, type Strings } from './i18n'
-import { canFold, lineCount, segmentsOf, touchesOf, viewOf, visible } from './request'
+import { lineCount, segmentsOf, touchesOf, viewOf, visible } from './request'
 import { compileRules, criticalIn, matchRule, type Rule, type RulesFile } from './rules'
 
 const PANE = 'coordinator-monitor'
@@ -475,6 +475,22 @@ const quoteOf = (text: string): string => {
   return (t.length > QUOTE_MAX ? `${t.slice(0, QUOTE_MAX)}…` : t).replace(/^/gm, '> ').trimEnd()
 }
 
+/** What the session says a call is for: its input's `description`, drawn like any text of another session, cut when stored. */
+const DESC_MAX = 300
+const descOf = (input: unknown): string | undefined => {
+  const d = (input as { description?: unknown } | null)?.description
+  return typeof d === 'string' && d.trim() ? visible(d.trim()).slice(0, DESC_MAX) : undefined
+}
+/** The recap line(s) a card shows: at most 2 lines and 200 characters, with an ellipsis where cut. */
+const recapOf = (s: string): string => {
+  const lines = s.split('\n').filter(l => l.trim())
+  const t = lines.slice(0, 2).join('\n')
+  return t.length > 200 ? `${t.slice(0, 200)}…` : lines.length > 2 ? `${t}…` : t
+}
+/** A command shown inline, with no fold: a single line of at most this many characters. */
+const INLINE_MAX = 160
+const BODY_LINES = 6
+
 /** A Markdown fence no backtick run inside `s` can close, so the text stays quoted. */
 const fence = (s: string): string => {
   const f = '`'.repeat(Math.max(3, ...[...s.matchAll(/`+/g)].map(m => m[0].length + 1)))
@@ -655,6 +671,7 @@ const gather = async ($: $): Promise<void> => {
         ...r,
         tool: txt(r.tool),
         command: str(r.command),
+        description: txt(r.description)?.slice(0, DESC_MAX),
         rule: txt(r.rule),
         text: txt(r.text),
         summary: txt(r.summary),
@@ -1173,7 +1190,7 @@ export const register: Register = (on, options) => {
     if ((await read($, local)).grantsSession.includes(key)) return { decision: { behavior: 'allow' } }
     if (!(await coordinatorLive($))) return next(e)
     const id = newId()
-    await addRequest($, { id, kind: 'ask', createdAt: Date.now(), tool: e.tool_name, command: what, isInput: !isBareAsk(e.tool_input), rule: S.appPermission, agentId: e.agent_id })
+    await addRequest($, { id, kind: 'ask', createdAt: Date.now(), tool: e.tool_name, command: what, description: descOf(e.tool_input), isInput: !isBareAsk(e.tool_input), rule: S.appPermission, agentId: e.agent_id })
     void explainLater($, id, e.tool_name, what)
     const a = await waitAnswer($, id)
     await update($, local, cur => ({
@@ -1216,7 +1233,7 @@ export const register: Register = (on, options) => {
       const isHeld = await coordinatorLive($)
       if (isHeld) holding.add(id)
       try {
-        await addRequest($, { id, kind: 'permission', createdAt: Date.now(), tool: e.tool, command, rule: crit ? `${rule.label} · ${crit}` : rule.label, agentId: e.agentId })
+        await addRequest($, { id, kind: 'permission', createdAt: Date.now(), tool: e.tool, command, description: descOf(e.input), rule: crit ? `${rule.label} · ${crit}` : rule.label, agentId: e.agentId })
         void explainLater($, id, e.tool, command)
         const a = isHeld ? await waitAnswer($, id, HOLD_MS) : undefined
         if (a?.kind === 'approve-once' || a?.kind === 'approve-session' || a?.kind === 'deny') {
@@ -1367,9 +1384,29 @@ export const register: Register = (on, options) => {
           {children}
         </Box>
       )
+      // A body longer than BODY_LINES shows its first lines, then the same toggle as a permission's request.
+      const bodyOf = (full: string): { shown: string; toggle: RenderChildren } => {
+        const lines = full.split('\n')
+        const isLong = lines.length > BODY_LINES
+        const isShut = isLong && !u.open?.[`full:${r.id}`]
+        return {
+          shown: isShut ? lines.slice(0, BODY_LINES).join('\n') : full,
+          toggle: isLong ? (
+            <Box flexDirection="row">
+              <Button
+                key={`full-${r.id}`}
+                variant="secondary"
+                label={`${isShut ? '▸' : '▾'} ${S.fullTextLines(lines.length)}`}
+                onPress={() => void update($, paneUi, cur => ({ ...cur, open: { ...cur.open, [`full:${r.id}`]: isShut } }))}
+              />
+            </Box>
+          ) : null,
+        }
+      }
       if (r.kind === 'report') {
         const isOpen = !!u.open?.[r.id]
         const text = r.text ?? ''
+        const body = bodyOf(text)
         // Collapsed it reads as one glance: the wrap-up's question or recap, else the report's first paragraph.
         const gist = r.decision || r.summary || (text.split(/\n\s*\n/)[0] ?? '').replace(/^#+\s*/, '').slice(0, 280)
         return shell(
@@ -1377,7 +1414,8 @@ export const register: Register = (on, options) => {
             {head(r.awaits ? S.confirmBadge : S.report, s.title, r.awaits ? 'amber' : 'blue')}
             {isOpen ? (
               <Box flexDirection="column" padding="sm" backgroundColor={fill(CARD)}>
-                {Markdown ? <Markdown key={`md-${r.id}`} text={text} /> : <Text>{text}</Text>}
+                {Markdown ? <Markdown key={`md-${r.id}`} text={body.shown} /> : <Text>{body.shown}</Text>}
+                {body.toggle}
               </Box>
             ) : (
               <Text size="footnote" weight={r.decision ? 'semibold' : undefined}>
@@ -1428,9 +1466,10 @@ export const register: Register = (on, options) => {
         // A large shell request opens folded: its recap, what it touches and its size stay, its text is a
         // press away. Never where the aid gave up, nor where any block could run (a body the recap does
         // not read): then the card opens whole, as before.
-        const isFoldable = isShell && view?.kind === 'shell' && isLarge(cmd) && canFold(segs, shellKind)
+        // Every body folds, but a single short line, which reads at a glance and stays inline.
+        const isFoldable = cmd.includes('\n') || cmd.length > INLINE_MAX
         const isFolded = isFoldable && !u.open?.[`full:${r.id}`]
-        const touches = isFoldable ? touchesOf(cmd, shellKind) : []
+        const touches = isFoldable && isShell && view?.kind === 'shell' ? touchesOf(cmd, shellKind) : []
         // Only what closes a block is drawn under it: an inline script's closing quotes, a here-string's
         // `'@`, a here-doc's end word (the line after its body, by how it is cut). Anything else may run
         // (`"|sh`, `'@ | iex`) and keeps a box of its own.
@@ -1511,11 +1550,18 @@ export const register: Register = (on, options) => {
             ) : null}
           </Box>
         )
+        const recap = recapOf(r.description ?? (isFoldable && view?.kind === 'shell' ? visible(view.steps[0] ?? '') : ''))
         return shell(
           <Box flexDirection="column" gap="sm">
-            {head(S.permission, `${s.title} · ${r.tool ?? 'Bash'}`)}
+            {head(S.permission,`${s.title} · ${r.tool ?? 'Bash'}`)}
+            {/* What the session says it is for, else the aid's first step: two lines at most, outside the fold. */}
+            {recap ? (
+              <Text size="footnote" wrap="wrap">
+                {recap}
+              </Text>
+            ) : null}
             {/* A reading aid above the request, never in its place: the request itself is what is approved. */}
-            {isAided ? (
+            {isAided && !isFolded ? (
               <Box flexDirection="column" gap="xs" padding="sm" borderStyle="round" borderColor={isTerm ? undefined : '#FFFFFF1F'} borderDimColor={isTerm}>
                 <Text size="caption" color="subtle">
                   {S.readingAid}
@@ -1560,12 +1606,13 @@ export const register: Register = (on, options) => {
                   <Button
                     key={`full-${r.id}`}
                     variant="secondary"
-                    label={isFolded ? `▸ ${S.showRequest}` : `▾ ${S.hideRequest}`}
+                    label={`${isFolded ? '▸' : '▾'} ${S.fullRequestLines(lineCount(cmd))}`}
                     onPress={() => void update($, paneUi, cur => ({ ...cur, open: { ...cur.open, [`full:${r.id}`]: isFolded } }))}
                   />
                 </Box>
               ) : null}
-              {raw}
+              {/* Closed, a shell request keeps its other fields (timeout, background...) in sight: they too are approved. */}
+              {isFolded && !isShell ? null : raw}
             </Box>
             {r.rule ? (
               <Text size="footnote" color={r.rule.includes('·') ? 'warning' : 'subtle'}>
@@ -1661,6 +1708,7 @@ export const register: Register = (on, options) => {
       // An item's bold-label bullets are its answers, as buttons: one item answers on a press, several
       // are picked one by one and sent together, each with its item's number.
       const { items } = itemsOf(r.text ?? '')
+      const body = bodyOf(r.text ?? '')
       // Picks keyed by the item's place: a section may repeat a number.
       const offers = items.map((i, at) => ({ at, n: i.n, options: optionsOf(i.text) })).filter(o => o.options.length)
       const isMulti = items.length > 1
@@ -1675,7 +1723,8 @@ export const register: Register = (on, options) => {
         <Box flexDirection="column" gap="sm">
           {head(S.questions, s.title)}
           <Box flexDirection="column" padding="sm" backgroundColor={fill(CARD)}>
-            {Markdown ? <Markdown key={`md-${r.id}`} text={r.text ?? ''} /> : <Text>{r.text ?? ''}</Text>}
+            {Markdown ? <Markdown key={`md-${r.id}`} text={body.shown} /> : <Text>{body.shown}</Text>}
+            {body.toggle}
           </Box>
           {offers.map(o => (
             <Box key={`${r.id}-o${o.at}`} flexDirection="row" flexWrap="wrap" gap="sm" alignItems="center">
