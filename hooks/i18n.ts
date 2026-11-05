@@ -228,6 +228,9 @@ export const pickStrings = (lang: string | undefined): Strings => (lang?.toLower
 /** The heading a session ends its turn with when it has open questions. */
 export const QUESTIONS_HEADING = /^#{1,3}\s*(questions for you|domande per te)\s*$/im
 
+/** A questions section that only says there is nothing to ask ("Nessuna per ora."): no question, so no card. */
+export const NO_QUESTIONS = /^\W*(nessuna|nessun|nulla|nothing|none|no questions|n\/a)\b[^?\n]*$/i
+
 /**
  * Whether a closing message waits for the person's go-ahead without a questions section: its last
  * paragraph is a question, or it asks for confirmation in so many words.
