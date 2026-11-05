@@ -30,6 +30,8 @@ const FAST_MS = 1000
 const BUSY_GRACE_MS = 10_000
 const STALE_MS = 15 * 60 * 1000
 const ENDED_KEEP_MS = 60 * 60 * 1000
+// How long a closed session without a pending card or a queue stays in the pane.
+const ENDED_GRACE_MS = 5 * 60 * 1000
 /** Published in every status, so the pane can flag a session still running an older copy. Keep in step with plugin.json. */
 const MOD_VERSION = '0.6.7'
 const SHELL_TOOLS = new Set(['Bash', 'PowerShell'])
@@ -616,11 +618,17 @@ const gather = async ($: $): Promise<void> => {
   const all: SessionStatus[] = []
   for (const entry of entries) {
     if (entry.kind !== 'file' || !entry.name.endsWith('.json')) continue
-    if (entry.mtimeMs && now - entry.mtimeMs > ENDED_KEEP_MS) continue
+    const queued = (id: string) => !!own(queues, id)?.length
+    if (entry.mtimeMs && now - entry.mtimeMs > ENDED_KEEP_MS && !queued(entry.name.slice(0, -'.json'.length))) continue
     const s = await statusFile($, entry.name)
     if (!s || s.v !== 1) continue
     const age = now - s.heartbeat
-    if (s.state === 'ended' ? age > ENDED_KEEP_MS : age > STALE_MS) continue
+    // A closed session leaves the pane after a short grace, so a last report can be read. It stays while a
+    // planned-task queue is held for it (the coordinator moves or empties it), and for an hour while a card waits.
+    if (s.state === 'ended') {
+      const pending = Array.isArray(s.requests) && s.requests.length > 0
+      if (age > ENDED_GRACE_MS && !queued(s.sessionId) && !(pending && age <= ENDED_KEEP_MS)) continue
+    } else if (age > STALE_MS) continue
     // Another session wrote it: its texts are drawn only as the strings they should be, every hidden
     // character as a code. The command stays as written: the card reads it, then draws it the same way.
     const str = (v: unknown): string | undefined => (typeof v === 'string' ? v : undefined)
