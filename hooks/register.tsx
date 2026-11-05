@@ -304,7 +304,7 @@ const applyAnswers = async ($: $): Promise<void> => {
     // A refused submit must not lose the rest of the batch: the answer is queued urgent, to be tried again.
     await $.prompt.submit({ text, asUser: true }).catch(async () => {
       ownPrompts.delete(text)
-      await queueNote($, text, true)
+      if (!(await queueNote($, text, true))) $.ui.toast(S.answerLostToast)
     })
   }
   await publish($)

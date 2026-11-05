@@ -1055,7 +1055,7 @@ describe('a session reporting', () => {
       expect(prompts.some(t => t.includes('second answer'))).toBe(true)
     })
 
-    test('an urgent row is kept urgent across a reload, and a quiet one is not (#19)',async ($, on) => {
+    test('an urgent row is kept urgent across a reload, and a quiet one is not (#19)', async ($, on) => {
       const { settle } = setup(on)
       const notes = watch(on)
       const queue = track(on)
