@@ -33,7 +33,7 @@ const ENDED_KEEP_MS = 60 * 60 * 1000
 // How long a closed session without a pending card or a queue stays in the pane.
 const ENDED_GRACE_MS = 5 * 60 * 1000
 /** Published in every status, so the pane can flag a session still running an older copy. Keep in step with plugin.json. */
-const MOD_VERSION = '0.6.8'
+const MOD_VERSION = '0.6.9'
 const SHELL_TOOLS = new Set(['Bash', 'PowerShell'])
 const STEP_TOOL = 'mcp__savvy-progress__step'
 const FLOW_TOOL = 'mcp__savvy-progress__progress'
@@ -285,7 +285,8 @@ const applyAnswers = async ($: $): Promise<void> => {
         // A note, not a prompt: it starts no turn, so nothing answers it and no report follows it.
         notes.push(S.readMsg(fmtTime(req.createdAt)))
       } else if (a.text?.trim()) {
-        prompts.push({ text: req.kind === 'report' ? S.reportReplyMsg(a.text.trim()) : S.answerMsg(a.text.trim()), agentId: to })
+        const [t, id, quote] = [fmtTime(req.createdAt), shortId(req.id), quoteOf(req.text ?? '')]
+        prompts.push({ text: req.kind === 'report' ? S.reportReplyMsg(a.text.trim(), t, id, quote) : S.answerMsg(a.text.trim(), t, id, quote), agentId: to })
       }
     }
     return next
@@ -465,6 +466,13 @@ const waitAnswer = async ($: $, id: string, timeoutMs = ASK_WAIT_MS): Promise<An
     : ['sh', '-c', 'until grep -qF "$CM_ID" "$CM_FILE" 2>/dev/null; do sleep 0.4; done']
   await $.process.run(argv, { env: { CM_FILE: path, CM_ID: id }, timeoutMs }).catch(() => undefined)
   return (await readJson<Answer[]>($, path))?.find(a => a.requestId === id)
+}
+
+/** The card's text as the pane draws it (hidden characters as codes), cut at QUOTE_MAX, as a Markdown quote. */
+const QUOTE_MAX = 1500
+const quoteOf = (text: string): string => {
+  const t = visible(text.trim())
+  return (t.length > QUOTE_MAX ? `${t.slice(0, QUOTE_MAX)}…` : t).replace(/^/gm, '> ').trimEnd()
 }
 
 /** A Markdown fence no backtick run inside `s` can close, so the text stays quoted. */

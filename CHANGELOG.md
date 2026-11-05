@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.9 — 2026-11-05
+
+- **A forwarded answer quotes the questions it answers** (#33). The message to the session now carries the card's own text, with its time and short id (the ones the read receipt uses), above the answer, for QUESTIONS cards and report replies. The text is what the card showed, drawn like any text from another session (hidden characters as codes), cut at about 1,500 characters with an ellipsis. The message says the answer applies only to the quoted questions, so a session that asked again or compacted cannot read it against another set.
+
 ## 0.6.8 — 2026-11-05
 
 - **An empty "Domande per te" raises no card** (#25). A section with no numbered list was judged line by line, so "Nessuna per ora." became a QUESTIONS card. A heading with nothing under it, or only a "nothing to ask" line (Nessuna…, None…), is now treated as if the heading were absent: the turn's report card. Any other body is the QUESTIONS card as written; numbered items are unchanged.

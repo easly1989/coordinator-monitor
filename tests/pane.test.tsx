@@ -207,7 +207,7 @@ test('the pane draws sessions, workers and every kind of request, on every surfa
   expect(mine.title).toBe('Coordinatore')
   expect(mine.folder).toBe('coordinator')
   expect(mine.effort).toBe('high')
-  expect(mine.version).toBe('0.6.8')
+  expect(mine.version).toBe('0.6.9')
 
   for (const surface of ['terminal', 'desktop', 'vscode', 'mobile'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface })
@@ -642,7 +642,7 @@ describe('a session reporting', () => {
     expect(await ui.find({ key: `reply-${q?.id}` })).toBeTruthy()
     await ui.press({ key: `opt-${q?.id}-0-0` })
     await settle()
-    expect(prompts.at(-1)).toMatch(/\n\nDone, clean up$/)
+    expect(prompts.at(-1)).toMatch(/\nAnswer:\nDone, clean up$/)
     await ui.unmount()
 
     // Several items: picked one by one, sent together with their numbers.
@@ -660,8 +660,54 @@ describe('a session reporting', () => {
     expect(mine().requests.length).toBe(1)
     await ui.press({ key: `send-${q2?.id}` })
     await settle()
-    expect(prompts.at(-1)).toMatch(/\n\n1\. Not now\n2\. v2\.0\.0$/)
+    expect(prompts.at(-1)).toMatch(/\nAnswer:\n1\. Not now\n2\. v2\.0\.0$/)
     await ui.unmount()
+  })
+
+  describe('a forwarded answer quotes the card it answers (#33)', () => {
+    const forward = async (on: TestOn, $: Parameters<Parameters<typeof test>[2]>[0], answer: string, reply: string) => {
+      const { mine, settle, written, prompts, answersFile } = setup(on)
+      on('ui.open', () => ({ value: { isPlaced: true } }))
+      await $.session.start({ cwd: '/repos/project', surface: 'desktop', isInteractive: true })
+      await $.turn.start({ turnId: 't1' } as never)
+      await $.turn.complete({ turnId: 't1', answer, isAborted: false } as never)
+      await settle()
+      const [r] = mine().requests
+      written[answersFile()] = JSON.stringify([{ requestId: r?.id, at: Date.now(), kind: 'answer', text: reply }])
+      await $.session.start({ cwd: '/repos/project', surface: 'desktop', isInteractive: true })
+      for (let i = 0; i < 300 && !prompts.length; i++) await new Promise<void>(r => setTimeout(r, 10))
+      await settle()
+      return { r, sent: prompts.at(-1) ?? '' }
+    }
+
+    test('a multi-question card is quoted whole, with its time, its id and the answer below', async ($, on) => {
+      const { r, sent } = await forward(on, $ as never, '## Questions for you\n\n1. Use Azure?\n2. Which scopes?\n3. Is the preview editable?', '1. yes 2. ok 3. make it editable')
+      expect(sent).toContain(`(#${r?.id.slice(-6)})`)
+      expect(sent).toMatch(/of \d\d?[:.]\d\d/)
+      expect(sent).toContain('applies only to the questions quoted here')
+      expect(sent).toContain('> 1. Use Azure?\n> 2. Which scopes?\n> 3. Is the preview editable?\n\nAnswer:\n1. yes 2. ok 3. make it editable')
+    })
+
+    test('a long body is cut at 1,500 characters with an ellipsis', async ($, on) => {
+      const { sent } = await forward(on, $ as never, `## Questions for you\n\n1. ${'x'.repeat(3000)}`, 'ok')
+      const quoted = sent.split('\n\n')[1] ?? ''
+      expect(quoted.endsWith('…')).toBe(true)
+      expect(quoted.length).toBeLessThanOrEqual(2 + 1500 + 1)
+      expect(sent.endsWith('\nAnswer:\nok')).toBe(true)
+    })
+
+    test('hidden characters in a question are quoted as codes, never raw', async ($, on) => {
+      const { sent } = await forward(on, $ as never, `## Questions for you\n\n1. Ship it ${String.fromCharCode(0x202e)}gnp?`, 'ok')
+      expect(sent).toContain('\\u202Egnp')
+      expect([...sent].some(c => c.charCodeAt(0) === 0x202e)).toBe(false)
+    })
+
+    test('a report reply quotes the report', async ($, on) => {
+      const { r, sent } = await forward(on, $ as never, 'Migrated the schema; all tests pass.', 'go ahead')
+      expect(sent).toMatch(/^Reply to your report of /)
+      expect(sent).toContain(`(#${r?.id.slice(-6)})`)
+      expect(sent).toContain('> Migrated the schema; all tests pass.\n\nReply:\ngo ahead')
+    })
   })
 
   test("a session's tasks, queue and progress show on its card, reorder without removal, fold, and the card locks", { options: { digestMinutes: '0' } }, async ($, on) => {
