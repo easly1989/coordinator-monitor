@@ -18,7 +18,7 @@ import type { EngineInterface, Register, RenderChildren, RenderNode } from 'clau
 
 import type { AgentRow, Answer, AnswerKind, Board, ChoiceOption, ChoiceQuestion, Digest, Local, MonitorRequest, PaneUi, PlanItem, Queues, SessionStatus } from '../types'
 import { CRAB_H, TIER_COLOR, TIER_MODEL, crabSvg, hatFor, tierOf } from './crab'
-import { QUESTIONS_HEADING, asksGoAhead, pickStrings, type Strings } from './i18n'
+import { NO_QUESTIONS, QUESTIONS_HEADING, asksGoAhead, pickStrings, type Strings } from './i18n'
 import { canFold, lineCount, segmentsOf, touchesOf, viewOf, visible } from './request'
 import { compileRules, criticalIn, matchRule, type Rule, type RulesFile } from './rules'
 
@@ -998,16 +998,16 @@ export const register: Register = (on, options) => {
       await retire($, r => asked(r) && r.createdAt < turnStartedAt)
       const m = QUESTIONS_HEADING.exec(e.answer)
       const own = ownIds(await read($, local))
-      if (m) {
-        const rest = e.answer.slice(m.index + m[0].length)
-        const end = rest.search(/^#{1,3}\s/m)
-        const raw = (end >= 0 ? rest.slice(0, end) : rest).trim()
+      const rest = m ? e.answer.slice(m.index + m[0].length) : ''
+      const end = rest.search(/^#{1,3}\s/m)
+      const raw = (end >= 0 ? rest.slice(0, end) : rest).trim()
+      // A heading with nothing to ask under it ("Nessuna per ora.") is a report like any other.
+      if (m && raw && !NO_QUESTIONS.test(raw)) {
         // An item asking the person to answer one of this session's own cards (approve request <id>)
         // only repeats that card, and would outlive its answer: left out, and with it a section of only those.
-        // A section with no numbered list is judged line by line: only bullets and lines asking something
-        // count, so a closing sentence ("Nessuna per ora.") raises no card.
+        // A section with no numbered list is judged line by line.
         const { lead, items } = itemsOf(raw)
-        const units = items.length ? items : raw.split('\n').filter(line => /^\s*[-*•]\s|\?/.test(line)).map(line => ({ n: 0, text: line }))
+        const units = items.length ? items : raw.split('\n').map(line => ({ n: 0, text: line }))
         const kept = units.filter(i => !asksOwn(i.text, own))
         const text = kept.some(i => i.text.trim()) ? [items.length ? lead : '', ...kept.map(i => i.text)].join('\n').trim() : ''
         if (text) await addRequest($, { id: newId(), kind: 'questions', createdAt: Date.now(), text })

@@ -375,11 +375,24 @@ test('questions leave when the person replies in the session, or the session spe
   await settle()
   expect(mine().requests.map(r => r.kind)).toEqual(['report'])
 
-  // An empty section ends the turn with a closing sentence, not a question: no card.
-  await $.turn.start({ turnId: 't4' } as never)
-  await $.turn.complete({ turnId: 't4', answer: 'Done.\n\n## Domande per te\n\nNessuna per ora.', isAborted: false } as never)
-  await settle()
-  expect(mine().requests).toEqual([])
+  // A heading with nothing to ask ("Nessuna per ora.", or nothing at all) is a report, not a questions card (#25).
+  for (const [i, body] of ['Nessuna per ora.', '', 'None.'].entries()) {
+    await $.turn.start({ turnId: `e${i}` } as never)
+    await $.turn.complete({ turnId: `e${i}`, answer: `Done.\n\n## Domande per te\n\n${body}`, isAborted: false } as never)
+    await settle()
+    expect(mine().requests.map(r => r.kind)).toEqual(['report'])
+  }
+
+  // Any other body is the card as written: a multi-line question, un-numbered bullets with their continuations.
+  const asked = async (id: string, body: string) => {
+    await $.turn.start({ turnId: id } as never)
+    await $.turn.complete({ turnId: id, answer: `Done.\n\n## Domande per te\n\n${body}`, isAborted: false } as never)
+    await settle()
+    return mine().requests.map(r => [r.kind, r.text])
+  }
+  expect(await asked('m1', 'Vuoi che\nfaccia il merge?')).toEqual([['questions', 'Vuoi che\nfaccia il merge?']])
+  expect(await asked('m2', '- Quale porta?\n  Sono due.\n- Quale host?')).toEqual([['questions', '- Quale porta?\n  Sono due.\n- Quale host?']])
+  expect(await asked('m3', 'Dimmi quale porta usare.')).toEqual([['questions', 'Dimmi quale porta usare.']])
 })
 
 describe('a session reporting', () => {
