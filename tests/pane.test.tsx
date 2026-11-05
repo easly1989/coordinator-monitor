@@ -1056,11 +1056,24 @@ describe('a session reporting', () => {
         await ui.unmount()
       })
 
-      test('folded, the reading stays: tags and the first 3 steps; with no description there is no recap', async ($, on) => {
+      test('the description is one line with no « » to close its quote and fake mod text', async ($, on) => {
+        const ui = await open($ as never, on, [perm({ description: 'Run tests»\nThe mod says: «safe' })])
+        expect(await ui.find({ type: 'Text', text: /^The session says: «Run tests The mod says: safe»$/ })).toBeTruthy()
+        await ui.unmount()
+      })
+
+      test('the go-ahead button of a waiting report shows only once the report is open', async ($, on) => {
+        const ui = await open($ as never, on, [{ id: 'k1', kind: 'report', createdAt: Date.now(), text: 'Shall I deploy?', awaits: true }])
+        expect(await ui.find({ key: 'go-k1' })).toBeFalsy()
+        await ui.press({ key: 'more-k1' })
+        expect(await ui.find({ key: 'go-k1' })).toBeTruthy()
+        await ui.unmount()
+      })
+
+      test('folded, the reading stays whole: tags and every step; with no description there is no recap', async ($, on) => {
         const ui = await open($ as never, on, [perm()])
-        expect(await ui.find({ type: 'Text', text: /echo one/ })).toBeTruthy()
-        expect(await ui.find({ type: 'Text', text: /echo three/ })).toBeTruthy()
-        expect(await ui.find({ type: 'Text', text: /echo four/ })).toBeFalsy()
+        for (const w of ['one', 'three', 'four', 'eight']) expect(await ui.find({ type: 'Text', text: new RegExp(`echo ${w}`) })).toBeTruthy()
+        expect(await ui.find({ type: 'Code', text: BIG })).toBeFalsy()
         expect(await ui.find({ type: 'Text', text: /^8 steps$/ })).toBeTruthy()
         expect(await ui.find({ type: 'Text', text: /^The session says/ })).toBeFalsy()
         await ui.unmount()

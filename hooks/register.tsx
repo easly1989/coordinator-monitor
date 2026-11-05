@@ -481,17 +481,14 @@ const descOf = (input: unknown): string | undefined => {
   const d = (input as { description?: unknown } | null)?.description
   return typeof d === 'string' && d.trim() ? visible(d.trim()).slice(0, DESC_MAX) : undefined
 }
-/** The recap line(s) a card shows: at most 2 lines and 200 characters, with an ellipsis where cut. */
+/** The recap a card shows: one line of at most 200 characters (ellipsis where cut), with no « » to close its quote early. */
 const recapOf = (s: string): string => {
-  const lines = s.split('\n').filter(l => l.trim())
-  const t = lines.slice(0, 2).join('\n')
-  return t.length > 200 ? `${t.slice(0, 200)}…` : lines.length > 2 ? `${t}…` : t
+  const t = s.replace(/[«»]/g, '').replace(/\s+/g, ' ').trim()
+  return t.length > 200 ? `${t.slice(0, 200)}…` : t
 }
 /** A command shown inline, with no fold: a single line of at most this many characters. */
 const INLINE_MAX = 160
 const BODY_LINES = 6
-/** Steps of the reading kept in sight on a folded permission card. */
-const FOLDED_STEPS = 3
 
 /** A Markdown fence no backtick run inside `s` can close, so the text stays quoted. */
 const fence = (s: string): string => {
@@ -1434,7 +1431,8 @@ export const register: Register = (on, options) => {
               </Box>
             ) : null}
             <Box flexDirection="row" flexWrap="wrap" gap="sm">
-              {r.awaits ? <Button key={`go-${r.id}`} variant="primary" label={S.confirm} onPress={() => void answer($, s, r, 'answer', S.confirmMsg)} /> : null}
+              {/* Only once the report is open: the person reads it before a go-ahead. */}
+              {r.awaits && isOpen ? <Button key={`go-${r.id}`} variant="primary" label={S.confirm} onPress={() => void answer($, s, r, 'answer', S.confirmMsg)} /> : null}
               <Button
                 key={`more-${r.id}`}
                 variant="secondary"
@@ -1528,8 +1526,8 @@ export const register: Register = (on, options) => {
                 <Box key={`risk-${r.id}-${k}`}>{tag(S.risk[k] ?? k, RISK_COLOR[k] ?? BLUE)}</Box>
               ))}
             </Box>
-            {/* Every step, whole: a cut one could hide what runs after the cut. Folded, the first FOLDED_STEPS stay in sight (the tags above cover all). */}
-            {(isFolded ? view.steps.slice(0, FOLDED_STEPS) : view.steps).map((st, i) => (
+            {/* Every step, whole, folded or not: a fold hides only the raw text, never what runs. */}
+            {view.steps.map((st, i) => (
               <Text key={`st-${r.id}-${i}`} size="footnote" wrap="wrap">
                 <Text color="subtle">{`${i + 1}. `}</Text>
                 {visible(st)}

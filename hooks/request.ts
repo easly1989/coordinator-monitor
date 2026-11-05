@@ -570,7 +570,12 @@ const touchesIn = (text: string): Touch[] => {
 const DATA_FILE = /\.(?:json|ya?ml|toml|ini|conf|cfg|txt|md|csv|xml|html?|css|log|properties)$/i
 
 // The programs a folded card may run: they move, make or show files and run nothing they are handed.
-const FOLD_PROGRAMS = new Set(['cat', 'ls', 'mkdir', 'cd', 'echo', 'printf', 'cp', 'mv', 'touch', 'chmod'])
+const FOLD_PROGRAMS = new Set(['cat', 'ls', 'mkdir', 'cd', 'echo', 'cp', 'mv', 'touch', 'chmod'])
+
+// Never folded, whatever the program: a network pseudo-device, or a place that configures what runs later
+// (this tool's own folder, a repo's hooks and workflows, an editor's tasks, ssh keys, shell start-up files).
+const NO_FOLD_TEXT =
+  /\/dev\/(?:tcp|udp)\/|(?:^|[\/\\~\s'"=:])\.(?:claude|git|github|vscode|ssh)(?:[\/\\\s'"]|$)|\.(?:bash_profile|bash_login|bash_logout|bashrc|profile|zshrc|zprofile|zshenv|zlogin)\b|\/etc\/(?:profile|bash)/
 
 /** Whether one step of a folded card is on the allowlist (see `canFold`). */
 const stepFolds = (step: string): boolean => {
@@ -595,10 +600,13 @@ const stepFolds = (step: string): boolean => {
  * - every block is a plain file of data written to a path, used as code by nothing (no interpreter,
  *   inline script, running `$( )`, later or piped use, here-string);
  * - every shell step's program is on a short allowlist of file movers (cat, ls, mkdir, cd, echo,
- *   printf, cp, mv, touch, chmod, and tee with one file), none run with an assignment before it or a
+ *   cp, mv, touch, chmod, and tee with one file; no printf, which can set a variable), none run with an assignment before it or a
  *   substitution in it, and the steps split for certain.
  */
 export const canFold = (segs: Segment[], shell: Shell = 'bash'): boolean => {
+  // PowerShell runs code in a parenthesis, `@( )` and a script-block argument: nothing there is inert.
+  if (shell === 'powershell') return false
+  if (NO_FOLD_TEXT.test(segs.map(sg => (sg.kind === 'shell' ? sg.text : `${sg.path ?? ''}\n${sg.text}`)).join('\n'))) return false
   const isInert = segs.every(
     sg => sg.kind === 'shell' || (!!sg.path && DATA_FILE.test(sg.path) && !sg.language && !sg.runBy && !sg.isPiped && !sg.isRunning && !sg.isInline && !sg.isString),
   )
