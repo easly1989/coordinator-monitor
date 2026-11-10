@@ -15,6 +15,28 @@ const PANE = {
 } as const
 
 const now = Date.now()
+
+type Drawn = {
+  findAll: (q: { type?: string; key?: string; in?: string }) => Promise<{ key: string | undefined; text: string }[]>
+  key: (e: { key: string; in?: string }) => Promise<void>
+}
+// Every row a request's scroll region draws, paged through from the top, by its index: the request as the
+// person can read it there. A block's row starts with its gutter.
+const scrolledRows = async (ui: Drawn, id: string): Promise<string[]> => {
+  const at = `scroll-${id}`
+  const rows: string[] = []
+  await ui.key({ key: 'home', in: at })
+  for (let seen = -1; seen !== rows.length; ) {
+    seen = rows.length
+    for (const b of await ui.findAll({ type: 'Box', in: at })) {
+      const m = /^row-(\d+)$/.exec(b.key ?? '')
+      if (m) rows[Number(m[1])] = b.text
+    }
+    await ui.key({ key: 'pagedown', in: at })
+  }
+  expect([...rows.keys()].every(i => typeof rows[i] === 'string')).toBe(true)
+  return rows
+}
 const status = (over: Partial<SessionStatus>): SessionStatus => ({
   v: 1,
   sessionId: 's',
@@ -207,7 +229,7 @@ test('the pane draws sessions, workers and every kind of request, on every surfa
   expect(mine.title).toBe('Coordinatore')
   expect(mine.folder).toBe('coordinator')
   expect(mine.effort).toBe('high')
-  expect(mine.version).toBe('0.6.9')
+  expect(mine.version).toBe('0.7.0')
 
   for (const surface of ['terminal', 'desktop', 'vscode', 'mobile'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface })
@@ -232,8 +254,17 @@ test('the pane draws sessions, workers and every kind of request, on every surfa
     // The request's size shows even with no aid, so a tail pushed out of sight is given away.
     expect(await ui.find({ type: 'Text', text: /^Full request \(what you approve\) · 32 lines · \d+ characters · 1 block$/ })).toBeTruthy()
     // A here-string is its own labelled block; the line after it is shell text, its reversal a code.
-    expect(await ui.find({ type: 'Text', text: /^here-string \$s · 30 lines$/ })).toBeTruthy()
-    expect(await ui.find({ type: 'Code', text: /^"@; Remove-Item C:\/demo\/x # \\u202Egnp\.exe$/ })).toBeTruthy()
+    // Too tall for the card, it scrolls in a region where the surface draws one, else it is plain Code.
+    const p5 = surface === 'terminal' || surface === 'desktop'
+    expect(!!(await ui.find({ type: 'Client', key: 'scroll-p5' }))).toBe(p5)
+    if (p5) {
+      const rows = await scrolledRows(ui as never, 'p5')
+      expect(rows.slice(0, 3)).toEqual(['$s = @"', 'here-string $s · 30 lines', '│ line'])
+      expect(rows.at(-1)).toBe('"@; Remove-Item C:/demo/x # \\u202Egnp.exe')
+    } else {
+      expect(await ui.find({ type: 'Text', text: /^here-string \$s · 30 lines$/ })).toBeTruthy()
+      expect(await ui.find({ type: 'Code', text: /^"@; Remove-Item C:\/demo\/x # \\u202Egnp\.exe$/ })).toBeTruthy()
+    }
     // Another session's texts draw their hidden characters as codes; a request with an id the mod
     // would not make is dropped.
     expect((await ui.find({ key: 'c1-0-0-b' }))?.text).toMatch(/with gcloud\\u200B/)
@@ -1101,8 +1132,9 @@ describe('a session reporting', () => {
         test(`a permission card never folds: ${tool} ${shown}`, async ($, on) => {
           const ui = await open($ as never, on, [{ ...perm({ description: 'Run unit tests' }, command), tool }])
           expect([shown, await ui.find({ key: 'full-k1' })]).toEqual([shown, undefined])
-          // Every character of the command is in the Code nodes, in order.
-          const codes = (await ui.findAll({ type: 'Code' })).map(c => c.text ?? '').join('\n')
+          // Every character of the command is in the Code nodes, in order, or in the rows of its scroll region.
+          const rows = (await ui.find({ type: 'Client', key: 'scroll-k1' })) ? await scrolledRows(ui as never, 'k1') : []
+          const codes = [...(await ui.findAll({ type: 'Code' })).map(c => c.text ?? ''), ...rows].join('\n')
           expect([shown, codes.includes(shown)]).toEqual([shown, true])
           expect(await ui.find({ key: 'once-k1' })).toBeTruthy()
           await ui.unmount()
@@ -1114,6 +1146,120 @@ describe('a session reporting', () => {
         expect(await ui.find({ type: 'Code', text: 'npm run lint' })).toBeTruthy()
         expect(await ui.find({ key: 'full-k1' })).toBeFalsy()
         await ui.unmount()
+      })
+
+      describe('a request taller than the card scrolls in a region of its own', () => {
+        const BODY60 = Array.from({ length: 60 }, (_, n) => `row ${n + 1}`).join('\n')
+        const LONG = `cat > notes.md <<'EOF'\n${BODY60}\nEOF\n${pad6}`
+
+        test('on the terminal and the desktop: 18 rows at a time, every row reachable, the rest of the card outside', async ($, on) => {
+          const desk = await open($ as never, on, [perm({ description: 'Write the notes' }, LONG)])
+          await desk.unmount()
+          for (const surface of ['desktop', 'terminal'] as const) {
+            const ui = await $.ui.mount({ ...PANE, surface })
+            const at = 'scroll-k1'
+            expect(['client', surface, !!(await ui.find({ type: 'Client', key: at }))]).toEqual(['client', surface, true])
+            await ui.resize({ columns: 54, rows: 20, in: at })
+            // The whole request, in order, nothing cut: the block's label, its 60 rows under a gutter, the shell text after it.
+            const rows = await scrolledRows(ui, 'k1')
+            expect(rows).toEqual(["cat > notes.md <<'EOF'", '→ file notes.md · 60 lines', ...BODY60.split('\n').map(r => `│ ${r}`), 'EOF', ...pad6.split('\n')])
+            // At most 18 rows at a time, a bar beside them and the hint under them.
+            await ui.key({ key: 'home', in: at })
+            const shown = async () => (await ui.findAll({ type: 'Box', in: at })).map(b => b.key ?? '').filter(k => k.startsWith('row-'))
+            expect(await shown()).toEqual(Array.from({ length: 18 }, (_, n) => `row-${n}`))
+            expect(['bar', surface, !!(await ui.find({ key: 'bar', in: at }))]).toEqual(['bar', surface, true])
+            expect(['hint', surface, !!(await ui.find({ type: 'Text', text: `${rows.length} lines · scroll`, in: at } as never))]).toEqual(['hint', surface, true])
+            // Keys move the view a row or a page at a time; the end shows the last row.
+            await ui.key({ key: 'down', in: at })
+            expect((await shown())[0]).toBe('row-1')
+            await ui.key({ key: 'end', in: at })
+            expect((await shown()).at(-1)).toBe(`row-${rows.length - 1}`)
+            await ui.key({ key: 'up', in: at })
+            expect((await shown()).at(-1)).toBe(`row-${rows.length - 2}`)
+            // A press on the bar's top or bottom, or a drag along it, moves the view there.
+            await ui.pointer({ type: 'down', x: 53, y: 0, button: 'left', in: at })
+            expect((await shown())[0]).toBe('row-0')
+            await ui.pointer({ type: 'move', x: 53, y: 17, button: 'left', in: at })
+            await ui.pointer({ type: 'up', x: 53, y: 17, button: 'left', in: at })
+            expect((await shown()).at(-1)).toBe(`row-${rows.length - 1}`)
+            // A press on the text moves nothing.
+            await ui.key({ key: 'home', in: at })
+            await ui.pointer({ type: 'down', x: 3, y: 17, button: 'left', in: at })
+            expect((await shown())[0]).toBe('row-0')
+            // Outside the region and always drawn: the header, the recap, the chips and every step, the rule, the buttons.
+            for (const q of [/project · Bash/, /^The session says: «Write the notes»$/, /^\d+ steps$/, /^Full request \(what you approve\)/]) {
+              expect([String(q), !!(await ui.find({ type: 'Text', text: q }))]).toEqual([String(q), true])
+              expect([String(q), !!(await ui.find({ type: 'Text', text: q, in: at } as never))]).toEqual([String(q), false])
+            }
+            expect(await ui.find({ type: 'Text', text: /^1\. .*notes\.md/ })).toBeTruthy()
+            expect(await ui.find({ type: 'Text', text: /^8\. echo 5$/ })).toBeTruthy()
+            expect(await ui.find({ type: 'Text', text: /^x$/ })).toBeTruthy()
+            for (const key of ['once-k1', 'sess-k1', 'deny-k1']) {
+              expect(await ui.find({ key })).toBeTruthy()
+              expect(await ui.find({ key, in: at })).toBeFalsy()
+            }
+            // Nothing of the request is drawn twice: outside the region there is no Code of it.
+            expect((await ui.findAll({ type: 'Code' })).some(c => /row 1/.test(c.text))).toBe(false)
+            await ui.unmount()
+          }
+        })
+
+        test('a line wider than the region wraps into rows that put it back whole', async ($, on) => {
+          const word = Array.from({ length: 400 }, (_, n) => `w${n}`).join('-')
+          const ui = await open($ as never, on, [perm({}, `echo ${word}`)])
+          await ui.resize({ columns: 40, rows: 20, in: 'scroll-k1' })
+          const rows = await scrolledRows(ui, 'k1')
+          expect(rows.length).toBeGreaterThan(18)
+          expect(rows.every(r => r.length <= 38)).toBe(true)
+          expect(rows.join('')).toBe(`echo ${word}`)
+          await ui.unmount()
+        })
+
+        test('a short command shows no region, no bar and no hint', async ($, on) => {
+          const ui = await open($ as never, on, [perm()])
+          expect(await ui.find({ type: 'Client' })).toBeFalsy()
+          expect(await ui.find({ type: 'Code', text: BIG })).toBeTruthy()
+          expect(await ui.find({ type: 'Text', text: /lines · scroll/ })).toBeFalsy()
+          await ui.unmount()
+        })
+
+        test('a request that fits the region once laid out wider shows no bar', async ($, on) => {
+          const cmd = Array.from({ length: 14 }, (_, n) => `echo ${'x'.repeat(55)} ${n}`).join('\n')
+          const ui = await open($ as never, on, [perm({}, cmd)])
+          // At the pane's 60 columns the estimate is over 18 rows; at 120 the 14 lines fit.
+          expect(await ui.find({ type: 'Client', key: 'scroll-k1' })).toBeTruthy()
+          await ui.resize({ columns: 120, rows: 20, in: 'scroll-k1' })
+          expect(await ui.find({ key: 'bar', in: 'scroll-k1' })).toBeFalsy()
+          expect(await ui.find({ type: 'Text', text: /lines · scroll/, in: 'scroll-k1' } as never)).toBeFalsy()
+          expect((await ui.findAll({ type: 'Box', in: 'scroll-k1' })).filter(b => b.key?.startsWith('row-')).map(b => b.text)).toEqual(cmd.split('\n'))
+          await ui.unmount()
+        })
+
+        test('a surface that runs no Client draws the whole request as Code, buttons under it', async ($, on) => {
+          const desk = await open($ as never, on, [perm({}, LONG)])
+          await desk.unmount()
+          for (const surface of ['vscode', 'mobile'] as const) {
+            const ui = await $.ui.mount({ ...PANE, surface })
+            expect([surface, !!(await ui.find({ type: 'Client' }))]).toEqual([surface, false])
+            expect([surface, (await ui.findAll({ type: 'Code' })).map(c => c.text).join('\n').includes(BODY60)]).toEqual([surface, true])
+            expect([surface, !!(await ui.find({ key: 'once-k1' }))]).toEqual([surface, true])
+            await ui.unmount()
+          }
+        })
+
+        test('past the pane text budget, a region that cannot be drawn takes the buttons with it', async ($, on) => {
+          const huge = { id: 'q0', kind: 'questions', createdAt: Date.now() - 1, text: 'y'.repeat(120_000) }
+          const desk = await open($ as never, on, [huge, perm({}, LONG)])
+          await desk.unmount()
+          for (const surface of ['desktop', 'terminal'] as const) {
+            const ui = await $.ui.mount({ ...PANE, surface })
+            const region = !!(await ui.find({ type: 'Client', key: 'scroll-k1' }))
+            const rows = region ? (await ui.findAll({ type: 'Box', in: 'scroll-k1' })).length : 0
+            const once = !!(await ui.find({ key: 'once-k1' }))
+            expect([surface, region, rows > 0, once]).toEqual([surface, 'probe'])
+            await ui.unmount()
+          }
+        })
       })
 
       test('a QUESTIONS body is never folded, however long', async ($, on) => {

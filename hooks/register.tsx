@@ -20,6 +20,7 @@ import type { AgentRow, Answer, AnswerKind, Board, ChoiceOption, ChoiceQuestion,
 import { CRAB_H, TIER_COLOR, TIER_MODEL, crabSvg, hatFor, tierOf } from './crab'
 import { NO_QUESTIONS, QUESTIONS_HEADING, asksGoAhead, pickStrings, type Strings } from './i18n'
 import { lineCount, segmentsOf, viewOf, visible } from './request'
+import { rowsOf, type Piece } from './scroll'
 import { compileRules, criticalIn, matchRule, type Rule, type RulesFile } from './rules'
 
 const PANE = 'coordinator-monitor'
@@ -33,7 +34,7 @@ const ENDED_KEEP_MS = 60 * 60 * 1000
 // How long a closed session without a pending card or a queue stays in the pane.
 const ENDED_GRACE_MS = 5 * 60 * 1000
 /** Published in every status, so the pane can flag a session still running an older copy. Keep in step with plugin.json. */
-const MOD_VERSION = '0.6.9'
+const MOD_VERSION = '0.7.0'
 const SHELL_TOOLS = new Set(['Bash', 'PowerShell'])
 const STEP_TOOL = 'mcp__savvy-progress__step'
 const FLOW_TOOL = 'mcp__savvy-progress__progress'
@@ -487,6 +488,12 @@ const recapOf = (s: string): string => {
   return t.length > 200 ? `${t.slice(0, 200)}…` : t
 }
 const BODY_LINES = 6
+// A permission's raw request taller than this scrolls in its own region; everything else on the card stays put.
+const SCROLL_ROWS = 18
+// A Client's props are dropped whole past 100,000 characters: a request near that is drawn as plain Code instead.
+const SCROLL_MAX_CHARS = 90_000
+// Clients that failed on a surface: their card draws the request as plain Code from then on.
+const faulted = new Set<string>()
 
 /** A Markdown fence no backtick run inside `s` can close, so the text stays quoted. */
 const fence = (s: string): string => {
@@ -1255,10 +1262,18 @@ export const register: Register = (on, options) => {
     return { decision: 'deny', reason: S.waitApproval(rule.label, id) }
   }).catch(() => ({ decision: 'deny', reason: 'coordinator-monitor could not check this protected command' }))
 
+  // The engine draws the pane again after a fault; that card then shows its request as plain Code.
+  on('ui.fault', ($, e, next) => {
+    faulted.add(e.element)
+    return next(e)
+  })
+
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     isPaneOpen = true
     const ui = $.ui.resolve(e)
     const { Box, Text, Button, Code } = ui
+    // Only the surfaces that run a Client: vscode's table holds one too, but draws it as an empty box.
+    const Client = (e.surface === 'terminal' || e.surface === 'desktop') && 'Client' in ui ? ui.Client : undefined
     const isTerm = e.surface === 'terminal'
     const Svg = !isTerm && 'Svg' in ui ? ui.Svg : undefined
     const Input = 'Input' in ui ? ui.Input : undefined
@@ -1475,7 +1490,30 @@ export const register: Register = (on, options) => {
           return closer.test(text) ? text : null
         }
         const HEAD_LINES = 12
-        const raw = isShell ? (
+        // The same request as the pieces a scroll region draws: each text as `raw` below draws it, in order.
+        const pieces: Piece[] = isShell
+          ? [
+              ...segs.flatMap((sg, k): Piece[] =>
+                sg.kind === 'shell'
+                  ? sg.text.trim() && !tailOf(k - 1)
+                    ? [{ text: visible(sg.text.replace(/\n$/, '')) }]
+                    : []
+                  : [
+                      { text: visible(S.blockLabel(sg.isInline ? 'inline' : sg.isString ? 'string' : sg.path ? 'file' : 'input', sg.to, sg.lines, sg.runBy, sg.isRunning, sg.isPiped)), tone: 'label' },
+                      { text: visible(sg.text.replace(/\n$/, '')), isBlock: true },
+                      ...(tailOf(k) !== null ? [{ text: visible(S.followedBy(tailOf(k) ?? '')), tone: 'label' as const, isBlock: true }] : []),
+                    ],
+              ),
+              ...fields.map(([k, v]): Piece => ({ text: visible(`${k}: ${JSON.stringify(v)}`), tone: 'field' })),
+            ]
+          : [{ text: visible(what) }]
+        // The card's padding and border take about six columns of the pane's body, the bar two more.
+        const scrollKey = `scroll-${r.id}`
+        const isScrolled =
+          !!Client && !faulted.has(scrollKey) && rowsOf(pieces, cols - 8).length > SCROLL_ROWS && JSON.stringify(pieces).length <= SCROLL_MAX_CHARS
+        const raw = isScrolled && Client ? (
+          <Client key={scrollKey} module="./scroll.tsx" width="100%" props={{ pieces, maxRows: SCROLL_ROWS, columns: cols - 6, hint: S.scrollHint }} />
+        ) : isShell ? (
           <Box flexDirection="column" gap="xs">
             {segs.map((sg, k) =>
               sg.kind === 'shell' ? (
