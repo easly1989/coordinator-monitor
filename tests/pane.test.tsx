@@ -359,7 +359,7 @@ test('the pane draws sessions, workers and every kind of request, on every surfa
   await ui.press({ key: 'revoke-b-g1' })
   expect(Object.entries(written).find(([k]) => k.endsWith('/answers/b.json'))?.[1]).toMatch(/"kind":"revoke"[^}]*"text":"g1"/)
   // The coordinator's own note says an approval was revoked, never what it was for.
-  expect(notes.at(-1)).toMatch(/of the session titled \\"Recipes\\"[\s\S]*revoked an approval for the session/)
+  expect(notes.at(-1)).toMatch(/of the session titled \\"Recipes\\"[\s\S]*asked to revoke an approval for the session/)
   expect(notes.at(-1)).not.toMatch(/npm publish/)
   notes.pop()
   // Every answer given here is noted in this session (the coordinator) too: the session's title quoted,
@@ -1602,6 +1602,17 @@ describe('a session reporting', () => {
     await send(answer('revoke-3', 'revoke', 'zzzz-9'))
     expect(mine().grants?.length).toBe(1)
     expect([await check('u5'), 'u5']).toEqual(['allow', 'u5'])
+
+    // An approval older than a revoke of the same grant, both waiting in one pass, does not bring it back.
+    await send(answer('revoke-4', 'revoke', id))
+    await settleUntil(() => (mine().grants ?? []).length === 0)
+    expect([await check('u6'), 'u6']).toEqual(['deny', 'u6'])
+    await settle()
+    const stale = { requestId: card(), at: Date.now() - 5000, kind: 'approve-session' }
+    written[answersFile()] = JSON.stringify([stale, answer('revoke-5', 'revoke', id)])
+    await settleUntil(() => !card())
+    expect(mine().grants ?? []).toEqual([])
+    expect([await check('u7'), 'u7']).toEqual(['deny', 'u7'])
   })
 
   test('a card that closed on its own is a line for ten minutes, and is gone after', async ($, on) => {

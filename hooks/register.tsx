@@ -288,7 +288,11 @@ const applyAnswers = async ($: $): Promise<void> => {
       // Fenced: the command is the session's text, sent on in the person's voice.
       const cmd = fence(req.command ?? '')
       const to = req.agentId
-      if (a.kind === 'approve-once') {
+      // The revokes above ran first: an approval the person gave before a revoke of the same grant would bring it back.
+      const isStale = (a.kind === 'approve-once' || a.kind === 'approve-session') && answers.some(r => r.kind === 'revoke' && r.text === grantId(grantKey(req)) && r.at > a.at)
+      if (isStale) {
+        prompts.push({ text: S.approvedMsg(cmd, a.kind === 'approve-once'), agentId: to, reqId: req.id, verdict: true })
+      } else if (a.kind === 'approve-once') {
         next.grantsOnce.push(grantKey(req))
         prompts.push({ text: S.approvedMsg(cmd, true), agentId: to, reqId: req.id, verdict: true, undo: { key: grantKey(req), isOnce: true, hadIt: false } })
       } else if (a.kind === 'approve-session') {
@@ -894,7 +898,7 @@ const revokeGrant = async ($: $, s: SessionStatus, g: GrantInfo): Promise<void> 
   await postAnswer($, s, { requestId: id, at: Date.now(), kind: 'revoke', text: g.id })
   // Not the command: it is the session's own text.
   if (s.sessionId !== sessionId) await queueNote($, answeredNote(s, id, 'revoke'))
-  $.ui.toast(S.revokedToast(s.title))
+  $.ui.toast(s.sessionId === sessionId ? S.revokedToast(s.title) : S.revokingToast(s.title))
   void gather($)
 }
 
@@ -1302,7 +1306,8 @@ export const register: Register = (on, options) => {
     }
     if (!SHELL_TOOLS.has(e.tool) || !e.tool_use_id) return next(e)
     const command = String((e.input as { command?: unknown } | null)?.command ?? '')
-    const rule = command && matchRule(rules, command)
+    // PowerShell text is never masked: `echo` there is Write-Output, `iex` runs what it printed.
+    const rule = command && matchRule(rules, command, e.tool === 'PowerShell')
     if (!rule) return next(e)
     // The coordinator's person is in its own chat: ask there, with the app's dialog, not with a pane card.
     // Only where a person answers the ask; a headless run keeps the card path.
@@ -1325,17 +1330,15 @@ export const register: Register = (on, options) => {
         void explainLater($, id, e.tool, command)
         const a = isHeld ? await waitAnswer($, id, HOLD_MS) : undefined
         if (a?.kind === 'approve-once' || a?.kind === 'approve-session' || a?.kind === 'deny') {
-          // A call interrupted meanwhile runs nothing. The session's own approval is kept for its next try; a
-          // subagent that is gone has no next try, so an answer for it grants nothing and says so in a line.
+          // A call interrupted meanwhile runs nothing: an approval for it is kept for the next try. (A
+          // subagent that ended in the meantime cannot be told apart from an interrupted one here: no signal.)
           const isGone = !!next.signal?.aborted
-          const isAgentGone = isGone && !!e.agentId
           await update($, local, cur => ({
             ...cur,
             requests: cur.requests.filter(r => r.id !== id),
             applied: [...cur.applied, id].slice(-300),
-            grantsSession: a.kind === 'approve-session' && !isAgentGone ? [...cur.grantsSession, key] : cur.grantsSession,
-            grantsOnce: a.kind === 'approve-once' && isGone && !isAgentGone ? [...cur.grantsOnce, key] : cur.grantsOnce,
-            history: isAgentGone ? closedRows(cur.history, id, 'unsent') : cur.history,
+            grantsSession: a.kind === 'approve-session' ? [...cur.grantsSession, key] : cur.grantsSession,
+            grantsOnce: a.kind === 'approve-once' && isGone ? [...cur.grantsOnce, key] : cur.grantsOnce,
           }))
           await publish($)
           return a.kind === 'deny'

@@ -121,10 +121,11 @@ const en = {
   grantCommand: 'command',
   grantAgent: (id: string) => `agent ${id}`,
   revokedToast: (title: string) => `Approval revoked for «${title}»`,
+  revokingToast: (title: string) => `Revoking the approval for «${title}»: it ends within a few seconds`,
   historyElsewhere: (title: string) => `closed: ${title} moved on (answered elsewhere)`,
   historyEnded: (title: string) => `closed: ${title} moved on (subagent ended)`,
   historyUnsent: (title: string) => `closed: ${title}: subagent ended, nothing sent`,
-  answerKind: { 'approve-once': 'approved once', 'approve-session': 'approved for the session', deny: 'denied', read: 'marked as read (the session was told)', order: 'reordered its planned tasks (the session was told)', revoke: 'revoked an approval for the session' } as Record<string, string>,
+  answerKind: { 'approve-once': 'approved once', 'approve-session': 'approved for the session', deny: 'denied', read: 'marked as read (the session was told)', order: 'reordered its planned tasks (the session was told)', revoke: 'asked to revoke an approval for the session (it ends within a few seconds)' } as Record<string, string>,
 }
 
 const it: typeof en = {
@@ -246,10 +247,11 @@ const it: typeof en = {
   grantCommand: 'comando',
   grantAgent: id => `agente ${id}`,
   revokedToast: title => `Approvazione revocata per «${title}»`,
+  revokingToast: title => `Revoca dell'approvazione per «${title}»: termina entro pochi secondi`,
   historyElsewhere: title => `chiusa: ${title} è andata avanti (risposta data altrove)`,
   historyEnded: title => `chiusa: ${title} è andata avanti (subagente terminato)`,
   historyUnsent: title => `chiusa: ${title}: subagente terminato, nulla inviato`,
-  answerKind: { 'approve-once': 'approvato una volta', 'approve-session': 'approvato per la sessione', deny: 'negato', read: 'letto (la sessione è stata avvisata)', order: 'riordinato le attività programmate (la sessione è stata avvisata)', revoke: "revocato un'approvazione per la sessione" },
+  answerKind: { 'approve-once': 'approvato una volta', 'approve-session': 'approvato per la sessione', deny: 'negato', read: 'letto (la sessione è stata avvisata)', order: 'riordinato le attività programmate (la sessione è stata avvisata)', revoke: "chiesto di revocare un'approvazione per la sessione (termina entro pochi secondi)" },
 }
 
 export type Strings = typeof en

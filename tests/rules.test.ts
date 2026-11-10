@@ -26,18 +26,53 @@ test('a rule matches the whole text: no here-doc, quote or script hides a protec
 
 test('a protected command only mentioned in text a program stores or prints raises no card', () => {
   for (const cmd of [
-    // A test file written with cat: the body is data.
-    "cat > tests/x.test.ts <<'EOF'\nexpect(run('gh pr merge 7')).toBe(1)\nEOF",
+    // Notes written with cat to a .md or .txt file: the body is data.
+    "cat > notes.md <<'EOF'\nrun gh pr merge 7 when ready\nEOF",
+    "cat <<'EOF' > a.txt\ngit merge x\nEOF\ngit add -A",
     // A commit message in the usual form.
     "git commit -m \"$(cat <<'EOF'\nfix: stop matching gh pr merge 7 in text\n\nCo-Authored-By: x\nEOF\n)\"",
+    "git add -A && git commit -m \"$(cat <<'EOF'\nfix: stop matching gh pr merge 7\nEOF\n)\"",
     "git commit -F - <<'EOF'\nwe no longer ask for git merge here\nEOF",
     "cat <<'EOF'\ngit merge x\nEOF",
     "echo 'gh pr merge 7'",
     "git commit -m 'git merge fix'",
+    "cd repo && git commit -am 'git merge fix' && git status",
     "grep 'git push origin main' notes.md",
     "gh pr create --title t --body 'will git merge later'",
   ])
     expect(label(cmd)).toBe(undefined)
+})
+
+test('a step that is not on the allowlist of inert ones leaves the whole text unmasked', () => {
+  for (const cmd of [
+    // A variable as the command, set by printf -v.
+    "printf -v c '%s' 'gh pr merge 5'; $c",
+    // A file written by a flag, then run.
+    "git log -1 --format='gh pr merge 5' --output=x.sh; sh x.sh",
+    // The text goes through git and out into a pipe.
+    "git commit --allow-empty -m 'gh pr merge 5'; git log -1 --format=%s | sh",
+    "git notes add -m 'gh pr merge 5' HEAD; git notes show HEAD | bash",
+    // A data file copied or renamed to a script, then run.
+    "cat <<'EOF' > a.txt\ngh pr merge 5\nEOF\ncp a.txt b.sh; sh b.sh",
+    "cat <<'EOF' > a.txt\ngh pr merge 5\nEOF\nmv a.txt b.sh; ./b.sh",
+    // A file a tool runs: a test, a package script.
+    "cat <<'EOF' > a.test.ts\ngh pr merge 5\nEOF\nbun test",
+    "cat > tests/x.test.ts <<'EOF'\nexpect(run('gh pr merge 7')).toBe(1)\nEOF",
+    'cat <<\'EOF\' > package.json\n{"scripts":{"x":"gh pr merge 5"}}\nEOF\nnpm run x',
+    // A flag that runs something, on a command that otherwise only prints.
+    "rg x --hostname-bin 'gh pr merge 5'",
+    "grep x --pre 'gh pr merge 5' f",
+    // A data step in the same call as one that runs.
+    "echo 'gh pr merge 5'; npm test",
+    "echo 'gh pr merge 5' | tee f; sh f",
+  ])
+    expect(label(cmd)).toBe('merge')
+})
+
+test('PowerShell text is never masked', () => {
+  expect(matchRule(DEFAULT_RULES, "echo 'git push origin main' -OutVariable c; iex \"$c\"", true)?.label).toBe('merge')
+  expect(matchRule(DEFAULT_RULES, "echo 'gh pr merge 7'", true)?.label).toBe('merge')
+  expect(matchRule(DEFAULT_RULES, "echo 'gh pr merge 7'")?.label).toBe(undefined)
 })
 
 test('the text is read raw whenever it cannot be split with certainty', () => {

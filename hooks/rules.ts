@@ -7,7 +7,7 @@
 //   "critical": ["jellyfin", "homeassistant"],
 //   "tierModels": { "light": "Haiku · low" } }
 
-import { HIDDEN, laterUse } from './request'
+import { HIDDEN } from './request'
 
 export type Rule = { label: string; re: RegExp }
 
@@ -64,21 +64,23 @@ export const compileRules = (file: RulesFile | null): { rules: Rule[]; critical:
   return { rules, critical }
 }
 
-// What a rule is matched against. The whole text of a command, unless every part of it is certain: then
-// the text a program only stores or prints (a here-doc body going to cat or a message, a quoted string
-// given to echo, `git commit -m`, grep) is blanked, so a command that only *mentions* a protected one
-// raises no card. Used to decide matching only: the card shows the command as written. Anything not
-// certain returns null and the rule sees the raw text, as before:
+// What a rule is matched against. The whole text of a command, unless EVERY step of it is on a short
+// allowlist of steps that cannot run what they are given (cd, echo, printf, grep, git add / status / diff /
+// commit, gh pr / issue create / comment / edit, a here-doc stored to cat or tee): then the text those only
+// store or print (a here-doc body, a quoted string) is blanked, so a command that only *mentions* a
+// protected one raises no card. Used to decide matching only: the card shows the command as written.
+// Anything else returns null and the rule sees the raw text, as before:
+// - any step that is not on the list, a pipe or a variable as a command included (`… | sh`, `$c`, cp, mv,
+//   npm, bun, make, `git log`, `git notes`), or on it with a flag that is not (`printf -v`, `--output=`);
+// - a step that writes a file with `>`; a here-doc body that goes anywhere but a .md or .txt file or stdout;
 // - the text has a hidden character, a curly quote, a CR, a backtick, `$'`, `$(` or `${` (but for the
 //   one `git commit -m "$(cat <<'EOF'` form), a here-string, process substitution, a line continuation,
 //   a backslash before a quote or a metacharacter, a comment, a subshell or a brace, `eval`, a shell or
 //   interpreter given a code string (`bash -c`, `python -c`, `node -e`, `pwsh -Command`), a descriptor
 //   or pipe set up for later (`exec 3>`, mkfifo, coproc), or a /dev or /proc target;
-// - a quote is left open, a here-doc has no end line or two openers share a line;
-// - an unquoted here-doc body expands `$( )`;
-// - a here-doc goes to anything but cat or tee (to a file of a plain data type that nothing later runs)
-//   or a git / gh message command; a quoted string is given to anything but the commands below, or its
-//   step is piped on, or writes to a file (`echo '…' | bash`, `echo '…' > s.sh; bash s.sh`).
+// - a quote is left open, a here-doc has no end line or two openers share a line, or an unquoted here-doc
+//   body expands `$( )`.
+// PowerShell text is never masked: there `echo` is Write-Output and `iex` runs what it printed.
 const OPAQUE: RegExp[] = [
   HIDDEN,
   /[‘-‟]/,
@@ -89,12 +91,12 @@ const OPAQUE: RegExp[] = [
   /\/(?:dev|proc)\/(?!null\b)/,
 ]
 
-type Step = { start: number; end: number; quotes: [number, number][]; isPiped: boolean; hasWrite: boolean }
+type Step = { start: number; end: number; quotes: [number, number][]; hasWrite: boolean }
 
 /**
  * `text` split at `;`, `&`, `&&`, `||`, `|` and newlines outside quotes, each step with its quoted spans
- * (the text between the quotes), whether a `|` takes its output on and whether it writes a file. `q` is
- * the quote left open at the end (`q0` is the one open at the start). `null` where reading is not certain.
+ * (the text between the quotes) and whether it writes a file. `q` is the quote left open at the end (`q0`
+ * is the one open at the start). `null` where reading is not certain.
  */
 const scan = (text: string, q0 = ''): { steps: Step[]; q: string } | null => {
   const steps: Step[] = []
@@ -103,8 +105,8 @@ const scan = (text: string, q0 = ''): { steps: Step[]; q: string } | null => {
   let qs = 0
   let quotes: [number, number][] = []
   let hasWrite = false
-  const close = (end: number, isPiped: boolean) => {
-    steps.push({ start, end, quotes, isPiped, hasWrite })
+  const close = (end: number) => {
+    steps.push({ start, end, quotes, hasWrite })
     quotes = []
     hasWrite = false
   }
@@ -132,30 +134,40 @@ const scan = (text: string, q0 = ''): { steps: Step[]; q: string } | null => {
     } else if (c === '&' && (text[i - 1] === '>' || text[i - 1] === '<' || next === '>')) continue
     else if (c === '\n' || c === ';' || c === '&' || c === '|') {
       const at = i
-      const isPiped = c === '|' && next !== '|'
       if ((c === '&' || c === '|') && next === c) i++
-      close(at, isPiped)
+      close(at)
       start = i + 1
     }
   }
-  close(text.length, false)
+  close(text.length)
   return { steps, q }
 }
 
-// Steps that only print or store the text they are given. rg is left out of the quoted-string rule when it has --pre (it runs that).
-const DATA_STEP = /^(?:echo|printf|e?grep|fgrep|rg|git[ \t]+(?:commit|tag|notes|log)|gh[ \t]+(?:pr|issue)[ \t]+(?:create|comment|edit|review|close|reopen))(?=[ \t]|$)/
+// The steps that cannot run what they are given. A word is plain (no `$`, quote or leading `-`) or a quoted
+// string, which is shaped to '' before the test; a flag must be named.
+const W = String.raw`[^\s;&|<>()'"$\\\`#-][^\s;&|<>()'"$\\\`#]*`
+const A = String.raw`(?:${W}|''|"")`
+const inert = (head: string, flags = '') => new RegExp(String.raw`^${head}(?:[ \t]+(?:${flags ? `${flags}|` : ''}${A}))*$`)
+const INERT: RegExp[] = [
+  inert('cd'),
+  inert('echo', '-[neE]+'),
+  inert('printf'),
+  inert('(?:grep|egrep|fgrep)', '-[A-Za-z]+'),
+  inert(String.raw`git[ \t]+add`, '-A|-u|-p|-N|-v|--all|--update|--patch|--verbose|--'),
+  inert(String.raw`git[ \t]+status`, '-s|-b|--short|--branch|--porcelain|--'),
+  inert(String.raw`git[ \t]+diff`, '--stat|--staged|--cached|--name-only|--name-status|--shortstat|--'),
+  inert(String.raw`git[ \t]+commit`, '-m|-F|-a|-s|-q|-am|--allow-empty|--amend|--no-edit|--no-verify|--signoff|--all|--quiet|-'),
+  inert(
+    String.raw`gh[ \t]+(?:pr[ \t]+(?:create|comment|edit|review)|issue[ \t]+(?:create|comment|edit))`,
+    '--title|-t|--body|-b|--base|-B|--head|-H|--draft|-d|--label|-l|--assignee|-a|--reviewer|-r|--milestone|-m|--repo|-R|--approve|--comment|--request-changes|--fill|--body-file|-F|-',
+  ),
+]
 
-/** `text` with the quoted strings of data steps blanked (same length: positions and separators stay). */
-const blankQuoted = (text: string): string => {
-  const sc = scan(text)
-  if (!sc || sc.q) return text
-  let out = text
-  for (const s of sc.steps) {
-    const step = text.slice(s.start, s.end).trim()
-    if (s.isPiped || s.hasWrite || !DATA_STEP.test(step) || (/^rg\b/.test(step) && /--pre\b/.test(step))) continue
-    for (const [a, b] of s.quotes) out = out.slice(0, a) + out.slice(a, b).replace(/[^\n]/g, ' ') + out.slice(b)
-  }
-  return out
+/** The step's text with each quoted string (quotes included) shaped to ''. */
+const shape = (text: string, s: Step): string => {
+  let t = text.slice(s.start, s.end)
+  for (const [a, b] of [...s.quotes].reverse()) t = t.slice(0, a - 1 - s.start) + "''" + t.slice(b + 1 - s.start)
+  return t.trim()
 }
 
 const DOC = /<<(-?)[ \t]*(['"]?)([A-Za-z_]\w*)\2(?=[ \t;&|<>)]|$)/
@@ -163,31 +175,33 @@ const FILE = String.raw`[\w@%+=:,./-]+`
 const CAT = new RegExp(String.raw`^cat(?:[ \t]+-[A-Za-z]*)*(?:[ \t]*>{1,2}[ \t]*(${FILE}))?$`)
 const TEE = new RegExp(String.raw`^tee(?:[ \t]+-[A-Za-z]+)*(?:[ \t]+(${FILE}))?$`)
 const AFTER = new RegExp(String.raw`^[ \t]*(?:>{1,2}[ \t]*(${FILE}))?[ \t]*$`)
-const MSG_CMD = String.raw`(?:git[ \t]+(?:commit|tag|notes)|gh[ \t]+(?:pr|issue)[ \t]+(?:create|comment|edit|review))`
+const MSG_CMD = String.raw`(?:git[ \t]+commit|gh[ \t]+(?:pr|issue)[ \t]+(?:create|comment|edit|review))`
 // A git / gh command whose here-doc is its message (`git commit -F - <<'EOF'`).
 const MSG = new RegExp(String.raw`^${MSG_CMD}(?:[ \t]+[^\s;&|<>()'"$\\\`#]+)*$`)
 // The start of `git commit -m "$(cat <<'EOF'`: plain words and complete quoted strings, then the string the substitution is in.
 const SUBST = new RegExp(String.raw`^(?:[^"'$\`\\<>()#\n]*(?:&&|;)[ \t]*)?${MSG_CMD}(?:[ \t]+(?:'[^'\n]*'|"[^"$\`\\\n]*"|[^\s"'$\`\\;&|<>()#]+))*[ \t]+"$`)
-// A file a here-doc may be stored in without it being code (what a plain-text file is for; others may be run).
-const DATA_FILE = /\.(?:md|markdown|txt|json|jsonl|ya?ml|toml|ini|cfg|conf|csv|log|html?|css|xml|svg|sql|diff|patch|rst|tsx?)$/i
+// The only files a here-doc is stored in without being taken for code (anything else may be run by a tool: a script, a test, package.json, a config).
+const DATA_FILE = /\.(?:md|markdown|txt)$/i
 
 /**
- * `cmd` without the body of each here-doc that goes to a command that only stores or prints it, read line
- * by line with the quote state carried, so a quote opened before a here-doc cannot make a body of what is
- * code. `null` where not certain.
+ * `cmd` without each here-doc that goes to cat or tee (a .md or .txt file, or stdout) or is a git / gh message
+ * (the opener's own step is dropped, a message's is kept to be checked), read line by line with the quote
+ * state carried, so a quote opened before a here-doc cannot make a body of what is code. `null` where a
+ * here-doc is anything else, or where not certain.
  */
-const maskDocs = (cmd: string): string | null => {
+const withoutDocs = (cmd: string): string | null => {
+  if (!cmd.includes('<<')) return cmd
   const lines = cmd.split('\n')
   const out: string[] = []
   let q = ''
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i] ?? ''
-    out.push(line)
     const opens = line.match(/<</g)?.length ?? 0
     if (!opens) {
       const sc = scan(line, q)
       if (!sc) return null
       q = sc.q
+      out.push(line)
       continue
     }
     const m = opens === 1 && !q ? DOC.exec(line) : null
@@ -199,49 +213,51 @@ const maskDocs = (cmd: string): string | null => {
     if (!m[2] && /\$[({]/.test(lines.slice(i + 1, end).join('\n'))) return null
     const head = line.slice(0, m.index)
     const after = line.slice((m.index ?? 0) + m[0].length)
-    const rest = lines.slice(end + 1)
-    const isPiped = /^[ \t]*(\||&&)/.test(rest[0] ?? '')
-    let isData = false
-    let qAfter = ''
     const sub = /^(.*?)\$\([ \t]*cat[ \t]*$/.exec(head)
     if (sub) {
       // `git commit -m "$(cat <<'EOF'`: the body is the text of a string given to a message command.
       const pre = scan(sub[1] ?? '', q)
-      isData = !!pre && pre.q === '"' && SUBST.test(sub[1] ?? '') && !after.trim() && /^\)"/.test(rest[0] ?? '')
-      qAfter = '"'
+      const next = lines[end + 1] ?? ''
+      if (!(pre && pre.q === '"' && SUBST.test(sub[1] ?? '') && !after.trim() && /^\)"/.test(next))) return null
+      out.push(sub[1] ?? '')
+      lines[end + 1] = next.slice(1)
+      q = '"'
     } else {
       const sc = scan(head, q)
       const last = sc && !sc.q ? sc.steps.at(-1) : undefined
-      const step = last ? head.slice(last.start, last.end).trim() : ''
+      if (!last) return null
+      const step = head.slice(last.start, last.end).trim()
       const af = AFTER.exec(after)
       const store = CAT.exec(step) ?? TEE.exec(step)
       if (store && af && !(store[1] && af[1])) {
         const file = store[1] ?? af[1]
-        isData = file ? DATA_FILE.test(file) && !Object.keys(laterUse(`${after}\n${rest.join('\n')}`, file.split('/').pop() ?? '')).length : !isPiped
-      } else isData = !!last && MSG.test(step) && !after.trim() && !isPiped
+        if (file && !DATA_FILE.test(file)) return null
+        out.push(head.slice(0, last.start))
+      } else if (MSG.test(step) && !after.trim()) out.push(head)
+      else return null
     }
-    if (isData) {
-      q = qAfter
-      i = end - 1
-    } else {
-      const sc = scan(line, q)
-      if (!sc) return null
-      q = sc.q
-    }
+    i = end
   }
   return q ? null : out.join('\n')
 }
 
-/** The text the rules match: the command with what a program only stores or prints blanked; null where that is not certain. */
+/** The text the rules match: the command with what a program only stores or prints blanked; null unless every step is certain and inert. */
 export const dataMask = (cmd: string): string | null => {
   if (OPAQUE.some(re => re.test(cmd))) return null
-  const docs = cmd.includes('<<') ? maskDocs(cmd) : cmd
-  if (docs === null) return null
-  return docs.includes('<<') ? docs : blankQuoted(docs)
+  const text = withoutDocs(cmd)
+  const sc = text === null ? null : scan(text)
+  if (text === null || !sc || sc.q) return null
+  for (const s of sc.steps) {
+    const t = shape(text, s)
+    if (t && (s.hasWrite || !INERT.some(re => re.test(t)))) return null
+  }
+  let view = text
+  for (const [a, b] of sc.steps.flatMap(s => s.quotes).sort((x, y) => y[0] - x[0])) view = view.slice(0, a - 1) + "''" + view.slice(b + 1)
+  return view
 }
 
-export const matchRule = (rules: readonly Rule[], command: string): Rule | undefined => {
-  const text = dataMask(command) ?? command
+export const matchRule = (rules: readonly Rule[], command: string, isPowerShell = false): Rule | undefined => {
+  const text = (isPowerShell ? null : dataMask(command)) ?? command
   return rules.find(r => r.re.test(text))
 }
 
