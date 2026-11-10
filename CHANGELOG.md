@@ -2,7 +2,7 @@
 
 ## 0.6.10 — 2026-11-10
 
-- **The coordinator asks for its own protected commands in its chat.** A protected command run by the coordinator session (the one in `coordinatorFolder`) no longer becomes a card in its own pane, which the person had to find among the other sessions' requests: the call returns `ask`, so the app's own permission dialog opens in the coordinator's chat, labelled with the rule. Other sessions are unchanged: their protected commands still wait for the pane.
+- **The coordinator asks for its own protected commands in its chat.** A protected command run by the coordinator session (the one in `coordinatorFolder`) no longer becomes a card in its own pane, which the person had to find among the other sessions' requests: the call returns `ask`, so the app's own permission dialog opens in the coordinator's chat, labelled with the rule. This holds only where a person answers the ask (`approver: 'person'`), its subagents included; a headless run in the coordinator folder keeps the card. Other sessions are unchanged: their protected commands still wait for the pane.
 
 ## 0.6.9 — 2026-11-05
 
