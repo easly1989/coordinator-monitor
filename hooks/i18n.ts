@@ -116,7 +116,15 @@ const en = {
   digestMsg: (n: number, from: string, to: string, body: string) => `[coordinator-monitor] ${n} notes from the pane, oldest first (${from}–${to}):\n\n${body}`,
   answeredMsg: (time: string, session: string, id: string, answer: string) =>
     `[coordinator-monitor] At ${time} the person answered request ${id} (#${id.slice(-6)}) of the session titled ${session} in the pane: ${answer}`,
-  answerKind: { 'approve-once': 'approved once', 'approve-session': 'approved for the session', deny: 'denied', read: 'marked as read (the session was told)', order: 'reordered its planned tasks (the session was told)' } as Record<string, string>,
+  grantsHeading: 'Approved for the session',
+  revoke: 'Revoke',
+  grantCommand: 'command',
+  grantAgent: (id: string) => `agent ${id}`,
+  revokedToast: (title: string) => `Approval revoked for «${title}»`,
+  historyElsewhere: (title: string) => `closed: ${title} moved on (answered elsewhere)`,
+  historyEnded: (title: string) => `closed: ${title} moved on (subagent ended)`,
+  historyUnsent: (title: string) => `closed: ${title}: subagent ended, nothing sent`,
+  answerKind: { 'approve-once': 'approved once', 'approve-session': 'approved for the session', deny: 'denied', read: 'marked as read (the session was told)', order: 'reordered its planned tasks (the session was told)', revoke: 'revoked an approval for the session' } as Record<string, string>,
 }
 
 const it: typeof en = {
@@ -233,7 +241,15 @@ const it: typeof en = {
   digestMsg: (n, from, to, body) => `[coordinator-monitor] ${n} note dal pannello, dalla più vecchia (${from}–${to}):\n\n${body}`,
   answeredMsg: (time, session, id, answer) =>
     `[coordinator-monitor] Alle ${time} l'utente ha risposto nel pannello alla richiesta ${id} (#${id.slice(-6)}) della sessione intitolata ${session}: ${answer}`,
-  answerKind: { 'approve-once': 'approvato una volta', 'approve-session': 'approvato per la sessione', deny: 'negato', read: 'letto (la sessione è stata avvisata)', order: 'riordinato le attività programmate (la sessione è stata avvisata)' },
+  grantsHeading: 'Approvato per la sessione',
+  revoke: 'Revoca',
+  grantCommand: 'comando',
+  grantAgent: id => `agente ${id}`,
+  revokedToast: title => `Approvazione revocata per «${title}»`,
+  historyElsewhere: title => `chiusa: ${title} è andata avanti (risposta data altrove)`,
+  historyEnded: title => `chiusa: ${title} è andata avanti (subagente terminato)`,
+  historyUnsent: title => `chiusa: ${title}: subagente terminato, nulla inviato`,
+  answerKind: { 'approve-once': 'approvato una volta', 'approve-session': 'approvato per la sessione', deny: 'negato', read: 'letto (la sessione è stata avvisata)', order: 'riordinato le attività programmate (la sessione è stata avvisata)', revoke: "revocato un'approvazione per la sessione" },
 }
 
 export type Strings = typeof en
