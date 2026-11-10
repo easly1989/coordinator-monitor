@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { DEFAULT_RULES, matchRule } from '../hooks/rules'
+import { DEFAULT_RULES, dataMask, matchRule } from '../hooks/rules'
 
 const label = (cmd: string) => matchRule(DEFAULT_RULES, cmd)?.label
 
@@ -73,6 +73,63 @@ test('a step that is not on the allowlist of inert ones leaves the whole text un
     // A data step in the same call as one that runs.
     "echo 'gh pr merge 5'; npm test",
     "echo 'gh pr merge 5' | tee f; sh f",
+  ])
+    expect(label(cmd)).toBe('merge')
+})
+
+const M = 'gh pr ' + 'merge 5'
+
+test('a here-doc end line, a continuation or a substitution in the body cannot hide a protected command', () => {
+  for (const cmd of [
+    // Inside `$( )` bash ends the body at a line that only starts with the word.
+    ...[')', ' )', ';)', ')x', ' ;', '|'].map(suf => `git commit -m "$(cat <<'EOF'\nx\nEOF${suf}"; ${M}; echo "\nEOF\n)"`),
+    // A backslash-newline hides the `(` of a substitution in an unquoted body.
+    `cat <<EOF\n$\\\n(${M})\nEOF`,
+    `tee notes.md <<EOF\n$\\\n(${M})\nEOF`,
+    `git commit -F - <<EOF\n$\\\n(${M})\nEOF`,
+    // A split end line ends the body early.
+    `cat <<EOF\nx\nEO\\\nF\n${M}\nEOF`,
+    `cat <<-EOF\nx\n\tEO\\\nF\n${M}\n\tEOF`,
+  ])
+    expect(label(cmd)).toBe('merge')
+  // The same hiding of `${x@P}` (which runs the value of x as a prompt string): the text is not masked.
+  expect(dataMask('cat <<EOF\n$\\\n{x@P}\nEOF')).toBe(null)
+})
+
+test('plain text that mentions a protected command stays quiet, with or without a dash in it', () => {
+  for (const cmd of [
+    `git commit -m "$(cat <<'EOF'\nfix: avoid ${M}\nEOF\n)"`,
+    `cat <<'EOF' > notes.md\n${M}\nEOF`,
+    `echo '- item ${M}'`,
+    `git commit -m '- fix ${M}'`,
+    `git commit -m '-fix ${M}'`,
+    `git commit -m '-fix' -m 'docs: avoid ${M}'`,
+    `gh pr comment 5 --body '- ${M}'`,
+    `git commit -m "- fix ${M}"`,
+    `git commit -m 'docs: ${M}'`,
+    `echo '${M}'`,
+    `gh pr comment 5 --body '${M}'`,
+    `grep -n '${M}' a.md`,
+  ])
+    expect(label(cmd)).toBe(undefined)
+})
+
+test('a flag written in quotes, or joined from quoted parts, leaves the text unmasked', () => {
+  for (const cmd of [
+    `printf -'v' 'a[$(${M})]' x`,
+    `printf '-'v 'a[$(${M})]' x`,
+    `echo -'e' '${M}'`,
+    `grep "--pre"=sh '${M}' x`,
+    `grep --'pre'=sh '${M}' x`,
+    `git diff --'output'=x.sh '${M}' x`,
+    // A flag that takes a value on grep (-F, -b, -n) does not make the next word a value there.
+    `grep -F '--pre=sh' '${M}' x`,
+    `grep -n '--pre=sh' '${M}' x`,
+    `git commit -m x '-x' '${M}'`,
+    // Another pipe or write in the same call.
+    `echo '${M}' | sh`,
+    `echo x '${M}' > a.sh; sh a.sh`,
+    `cd 'x' && ${M}`,
   ])
     expect(label(cmd)).toBe('merge')
 })

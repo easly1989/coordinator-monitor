@@ -1312,6 +1312,9 @@ export const register: Register = (on, options) => {
     // The coordinator's person is in its own chat: ask there, with the app's dialog, not with a pane card.
     // Only where a person answers the ask; a headless run keeps the card path.
     if (isCoordinator && e.approver === 'person') return { decision: 'ask', reason: S.askInChat(rule.label) }
+    // Pending answers first: a revoke the person just gave must take its grant out before this check reads it.
+    // Pending answers first: a revoke the person just gave must take its grant out before this check reads it.
+    await applyAnswers($)
     const l = await read($, local)
     const key = scoped(e.agentId, command)
     if (l.grantsSession.includes(key)) return { decision: 'allow', reason: 'approved for this session from the coordinator pane' }

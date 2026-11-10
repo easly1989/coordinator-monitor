@@ -1625,6 +1625,27 @@ describe('a session reporting', () => {
     expect([await check('u8'), 'u8']).toEqual(['deny', 'u8'])
   })
 
+  test('a revoke still waiting for its tick is applied before the next call reads its grant', async ($, on) => {
+    const { mine, settle, written, answersFile } = subagent(on)
+    await $.session.start({ cwd: '/repos/project', surface: 'desktop', isInteractive: true })
+    const check = async (u: string) =>
+      ((await $.tool.check({ tool: 'Bash', input: { command: 'npm publish' }, tool_use_id: u } as never)) as { decision?: string }).decision
+    expect(await check('u1')).toBe('deny')
+    await settle()
+    const card = mine().requests.find(r => r.command === 'npm publish')?.id ?? ''
+    written[answersFile()] = JSON.stringify([{ requestId: card, at: Date.now(), kind: 'approve-session' }])
+    await settleUntil(() => (mine().grants ?? []).length > 0)
+    const id = mine().grants?.[0]?.id ?? ''
+    expect(await check('u2')).toBe('allow')
+    // The revoke is written and the next call comes before any tick: it must ask, not run on the old grant.
+    written[answersFile()] = JSON.stringify([
+      { requestId: card, at: Date.now() - 1000, kind: 'approve-session' },
+      { requestId: 'revoke-1', at: Date.now(), kind: 'revoke', text: id },
+    ])
+    expect(await check('u3')).toBe('deny')
+    expect(mine().requests.some(r => r.command === 'npm publish')).toBe(true)
+  })
+
   test('a card that closed on its own is a line for ten minutes, and is gone after', async ($, on) => {
     const { mine, settle } = subagent(on)
     await $.session.start({ cwd: '/repos/project', surface: 'desktop', isInteractive: true })

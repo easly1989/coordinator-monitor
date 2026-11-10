@@ -72,8 +72,8 @@ export const compileRules = (file: RulesFile | null): { rules: Rule[]; critical:
 // Anything else returns null and the rule sees the raw text, as before:
 // - any step that is not on the list, a pipe or a variable as a command included (`… | sh`, `$c`, cp, mv,
 //   npm, bun, make, `git log`, `git notes`, `printf`, whose `-v` evaluates an array subscript), or on it
-//   with a flag that is not (`--output=`) or one written in quotes (`git commit '-m' …`: any quoted word
-//   that starts with `-` leaves the whole text unmasked, as the allowlist cannot see a quoted flag);
+//   with a flag that is not (`--output=`) or one written in quotes (`git commit '-m' …`: a quoted word of a
+//   flag's shape, `-v` or `--pre=sh`, leaves the whole text unmasked unless it is the value of `-m`, `--body`…);
 // - a step that writes a file with `>`; a here-doc body that goes anywhere but a .md or .txt file or stdout;
 // - the text has a hidden character, a curly quote, a CR, a backtick, `$'`, `$(` or `${` (but for the
 //   one `git commit -m "$(cat <<'EOF'` form), a here-string, process substitution, a line continuation,
@@ -208,10 +208,14 @@ const withoutDocs = (cmd: string): string | null => {
     const m = opens === 1 && !q ? DOC.exec(line) : null
     if (!m) return null
     const word = m[3] ?? ''
-    const end = lines.findIndex((l, j) => j > i && (m[1] ? l.replace(/^\t+/, '') : l) === word)
-    if (end < 0) return null
-    // An unquoted word: the shell runs each `$( )` in the body as it reads it.
-    if (!m[2] && /\$[({]/.test(lines.slice(i + 1, end).join('\n'))) return null
+    // Inside `$( )` bash also ends the body at a line that only starts with the word (`EOF)`, `EOF ;`): a line
+    // that starts with it but is not exactly it, is not read.
+    const strip = (l: string) => (m[1] ? l.replace(/^\t+/, '') : l)
+    const end = lines.findIndex((l, j) => j > i && strip(l).startsWith(word))
+    if (end < 0 || strip(lines[end] ?? '') !== word) return null
+    // An unquoted word: the shell runs each `$( )` in the body as it reads it, a backslash-newline can hide
+    // the `(` from a look at the text, and one in the end word ends the body early.
+    if (!m[2] && /\$[({]|\\$/m.test(lines.slice(i + 1, end).join('\n'))) return null
     const head = line.slice(0, m.index)
     const after = line.slice((m.index ?? 0) + m[0].length)
     const sub = /^(.*?)\$\([ \t]*cat[ \t]*$/.exec(head)
@@ -242,6 +246,15 @@ const withoutDocs = (cmd: string): string | null => {
   return q ? null : out.join('\n')
 }
 
+// A flag written in quotes (`grep '--pre=sh' …`) is hidden by the shaped text, so a quoted word of a flag's shape
+// (`-v`, `--pre=sh`: no space) leaves the text unmasked, unless it is the value of a git commit / gh flag that
+// takes one (`git commit -m '-fix'`): there it is a message, and a plain mention of `- item` or `-fix` stays quiet.
+const FLAG_SHAPE = /^--?[A-Za-z]\S*$/
+const VALUE_STEP = /^(?:git[ \t]+commit|gh[ \t])/
+const VALUE_FLAG = /(?:^|[ \t])(?:-m|-am|-F|--title|-t|--body|-b|--body-file|--base|-B|--head|-H|--label|-l|--assignee|-a|--reviewer|-r|--milestone|--repo|-R)[ \t]+$/
+const hasQuotedFlag = (text: string, s: Step, shaped: string): boolean =>
+  s.quotes.some(([a, b]) => FLAG_SHAPE.test(text.slice(a, b)) && !(VALUE_STEP.test(shaped) && VALUE_FLAG.test(text.slice(s.start, a - 1))))
+
 /** The text the rules match: the command with what a program only stores or prints blanked; null unless every step is certain and inert. */
 export const dataMask = (cmd: string): string | null => {
   if (OPAQUE.some(re => re.test(cmd))) return null
@@ -250,8 +263,7 @@ export const dataMask = (cmd: string): string | null => {
   if (text === null || !sc || sc.q) return null
   for (const s of sc.steps) {
     const t = shape(text, s)
-    // A quoted word that starts with `-` may be a flag (`printf '-v' 'a[$(…)]'`), which the shaped text hides.
-    if (t && (s.hasWrite || s.quotes.some(([a]) => text[a] === '-') || !INERT.some(re => re.test(t)))) return null
+    if (t && (s.hasWrite || hasQuotedFlag(text, s, t) || !INERT.some(re => re.test(t)))) return null
   }
   let view = text
   for (const [a, b] of sc.steps.flatMap(s => s.quotes).sort((x, y) => y[0] - x[0])) view = view.slice(0, a - 1) + "''" + view.slice(b + 1)
