@@ -53,6 +53,7 @@ const en = {
   answerLostToast: 'An answer could not be delivered to the session and was not kept',
   paneOpened: 'Agents pane opened.',
   rulesBroken: (path: string) => `coordinator-monitor: ${path} is not valid JSON; only the default rules apply.`,
+  askInChat: (label: string) => `Protected command (${label}): approve or deny it here.`,
   // what the model reads
   waitApproval: (label: string, id: string) =>
     `This command is protected (${label}) and needs the person's approval, requested in the coordinator pane (request ${id}, shown as #${id.slice(-6)} on its card). Do not retry it and do not work around it: end your turn now and say what you are waiting for. The person already sees this request as a card: do not ask for it again among your questions. The answer arrives as a new message.`,
@@ -173,6 +174,7 @@ const it: typeof en = {
   answerLostToast: 'Una risposta non è stata recapitata alla sessione e non è stata conservata',
   paneOpened: 'Pannello Agenti aperto.',
   rulesBroken: path => `coordinator-monitor: ${path} non è un JSON valido; valgono solo le regole predefinite.`,
+  askInChat: label => `Comando protetto (${label}): approvalo o rifiutalo qui.`,
   waitApproval: (label, id) =>
     `Questo comando è protetto (${label}) e richiede l'approvazione dell'utente, chiesta nel pannello del Coordinatore (richiesta ${id}, sulla scheda #${id.slice(-6)}). Non riprovarlo e non aggirarlo: chiudi il turno ora e di' cosa stai aspettando. L'utente vede già questa richiesta come scheda: non chiederla di nuovo tra le tue domande. La risposta arriverà come nuovo messaggio.`,
   questionForwarded: id =>

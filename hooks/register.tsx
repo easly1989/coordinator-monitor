@@ -1223,6 +1223,9 @@ export const register: Register = (on, options) => {
     const command = String((e.input as { command?: unknown } | null)?.command ?? '')
     const rule = command && matchRule(rules, command)
     if (!rule) return next(e)
+    // The coordinator's person is in its own chat: ask there, with the app's dialog, not with a pane card.
+    // Only where a person answers the ask; a headless run keeps the card path.
+    if (isCoordinator && e.approver === 'person') return { decision: 'ask', reason: S.askInChat(rule.label) }
     const l = await read($, local)
     const key = scoped(e.agentId, command)
     if (l.grantsSession.includes(key)) return { decision: 'allow', reason: 'approved for this session from the coordinator pane' }

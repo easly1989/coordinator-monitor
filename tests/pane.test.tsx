@@ -543,6 +543,25 @@ describe('a session reporting', () => {
     expect(mine().flow).toEqual({ title: 'Calendar', done: 1, total: 3, phase: 'delegate' })
   })
 
+  test('the coordinator asks for its own protected commands in its chat, with no pane card', { options: { coordinatorFolder: 'coordinator' } }, async ($, on) => {
+    const { mine, settle } = setup(on, [], '/repos/coordinator')
+    await $.session.start({ cwd: '/repos/coordinator', surface: 'desktop', isInteractive: true })
+    const r = await $.tool.check({ tool: 'Bash', input: { command: 'gh pr merge 7' }, tool_use_id: 'u1', approver: 'person' } as never) as { decision?: string; reason?: string }
+    await settle()
+    expect(r.decision).toBe('ask')
+    expect(r.reason).toMatch(/approve or deny it here/)
+    expect(mine().requests).toEqual([])
+  })
+
+  test('a coordinator run with no person to ask keeps the pane card', { options: { coordinatorFolder: 'coordinator' } }, async ($, on) => {
+    const { mine, settle } = setup(on, [], '/repos/coordinator')
+    await $.session.start({ cwd: '/repos/coordinator', surface: 'desktop', isInteractive: false })
+    const r = await $.tool.check({ tool: 'Bash', input: { command: 'gh pr merge 7' }, tool_use_id: 'u1' } as never) as { decision?: string }
+    await settle()
+    expect(r.decision).toBe('deny')
+    expect(mine().requests.length).toBe(1)
+  })
+
   test('a protected command the person answered in the session leaves the pane', async ($, on) => {
     const { mine, settle } = setup(on)
     on('tool.check', () => ({ decision: 'allow' }) as never)
