@@ -33,7 +33,7 @@ const ENDED_KEEP_MS = 60 * 60 * 1000
 // How long a closed session without a pending card or a queue stays in the pane.
 const ENDED_GRACE_MS = 5 * 60 * 1000
 /** Published in every status, so the pane can flag a session still running an older copy. Keep in step with plugin.json. */
-const MOD_VERSION = '0.6.9'
+const MOD_VERSION = '0.6.10'
 const SHELL_TOOLS = new Set(['Bash', 'PowerShell'])
 const STEP_TOOL = 'mcp__savvy-progress__step'
 const FLOW_TOOL = 'mcp__savvy-progress__progress'
@@ -1216,6 +1216,8 @@ export const register: Register = (on, options) => {
     const command = String((e.input as { command?: unknown } | null)?.command ?? '')
     const rule = command && matchRule(rules, command)
     if (!rule) return next(e)
+    // The coordinator's person is in its own chat: ask there, with the app's dialog, not with a pane card.
+    if (isCoordinator) return { decision: 'ask', reason: S.askInChat(rule.label) }
     const l = await read($, local)
     const key = scoped(e.agentId, command)
     if (l.grantsSession.includes(key)) return { decision: 'allow', reason: 'approved for this session from the coordinator pane' }

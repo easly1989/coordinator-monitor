@@ -207,7 +207,7 @@ test('the pane draws sessions, workers and every kind of request, on every surfa
   expect(mine.title).toBe('Coordinatore')
   expect(mine.folder).toBe('coordinator')
   expect(mine.effort).toBe('high')
-  expect(mine.version).toBe('0.6.9')
+  expect(mine.version).toBe('0.6.10')
 
   for (const surface of ['terminal', 'desktop', 'vscode', 'mobile'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface })
@@ -510,6 +510,16 @@ describe('a session reporting', () => {
     await settle()
     expect(mine().agents[0]).toMatchObject({ stepDone: 1, stepTotal: 4, stepNote: 'schema' })
     expect(mine().flow).toEqual({ title: 'Calendar', done: 1, total: 3, phase: 'delegate' })
+  })
+
+  test('the coordinator asks for its own protected commands in its chat, with no pane card', { options: { coordinatorFolder: 'coordinator' } }, async ($, on) => {
+    const { mine, settle } = setup(on, [], '/repos/coordinator')
+    await $.session.start({ cwd: '/repos/coordinator', surface: 'desktop', isInteractive: true })
+    const r = await $.tool.check({ tool: 'Bash', input: { command: 'gh pr merge 7' }, tool_use_id: 'u1' } as never) as { decision?: string; reason?: string }
+    await settle()
+    expect(r.decision).toBe('ask')
+    expect(r.reason).toMatch(/approve or deny it here/)
+    expect(mine().requests).toEqual([])
   })
 
   test('a protected command the person answered in the session leaves the pane', async ($, on) => {
