@@ -1264,7 +1264,7 @@ export const register: Register = (on, options) => {
 
   // The engine draws the pane again after a fault; that card then shows its request as plain Code.
   on('ui.fault', ($, e, next) => {
-    faulted.add(e.element)
+    faulted.add(`${e.surface}:${e.element}`)
     return next(e)
   })
 
@@ -1510,7 +1510,7 @@ export const register: Register = (on, options) => {
         // The card's padding and border take about six columns of the pane's body, the bar two more.
         const scrollKey = `scroll-${r.id}`
         const isScrolled =
-          !!Client && !faulted.has(scrollKey) && rowsOf(pieces, cols - 8).length > SCROLL_ROWS && JSON.stringify(pieces).length <= SCROLL_MAX_CHARS
+          !!Client && !faulted.has(`${e.surface}:${scrollKey}`) && JSON.stringify(pieces).length <= SCROLL_MAX_CHARS && rowsOf(pieces, cols - 8).length > SCROLL_ROWS
         const raw = isScrolled && Client ? (
           <Client key={scrollKey} module="./scroll.tsx" width="100%" props={{ pieces, maxRows: SCROLL_ROWS, columns: cols - 6, hint: S.scrollHint }} />
         ) : isShell ? (

@@ -11,7 +11,7 @@ type State = { offset: number; isDragging?: boolean }
 
 // Cells a character may take: wide East Asian letters and emoji two, a tab up to a tab stop. Overcounting
 // only wraps a row early; undercounting would let the surface wrap it again, taller but still whole.
-const WIDE = /[\u1100-\u115F\u2E80-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE30-\uFE4F\uFF00-\uFF60\uFFE0-\uFFE6\u{1F000}-\u{1FAFF}\u{20000}-\u{3FFFD}]/u
+const WIDE = /[\u1100-\u115F\u2E80-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE30-\uFE4F\uFF00-\uFF60\uFFE0-\uFFE6\u231A\u231B\u23E9-\u23EC\u23F0\u23F3\u25FD\u25FE\u2614\u2615\u2648-\u2653\u267F\u2693\u26A1\u26AA\u26AB\u26BD\u26BE\u26C4\u26C5\u26CE\u26D4\u26EA\u26F2\u26F3\u26F5\u26FA\u26FD\u2705\u270A\u270B\u2728\u274C\u274E\u2753-\u2755\u2757\u2795-\u2797\u27B0\u27BF\u2B1B\u2B1C\u2B50\u2B55\u{1F000}-\u{1FAFF}\u{20000}-\u{3FFFD}]/u
 const cellsOf = (ch: string): number => (ch === '\t' ? 8 : WIDE.test(ch) ? 2 : 1)
 
 /** The pieces as rows at most `width` cells wide; a row that continues the line before is `isCont`. */

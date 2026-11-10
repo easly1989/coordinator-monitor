@@ -23,6 +23,10 @@ test('rowsOf counts a wide character as two cells and a tab as eight', () => {
   for (const w of [8, 9, 11, 40]) expect(rowsOf([{ text }], w).map(r => r.text).join('')).toBe(text)
 })
 
+test('rowsOf counts a BMP emoji as two cells', () => {
+  expect(rowsOf([{ text: '✅✅✅✅✅' }], 8).map(r => r.text)).toEqual(['✅✅✅✅', '✅'])
+})
+
 test('rowsOf keeps tone and block flags, and narrows a block by its gutter', () => {
   const rows = rowsOf([{ text: '0123456789', isBlock: true, tone: 'label' }], 10)
   expect(rows).toEqual([

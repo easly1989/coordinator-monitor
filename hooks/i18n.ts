@@ -100,7 +100,7 @@ const en = {
   lines: (n: number) => `${n} lines`,
   firstLines: (n: number, of: number) => `first ${n} of ${of} lines`,
   // `{n}` is filled in by the surface module, which alone knows how many rows the request takes.
-  scrollHint: '{n} lines · scroll',
+  scrollHint: '{n} rows · click, then keys or bar',
   risk: { net: 'network', exec: 'runs code', del: 'deletes', write: 'writes files' } as Record<string, string>,
   explainLabel: 'Explanation (Haiku)',
   explainWarn: 'Written from the request itself: it can be wrong or steered. Check the request.',
@@ -216,7 +216,7 @@ const it: typeof en = {
   edits: 'Modifica',
   lines: n => `${n} righe`,
   firstLines: (n, of) => `prime ${n} di ${of} righe`,
-  scrollHint: '{n} righe · scorri',
+  scrollHint: '{n} righe a schermo · clic, poi tasti o barra',
   risk: { net: 'rete', exec: 'esegue codice', del: 'cancella', write: 'scrive file' },
   explainLabel: 'Spiegazione (Haiku)',
   explainWarn: 'Scritta a partire dalla richiesta stessa: può sbagliare o essere manipolata. Verifica la richiesta.',

@@ -1168,7 +1168,7 @@ describe('a session reporting', () => {
             const shown = async () => (await ui.findAll({ type: 'Box', in: at })).map(b => b.key ?? '').filter(k => k.startsWith('row-'))
             expect(await shown()).toEqual(Array.from({ length: 18 }, (_, n) => `row-${n}`))
             expect(['bar', surface, !!(await ui.find({ key: 'bar', in: at }))]).toEqual(['bar', surface, true])
-            expect(['hint', surface, !!(await ui.find({ type: 'Text', text: `${rows.length} lines · scroll`, in: at } as never))]).toEqual(['hint', surface, true])
+            expect(['hint', surface, !!(await ui.find({ type: 'Text', text: `${rows.length} rows · click`, in: at } as never))]).toEqual(['hint', surface, true])
             // Keys move the view a row or a page at a time; the end shows the last row.
             await ui.key({ key: 'down', in: at })
             expect((await shown())[0]).toBe('row-1')
@@ -1225,7 +1225,7 @@ describe('a session reporting', () => {
           const ui = await open($ as never, on, [perm()])
           expect(await ui.find({ type: 'Client' })).toBeFalsy()
           expect(await ui.find({ type: 'Code', text: BIG })).toBeTruthy()
-          expect(await ui.find({ type: 'Text', text: /lines · scroll/ })).toBeFalsy()
+          expect(await ui.find({ type: 'Text', text: /rows · click/ })).toBeFalsy()
           await ui.unmount()
         })
 
@@ -1236,7 +1236,7 @@ describe('a session reporting', () => {
           expect(await ui.find({ type: 'Client', key: 'scroll-k1' })).toBeTruthy()
           await ui.resize({ columns: 120, rows: 20, in: 'scroll-k1' })
           expect(await ui.find({ key: 'bar', in: 'scroll-k1' })).toBeFalsy()
-          expect(await ui.find({ type: 'Text', text: /lines · scroll/, in: 'scroll-k1' } as never)).toBeFalsy()
+          expect(await ui.find({ type: 'Text', text: /rows · click/, in: 'scroll-k1' } as never)).toBeFalsy()
           expect((await ui.findAll({ type: 'Box', in: 'scroll-k1' })).filter(b => b.key?.startsWith('row-')).map(b => b.text)).toEqual(cmd.split('\n'))
           await ui.unmount()
         })
