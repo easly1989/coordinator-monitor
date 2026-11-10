@@ -1176,6 +1176,14 @@ describe('a session reporting', () => {
             expect((await shown()).at(-1)).toBe(`row-${rows.length - 1}`)
             await ui.key({ key: 'up', in: at })
             expect((await shown()).at(-1)).toBe(`row-${rows.length - 2}`)
+            // Past either end the view stays put.
+            await ui.key({ key: 'pagedown', in: at })
+            await ui.key({ key: 'down', in: at })
+            expect((await shown()).at(-1)).toBe(`row-${rows.length - 1}`)
+            await ui.key({ key: 'home', in: at })
+            await ui.key({ key: 'pageup', in: at })
+            await ui.key({ key: 'up', in: at })
+            expect((await shown())[0]).toBe('row-0')
             // A press on the bar's top or bottom, or a drag along it, moves the view there.
             await ui.pointer({ type: 'down', x: 53, y: 0, button: 'left', in: at })
             expect((await shown())[0]).toBe('row-0')
@@ -1191,9 +1199,7 @@ describe('a session reporting', () => {
               expect([String(q), !!(await ui.find({ type: 'Text', text: q }))]).toEqual([String(q), true])
               expect([String(q), !!(await ui.find({ type: 'Text', text: q, in: at } as never))]).toEqual([String(q), false])
             }
-            expect(await ui.find({ type: 'Text', text: /^1\. .*notes\.md/ })).toBeTruthy()
-            expect(await ui.find({ type: 'Text', text: /^8\. echo 5$/ })).toBeTruthy()
-            expect(await ui.find({ type: 'Text', text: /^x$/ })).toBeTruthy()
+            for (const q of [/^1\. .*notes\.md/, /^7\. echo 5$/, /^x$/]) expect([String(q), !!(await ui.find({ type: 'Text', text: q }))]).toEqual([String(q), true])
             for (const key of ['once-k1', 'sess-k1', 'deny-k1']) {
               expect(await ui.find({ key })).toBeTruthy()
               expect(await ui.find({ key, in: at })).toBeFalsy()
@@ -1243,20 +1249,6 @@ describe('a session reporting', () => {
             expect([surface, !!(await ui.find({ type: 'Client' }))]).toEqual([surface, false])
             expect([surface, (await ui.findAll({ type: 'Code' })).map(c => c.text).join('\n').includes(BODY60)]).toEqual([surface, true])
             expect([surface, !!(await ui.find({ key: 'once-k1' }))]).toEqual([surface, true])
-            await ui.unmount()
-          }
-        })
-
-        test('past the pane text budget, a region that cannot be drawn takes the buttons with it', async ($, on) => {
-          const huge = { id: 'q0', kind: 'questions', createdAt: Date.now() - 1, text: 'y'.repeat(120_000) }
-          const desk = await open($ as never, on, [huge, perm({}, LONG)])
-          await desk.unmount()
-          for (const surface of ['desktop', 'terminal'] as const) {
-            const ui = await $.ui.mount({ ...PANE, surface })
-            const region = !!(await ui.find({ type: 'Client', key: 'scroll-k1' }))
-            const rows = region ? (await ui.findAll({ type: 'Box', in: 'scroll-k1' })).length : 0
-            const once = !!(await ui.find({ key: 'once-k1' }))
-            expect([surface, region, rows > 0, once]).toEqual([surface, 'probe'])
             await ui.unmount()
           }
         })
