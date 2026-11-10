@@ -65,13 +65,15 @@ export const compileRules = (file: RulesFile | null): { rules: Rule[]; critical:
 }
 
 // What a rule is matched against. The whole text of a command, unless EVERY step of it is on a short
-// allowlist of steps that cannot run what they are given (cd, echo, printf, grep, git add / status / diff /
+// allowlist of steps that cannot run what they are given (cd, echo, grep, git add / status / diff /
 // commit, gh pr / issue create / comment / edit, a here-doc stored to cat or tee): then the text those only
 // store or print (a here-doc body, a quoted string) is blanked, so a command that only *mentions* a
 // protected one raises no card. Used to decide matching only: the card shows the command as written.
 // Anything else returns null and the rule sees the raw text, as before:
 // - any step that is not on the list, a pipe or a variable as a command included (`… | sh`, `$c`, cp, mv,
-//   npm, bun, make, `git log`, `git notes`), or on it with a flag that is not (`printf -v`, `--output=`);
+//   npm, bun, make, `git log`, `git notes`, `printf`, whose `-v` evaluates an array subscript), or on it
+//   with a flag that is not (`--output=`) or one written in quotes (`git commit '-m' …`: any quoted word
+//   that starts with `-` leaves the whole text unmasked, as the allowlist cannot see a quoted flag);
 // - a step that writes a file with `>`; a here-doc body that goes anywhere but a .md or .txt file or stdout;
 // - the text has a hidden character, a curly quote, a CR, a backtick, `$'`, `$(` or `${` (but for the
 //   one `git commit -m "$(cat <<'EOF'` form), a here-string, process substitution, a line continuation,
@@ -151,7 +153,6 @@ const inert = (head: string, flags = '') => new RegExp(String.raw`^${head}(?:[ \
 const INERT: RegExp[] = [
   inert('cd'),
   inert('echo', '-[neE]+'),
-  inert('printf'),
   inert('(?:grep|egrep|fgrep)', '-[A-Za-z]+'),
   inert(String.raw`git[ \t]+add`, '-A|-u|-p|-N|-v|--all|--update|--patch|--verbose|--'),
   inert(String.raw`git[ \t]+status`, '-s|-b|--short|--branch|--porcelain|--'),
@@ -249,7 +250,8 @@ export const dataMask = (cmd: string): string | null => {
   if (text === null || !sc || sc.q) return null
   for (const s of sc.steps) {
     const t = shape(text, s)
-    if (t && (s.hasWrite || !INERT.some(re => re.test(t)))) return null
+    // A quoted word that starts with `-` may be a flag (`printf '-v' 'a[$(…)]'`), which the shaped text hides.
+    if (t && (s.hasWrite || s.quotes.some(([a]) => text[a] === '-') || !INERT.some(re => re.test(t)))) return null
   }
   let view = text
   for (const [a, b] of sc.steps.flatMap(s => s.quotes).sort((x, y) => y[0] - x[0])) view = view.slice(0, a - 1) + "''" + view.slice(b + 1)

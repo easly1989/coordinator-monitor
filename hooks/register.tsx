@@ -289,9 +289,9 @@ const applyAnswers = async ($: $): Promise<void> => {
       const cmd = fence(req.command ?? '')
       const to = req.agentId
       // The revokes above ran first: an approval the person gave before a revoke of the same grant would bring it back.
-      const isStale = (a.kind === 'approve-once' || a.kind === 'approve-session') && answers.some(r => r.kind === 'revoke' && r.text === grantId(grantKey(req)) && r.at > a.at)
+      const isStale = (a.kind === 'approve-once' || a.kind === 'approve-session') && answers.some(r => r.kind === 'revoke' && r.text === grantId(grantKey(req)) && r.at >= a.at)
       if (isStale) {
-        prompts.push({ text: S.approvedMsg(cmd, a.kind === 'approve-once'), agentId: to, reqId: req.id, verdict: true })
+        prompts.push({ text: S.supersededMsg(cmd), agentId: to, reqId: req.id, verdict: true })
       } else if (a.kind === 'approve-once') {
         next.grantsOnce.push(grantKey(req))
         prompts.push({ text: S.approvedMsg(cmd, true), agentId: to, reqId: req.id, verdict: true, undo: { key: grantKey(req), isOnce: true, hadIt: false } })

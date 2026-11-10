@@ -61,6 +61,8 @@ const en = {
     `Your question was forwarded to the person through the coordinator pane (request ${id}, shown as #${id.slice(-6)} on its card). End your turn now without guessing the answer and without asking it again among your questions; it arrives as a new message.`,
   approvedMsg: (cmd: string, once: boolean) =>
     `Approved from the coordinator pane${once ? ' (this one time)' : ' (for the rest of this session)'}: you may now run\n\n${cmd}`,
+  supersededMsg: (cmd: string) =>
+    `An approval from the coordinator pane for this command was withdrawn by a revoke that came with it, so nothing is approved: do not run\n\n${cmd}\n\nIf you still need it, ask again.`,
   deniedMsg: (cmd: string) => `Denied from the coordinator pane: do not run\n\n${cmd}\n\nFind another way or explain what you need.`,
   answerMsg: (text: string, time = '', id = '', quote = '') =>
     quote
@@ -189,6 +191,7 @@ const it: typeof en = {
   questionForwarded: id =>
     `La tua domanda è stata inoltrata all'utente tramite il pannello del Coordinatore (richiesta ${id}, sulla scheda #${id.slice(-6)}). Chiudi il turno ora senza indovinare la risposta e senza ripeterla tra le tue domande: arriverà come nuovo messaggio.`,
   approvedMsg: (cmd, once) => `Approvato dal pannello del Coordinatore${once ? ' (solo questa volta)' : ' (per il resto della sessione)'}: ora puoi eseguire\n\n${cmd}`,
+  supersededMsg: cmd => `Un'approvazione dal pannello del Coordinatore per questo comando è stata ritirata da una revoca arrivata insieme, quindi nulla è approvato: non eseguire\n\n${cmd}\n\nSe ti serve ancora, chiedilo di nuovo.`,
   deniedMsg: cmd => `Negato dal pannello del Coordinatore: non eseguire\n\n${cmd}\n\nTrova un'altra strada o spiega cosa ti serve.`,
   answerMsg: (text, time = '', id = '', quote = '') =>
     quote

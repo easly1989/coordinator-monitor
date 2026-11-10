@@ -62,6 +62,14 @@ test('a step that is not on the allowlist of inert ones leaves the whole text un
     // A flag that runs something, on a command that otherwise only prints.
     "rg x --hostname-bin 'gh pr merge 5'",
     "grep x --pre 'gh pr merge 5' f",
+    // A flag written in quotes: the allowlist cannot see it, and printf -v evaluates an array subscript.
+    "printf '-v' 'a[$(gh pr merge 5)]' x",
+    'printf "-v" "a[\\$(gh pr merge 5)]" x',
+    "printf -v a 'gh pr merge 5'",
+    "echo '-e' 'gh pr merge 5'",
+    "git commit '-m' 'gh pr merge 5'",
+    "grep '--pre=sh' 'gh pr merge 5'",
+    "git diff '--output=x.sh' 'gh pr merge 5'",
     // A data step in the same call as one that runs.
     "echo 'gh pr merge 5'; npm test",
     "echo 'gh pr merge 5' | tee f; sh f",

@@ -1556,7 +1556,7 @@ describe('a session reporting', () => {
   })
 
   test('a revoke takes back an approval for the session and one still pending once: the next call asks again', async ($, on) => {
-    const { mine, settle, written, answersFile } = subagent(on)
+    const { mine, settle, written, answersFile, prompts: sent } = subagent(on)
     await $.session.start({ cwd: '/repos/project', surface: 'desktop', isInteractive: true })
     const check = async (u: string) =>
       ((await $.tool.check({ tool: 'Bash', input: { command: 'npm publish' }, tool_use_id: u } as never)) as { decision?: string }).decision
@@ -1608,11 +1608,21 @@ describe('a session reporting', () => {
     await settleUntil(() => (mine().grants ?? []).length === 0)
     expect([await check('u6'), 'u6']).toEqual(['deny', 'u6'])
     await settle()
+    const heard = sent.length
     const stale = { requestId: card(), at: Date.now() - 5000, kind: 'approve-session' }
     written[answersFile()] = JSON.stringify([stale, answer('revoke-5', 'revoke', id)])
     await settleUntil(() => !card())
     expect(mine().grants ?? []).toEqual([])
     expect([await check('u7'), 'u7']).toEqual(['deny', 'u7'])
+    // The person is not told it was approved: the message says the approval was withdrawn.
+    await settleUntil(() => sent.slice(heard).some(t => /withdrawn by a revoke/.test(t)))
+    expect(sent.slice(heard).some(t => /^Approved from the coordinator pane/.test(t))).toBe(false)
+    // The same instant counts as older too.
+    await settle()
+    const t0 = Date.now()
+    written[answersFile()] = JSON.stringify([{ requestId: card(), at: t0, kind: 'approve-once' }, { requestId: 'revoke-6', at: t0, kind: 'revoke', text: id }])
+    await settleUntil(() => !card())
+    expect([await check('u8'), 'u8']).toEqual(['deny', 'u8'])
   })
 
   test('a card that closed on its own is a line for ten minutes, and is gone after', async ($, on) => {
