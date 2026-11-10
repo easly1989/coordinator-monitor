@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.0 — 2026-11-10
+
+- **A long permission request scrolls instead of filling the card.** On the terminal and the desktop, the raw command of a permission card taller than 18 rows is drawn in a region of 18 rows that scrolls: ↑ ↓, PgUp PgDn, Home, End, or a press or drag on its bar. Nothing is cut or folded: every row is a slice of the full text (long lines wrap, wide characters and tabs counted by width), the hint under the region gives the row count as screen rows (the card header counts source lines) and says to click the region first, as keys reach it only then, and the header, the steps and the buttons stay outside it, always on screen. A request that fits once laid out wider shows no bar. Surfaces without a client module (vscode, mobile), a request near the 100,000-character limit of a client's props, and a client that faulted draw the whole request as plain code, as before.
+
 ## 0.6.10 — 2026-11-10
 
 - **The coordinator asks for its own protected commands in its chat.** A protected command run by the coordinator session (the one in `coordinatorFolder`) no longer becomes a card in its own pane, which the person had to find among the other sessions' requests: the call returns `ask`, so the app's own permission dialog opens in the coordinator's chat, labelled with the rule. This holds only where a person answers the ask (`approver: 'person'`), its subagents included; a headless run in the coordinator folder keeps the card. Other sessions are unchanged: their protected commands still wait for the pane.
