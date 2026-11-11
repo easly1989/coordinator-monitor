@@ -505,3 +505,25 @@ test('round 16: a repo flag before merge, a + refspec, and a -C or -c commit mes
   expect(label('git' + ' -p'.repeat(9) + ' merge x')).toBe('merge')
   expect(label('git' + ' -p'.repeat(9) + ' push origin main')).toBe('merge')
 })
+
+test('round 17: 64 KB of repeated git heads with an open quote is judged in under 200 ms, and 8 options before merge or push still match', () => {
+  const big = (unit: string) => unit.repeat(Math.ceil(65536 / unit.length)).slice(0, 65536)
+  for (const unit of ['git.exe -C "', 'git --x="', 'git -C "git -C ', `git.exe -C "${BS}"`, 'git -c a="', 'git --git-dir "', "git -C '"]) {
+    const s = big(unit)
+    const t = performance.now()
+    label(s)
+    ps(s)
+    expect(performance.now() - t).toBeLessThan(200)
+  }
+  for (const n of [8, 9, 40]) {
+    const opts = ' -p'.repeat(n)
+    expect(label(`git${opts} merge x`)).toBe('merge')
+    expect(ps(`git.exe${opts} push origin main`)).toBe('merge')
+    expect(label(`git${opts} push origin feature`)).toBe('merge')
+    expect(label(`git${opts} status`)).toBe(undefined)
+  }
+  // The options a quoted value holds are read too: a git inside it is a head of its own.
+  expect(label('git -C "git' + ' -p'.repeat(9) + ' merge"')).toBe('merge')
+  expect(label('git' + ' -p'.repeat(7) + ' config alias.m merge')).toBe('merge')
+  expect(label('git' + ' -p'.repeat(9) + ' config alias.m merge')).toBe(undefined)
+})

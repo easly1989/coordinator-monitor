@@ -649,3 +649,18 @@ test('round 16: 64 KB of an unmatched quote or backslash after the name is judge
   expect(sh('x '.repeat(70000))).toBe(true)
   expect(sh('x '.repeat(60000))).toBe(false)
 })
+
+test('round 17: $USERPROFILE, ${USERPROFILE} and a bare Set-Location, sl or chdir are the home folder', () => {
+  for (const cmd of ['cd $USERPROFILE && tar xf a.tar', 'cd ${USERPROFILE} && tar xf a.tar', 'tar xf a.tar -C $USERPROFILE', 'cp -r /tmp/s/. ${USERPROFILE}/', 'chdir; tar xf a.tar']) expect(sh(cmd)).toBe(true)
+  for (const cmd of ['Set-Location; tar xf a.tar', 'sl; tar xf a.tar', 'Set-Location -- ; tar xf a.tar', 'cd $USERPROFILE; tar xf a.tar']) expect(sh(cmd, 'PowerShell')).toBe(true)
+  for (const [cmd, tool] of [['cd $USERPROFILEX && tar xf a.tar', 'Bash'], ['Set-Location /tmp; tar xf a.tar', 'PowerShell'], ['sl /tmp; tar xf a.tar', 'PowerShell'], ['Set-Location; ls', 'PowerShell']] as const)
+    expect(sh(cmd, tool)).toBe(false)
+})
+
+test('round 17: 64 KB of repeated git heads with an open quote is judged in under 200 ms', () => {
+  for (const unit of ['git.exe -C "', 'git --x="', 'git -C "git -C ', `git.exe -C "${BS}"`])
+    for (const tool of ['Bash', 'PowerShell']) {
+      const s = unit.repeat(Math.ceil(65536 / unit.length)).slice(0, 65536)
+      expect(fast(() => sh(s, tool))).toBeLessThan(200)
+    }
+})

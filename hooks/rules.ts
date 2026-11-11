@@ -18,11 +18,10 @@ const D = (label: string, pattern: string): Rule => ({ label, re: new RegExp(pat
 // A value is a quoted string, an escaped character or a plain character, each starting differently (the escape
 // is a backslash, or a backtick in PowerShell), and the options that take a value are not also matched by the
 // generic `--name`: every text has one reading, so the match cannot blow up. At most 8 options are read; a
-// longer run is the overflow rule below.
+// longer run is read by the git rule below as a count only.
 const V = String.raw`(?:"(?:[^"\\\x60]|[\\\x60].)*"|'[^']*'|[\\\x60].|[^\s\\\x60"'])+`
 const VALUE_OPT = 'git-dir|work-tree|namespace|config-env|attr-source|super-prefix'
 const OPT = String.raw`(?:-[Cc]\s+${V}|--(?:${VALUE_OPT})(?:=${V}|\s+${V})|--(?!(?:${VALUE_OPT})(?![\w-]))[\w-]+(?:=${V})?|-[pP])`
-const GIT = String.raw`\bgit(?:\.exe)?['"]?(?:\s+${OPT}){0,8}\s+`
 
 // Where each command step ends, for the text last asked about (a `|`, `;`, `&` or newline).
 let sepsOf = ''
@@ -89,31 +88,82 @@ const GH_REPO = String.raw`(?:--repo(?:=|\s+)${V}\s+|-R(?:\s+|=|(?=[^\s=]))${V}\
 const API_WRITE = /(?:-X|--method)[ =]\s*['"]?(?:PATCH|POST|PUT|DELETE)|\s(?:-[fF]|--(?:raw-)?field|--input)/i
 const apiTail = (rest: string): boolean =>
   /\bpulls\/[^/\s]+\/merge\b|\/merges(?![\w-])/i.test(rest) || (/\bgit\/refs\/heads\/(?:main|master)(?![\w/-])/i.test(rest) && API_WRITE.test(rest))
-// After 8 options and any number more, a merge or a push as the subcommand: read as one. Only the options are
-// walked (a word of a commit message is no subcommand), each read as the rule above reads it.
-const MORE_OPT = new RegExp(String.raw`\s+${OPT}`, 'y')
-const SUB = /\s+(?:merge|push)(?![-\w])/iy
-const overflow = (rest: string): boolean => {
-  let p = 0
-  for (MORE_OPT.lastIndex = 0; MORE_OPT.test(rest); ) p = MORE_OPT.lastIndex
-  SUB.lastIndex = p
-  return SUB.test(rest)
-}
 // A push to main (or of every branch), a forced one, or an alias set to run a merge or a push.
 // A refspec with a wildcard, a brace list or a bare `:` may name main without saying so; `-f` may sit in a bundle
 // of short flags (`-uf`).
 const PUSH = new RegExp(String.raw`${MAIN}|\s--(?:al(?:l)?|b(?:r(?:a(?:n(?:c(?:h(?:e(?:s)?)?)?)?)?)?)?|m(?:i(?:r(?:r(?:o(?:r)?)?)?)?)?)(?![\w-])|--force\b|\s-[a-z]*f[a-z]*(?![\w-])|(?<!refs\/tags\/)\*|(?<!\$)\{|(?:^|\s)['"]?\+?:['"]?(?=\s|$)|(?:^|\s)['"]?\+(?=[^\s'"])`, 'i')
 const gitTail = (rest: string, m: RegExpExecArray): boolean => !m[2] || (/^(?:push|send-pack)$/i.test(m[2]) ? PUSH.test(rest) : aliasDefinesMerge(rest))
 
+// `git`, the options before its subcommand, then the subcommand. Up to 8 options, then merge, push, send-pack or config
+// (the tail above judges it); 8 or more, then a merge or a push, is read as one, since a longer run is not read (only the
+// options are walked, so a word of a commit message is no subcommand). Each option run is walked once, from where it is
+// first met (`walked`: how many options follow a point, at most 9, and where they end), so a text of repeated heads and
+// unterminated quotes is read in linear time.
+const GIT_HEAD = /\bgit(?:\.exe)?['"]?(?=\s)/gi
+const NEXT_OPT = new RegExp(String.raw`\s+${OPT}`, 'y')
+const SUBCMD = /\s+(?:(merge)(?![-\w])|(push|send-pack|config)\b)/iy
+const gitRule: Rule = {
+  label: 'merge',
+  re: {
+    test: text => {
+      const ends = stepEnds(text)
+      const walked = new Map<number, [number, number]>()
+      const done = new Map<string, [number, number]>() // by the subcommand: step end and where its rest began
+      GIT_HEAD.lastIndex = 0
+      for (let m = GIT_HEAD.exec(text); m; m = GIT_HEAD.exec(text)) {
+        GIT_HEAD.lastIndex = m.index + 1
+        const path: number[] = []
+        let q = m.index + m[0].length
+        let n = 0
+        for (;;) {
+          const known = walked.get(q)
+          if (known) {
+            ;[n, q] = known
+            break
+          }
+          NEXT_OPT.lastIndex = q
+          if (!NEXT_OPT.test(text)) {
+            walked.set(q, [0, q])
+            break
+          }
+          path.push(q)
+          q = NEXT_OPT.lastIndex
+        }
+        for (let i = path.length - 1; i >= 0; i--) {
+          n = Math.min(n + 1, 9)
+          walked.set(path[i] as number, [n, q])
+        }
+        SUBCMD.lastIndex = q
+        const s = SUBCMD.exec(text)
+        if (!s) continue
+        if (s[1] || (n >= 8 && s[2]?.toLowerCase() === 'push' && text[SUBCMD.lastIndex] !== '-')) return true
+        if (n > 8) continue
+        const from = SUBCMD.lastIndex
+        let lo = 0
+        for (let hi = ends.length; lo < hi; ) {
+          const mid = (lo + hi) >> 1
+          if ((ends[mid] ?? 0) < from) lo = mid + 1
+          else hi = mid
+        }
+        const end = ends[lo] ?? text.length
+        const key = s[2] ?? ''
+        const seen = done.get(key)
+        if (seen && seen[0] === end && from >= seen[1]) continue
+        if (gitTail(text.slice(from, end), s)) return true
+        done.set(key, [end, from])
+      }
+      return false
+    },
+  },
+}
+
 export const DEFAULT_RULES: readonly Rule[] = [
   // merges and pushes to the main line
   D('merge', String.raw`${GH_CMD}${GH_REPO}{0,4}pr\s+${GH_REPO}{0,4}merge\b`),
   // An alias set to run a merge: what it runs is not read.
   afterRule('merge', String.raw`${GH_CMD}alias\s+set\b`, /merge/i),
-  afterRule('merge', String.raw`${GIT}(?:(merge)(?![-\w])|(push|send-pack|config)\b)`, gitTail),
-  // More than 8 options before the subcommand: it is not read, so a merge or a push after them is taken as one.
+  gitRule,
   // An alias defined on the command line (`-c alias.mm=merge`): what it runs is not read.
-  afterRule('merge', String.raw`\bgit(?:\.exe)?['"]?(?:\s+${OPT}){8}(?=\s|$)`, overflow),
   afterRule('merge', String.raw`\bgit\b`, new RegExp(String.raw`\s(?:-c|--config-env)[ =]?\s*['"]?(?:alias\.|${PUSH_KEY})`, 'i')),
   afterRule('merge', String.raw`${GH_CMD}api\b`, apiTail),
   // deploys and releases

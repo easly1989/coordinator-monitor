@@ -10,7 +10,7 @@ export const SHELL_TOOLS = new Set(['Bash', 'PowerShell'])
 export type BusCall = { tool: string; input?: unknown; isReadOnly?: boolean }
 
 // Every way to say the home folder, then one separator and one case.
-const HOME = /\$\{home\}|\$home(?![\w])|\$env:(?:userprofile|home)(?![\w])|\$\{env:(?:userprofile|home)\}|%userprofile%|(?<=^|[\s;&|('"=:<>])~(?:[a-z_][\w.-]*)?(?=$|[\s/'";&|)])/g
+const HOME = /\$\{home\}|\$\{userprofile\}|\$home(?![\w])|\$userprofile(?![\w])|\$env:(?:userprofile|home)(?![\w])|\$\{env:(?:userprofile|home)\}|%userprofile%|(?<=^|[\s;&|('"=:<>])~(?:[a-z_][\w.-]*)?(?=$|[\s/'";&|)])/g
 // A device prefix (`\.\C:\`, `\?\C:\`, `\?\UNC\host\`) and an administrative share (`\localhost\C$\`) name the same
 // drive: they are dropped at the start of a word, in `/` spelling.
 const DEVICE = /(?<=^|[\s;&|('"=])\/\/[.?]\/(?:unc\/[^/\s]+\/)?/g
@@ -52,8 +52,8 @@ const clean = (text: string, home: string): [string, string] => {
   const s = drive(
     text
       .toLowerCase()
-      // A `cd` with no target (or only `--`) goes home, as `cd ~` does.
-      .replace(/(?<=^|[\s;&|(])cd(?:[ \t]+--)?(?=[ \t]*(?:$|[;&|)\n]))/g, 'cd ~')
+      // A `cd` (`chdir`, `sl`, `Set-Location`) with no target (or only `--`) goes home, as `cd ~` does.
+      .replace(/(?<=^|[\s;&|(])(?:cd|chdir|sl|set-location)(?:[ \t]+--)?(?=[ \t]*(?:$|[;&|)\n]))/g, 'cd ~')
       // `-Path:value` is `-Path value`.
       .replace(/(?<=^|[\s;&|(])(-[a-z]+):(?=\S)/g, '$1 ')
       .replace(/\\/g, '/')
