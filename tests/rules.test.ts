@@ -364,6 +364,8 @@ test('a wrapped, redirected, qualified or aliased push to main or merge is still
     'git push --mi origin',
     'git push --branches origin',
     'git push --br origin',
+    'git push --b origin',
+    'git push --m origin',
     'git push origin --branches',
     'git.exe merge feature',
     '/usr/bin/git merge feature',

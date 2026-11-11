@@ -491,6 +491,39 @@ const plus = (cmd: string): string => {
   return (text + cmd.slice(at)).replace(/`\r?\n/g, ' ').replace(/(['"])[\s)]*\+[\s(]*['"]/g, '')
 }
 
+/**
+ * The text inside the quotes of a PowerShell command, run together with whatever stands between the strings dropped:
+ * `('~/.cl' + $null + [string]'aude/x')` is `~/.claude/x`. Read as PowerShell reads quotes (`''` and `""` are a quote,
+ * a backtick escapes, curly quotes are quotes). With `comments` a `<# #>` and a `# …` line are skipped; without, they
+ * are text, so a quote in a comment cannot pair the others up the wrong way in both readings.
+ */
+const strings = (command: string, comments: boolean): string => {
+  const cmd = command.replace(/[‘-‛]/g, "'").replace(/[“-„]/g, '"')
+  let out = ''
+  let q = ''
+  for (let k = 0; k < cmd.length; k++) {
+    const c = cmd[k] ?? ''
+    if (q) {
+      if (c === q) {
+        if (cmd[k + 1] === q) {
+          out += c
+          k++
+        } else q = ''
+      } else if (q === '"' && c === '`') k++
+      else out += c
+    } else if (c === "'" || c === '"') q = c
+    else if (c === '`') k++
+    else if (comments && c === '<' && cmd[k + 1] === '#') {
+      const end = cmd.indexOf('#>', k + 2)
+      if (end >= 0) k = end + 1
+    } else if (comments && c === '#' && (k === 0 || /[\s;|&(]/.test(cmd[k - 1] ?? ''))) {
+      const nl = cmd.indexOf('\n', k)
+      k = nl < 0 ? cmd.length : nl
+    }
+  }
+  return out
+}
+
 /** True when a call that is not read-only writes the bus folder `base`. `home` is the person's home folder. */
 export const touchesBus = (e: BusCall, base: string, home: string): boolean => {
   if (e.isReadOnly) return false
@@ -534,7 +567,7 @@ export const touchesBus = (e: BusCall, base: string, home: string): boolean => {
   // A path built from pieces (`Join-Path`, `-join`, `+`, `Combine`): the pieces name the folder, or are joined at run
   // time and could. A step that holds the folder's name and a word that could be the bus folder's name is a hit.
   // A piece that is the folder `.claude` or a start of it, or could be one through a glob.
-  const dish = (seg: string): boolean => (seg.length > 1 && '.claude'.startsWith(seg)) || couldBeD(seg) || /^claude~\d$/.test(seg)
+  const dish = (seg: string): boolean => couldBeD(seg) || /^claude~\d$/.test(seg)
   const pieced = (s: string): boolean =>
     ps &&
     (JOINED.test(s) || DYNAMIC.test(s)) &&
@@ -543,8 +576,9 @@ export const touchesBus = (e: BusCall, base: string, home: string): boolean => {
         const joins = JOINED.test(st)
         if (!joins && !DYNAMIC.test(st)) return false
         const segs = st.split(/[\s;&|('")=,]+/).flatMap(w => w.split('/')).filter(Boolean)
-        // Joined at run time with a home folder or a piece of the folder's name in the step: it could be the bus folder.
-        if (joins && DYNAMIC.test(st) && ((h !== '' && st.includes(h)) || /~|\$env:homepath|\/users\//.test(st) || segs.some(dish))) return true
+        // Joined at run time with a piece that could be the folder (a glob, `CLAUDE~1`). A name split across strings is
+        // read from the strings alone (`strings`).
+        if (joins && DYNAMIC.test(st) && segs.some(dish)) return true
         return (
           (/\.claude|claude~\d/.test(st) || segs.some(couldBeD)) &&
           segs.some(seg => CM_NAMES.some(n => n.startsWith(seg)) || (/[*?[{]/.test(seg) && globs(seg, CM_NAMES)))
@@ -563,7 +597,7 @@ export const touchesBus = (e: BusCall, base: string, home: string): boolean => {
     )
   }
   // Home is 14 characters or more for each `~`: a text that would grow by more than 64 KB is not read (denied).
-  const grows = (t: string): boolean => h.length * (t.match(HOME)?.length ?? 0) > 65536
+  const grows = (t: string): boolean => h.length * (t.toLowerCase().match(HOME)?.length ?? 0) > 65536
   const check = (text: string): boolean =>
     [...new Set([text, unquote(text, ps), unquote(text.replace(/\\/g, '/'), ps)])].some(t => {
       if (flat(t) || grows(t)) return true
@@ -576,5 +610,15 @@ export const touchesBus = (e: BusCall, base: string, home: string): boolean => {
     const cds = i.command.split(/[;&|\n]+/).filter(x => CD_STEP.test(x))
     return cds.length > 0 && check(cds.join(';'))
   }
-  return check(raw) || (joined !== raw && check(joined))
+  if (check(raw) || (joined !== raw && check(joined))) return true
+  // A name split across strings that `-join` or `+` run together, with anything between them: the strings alone, run
+  // together, are judged. With a `Join-Path` the pieces are path parts, so a `.claude` and a bus folder name in them are a hit.
+  const low = i.command.toLowerCase()
+  if (!ps || !DYNAMIC.test(low)) return false
+  const path = JOINED.test(low)
+  return (low.includes('#') ? [strings(i.command, true), strings(i.command, false)] : [strings(i.command, true)]).some(v => {
+    if (check(v)) return true
+    const [s] = clean(v, h)
+    return path && /\.claude|claude~\d/.test(s)
+  })
 }

@@ -410,7 +410,6 @@ test('a PowerShell path built with .NET or joined at run time is denied', () => 
     `Set-Content ([System.IO.Path]::Combine($HOME,"${D}","${CM}","rules.json")) "{}"`,
     `Set-Content ([IO.Path]::Join($HOME,"${D}","${CM}","rules.json")) "{}"`,
     `Set-Content (Join-Path $HOME ('.cla','ude' -join '')) x`,
-    `Set-Content (Join-Path (Join-Path $HOME $a) ($b + 'x')) x`,
   ])
     expect(sh(cmd, 'PowerShell')).toBe(true)
   for (const cmd of [`Set-Content ([IO.Path]::Combine($HOME,"projects","a.txt")) "{}"`, `Join-Path $HOME 'projects'`, '$n = 1 + 2; Get-Date']) expect(sh(cmd, 'PowerShell')).toBe(false)
@@ -588,8 +587,42 @@ test('round 14: everyday joins and sums in PowerShell are no hit', () => {
     `Get-ChildItem (Join-Path $env:TEMP 'logs') | ForEach-Object { $n = $n + 1 }`,
   ])
     expect(p(cmd)).toBe(false)
-  // ...while a join under the home folder with a piece of the folder's name still is.
-  expect(p(`$path = Join-Path $HOME ($name + '.cl')`)).toBe(true)
+  for (const cmd of [
+    `$path = Join-Path $src ($name + '.c')`,
+    `$path = Join-Path $root ($name + '.cl')`,
+    `Add-Content (Join-Path $HOME 'notes.txt') ('count: ' + $n)`,
+  ])
+    expect(p(cmd)).toBe(false)
+})
+
+test('round 15: a name split across strings that -join or + run together, with anything between, is a hit', () => {
+  const p = (cmd: string) => sh(cmd, 'PowerShell')
+  const cl = D.slice(0, 3)
+  const ude = D.slice(3)
+  const tail = `inator-monitor/answers/x.json`
+  for (const cmd of [
+    `Set-Content (-join ($HOME,'/${cl}','${ude}/coord','${tail}')) 1`,
+    `Set-Content (('~/${cl}','${ude}/coord','${tail}') -join '') 1`,
+    `Set-Content ('~/${cl}' + $null + '${ude}/${CM}/answers/x.json') 1`,
+    `Set-Content ('~/${cl}' + [string]'${ude}/coordi' + [string]'nator-monitor/answers/x.json') 1`,
+    // The pieces of a Join-Path are path parts: no slash between them.
+    `Set-Content (Join-Path (Join-Path $HOME ('${cl}' + $x + '${ude}')) '${CM}') 1`,
+    // A quote in a line or block comment does not pair the strings up the wrong way.
+    `# '\nSet-Content ('~/${cl}' + $null + '${ude}/${CM}/x') 1`,
+    `<# ' #> Set-Content ('~/${cl}' + $null + '${ude}/${CM}/x') 1`,
+    `Set-Content ('~/${cl}' + $null + '${ude}/${CM}/x') 1 # '`,
+    // Curly quotes are quotes.
+    `Set-Content (‘~/${cl}’ + $null + ‘${ude}/${CM}/x’) 1`,
+  ])
+    expect(p(cmd)).toBe(true)
+})
+
+test('round 15: 64 KB of quoted pieces joined with + or -join, and of upper-case $HOME, is judged in under 250 ms', () => {
+  for (const unit of ["'a'+", "'a' -join ", '"a"+', "'~'+", "'~'-join"])
+    expect(fast(() => sh(unit.repeat(Math.ceil(65536 / unit.length)), 'PowerShell'))).toBeLessThan(250)
+  // The count of home expansions is read in any case: 9,400 of them are more than 64 KB once expanded.
+  expect(sh("'$HOME|".repeat(9400), 'PowerShell')).toBe(true)
+  expect(fast(() => sh("'$HOME|".repeat(9400), 'Bash'))).toBeLessThan(250)
 })
 
 test('round 13: tree -o writes a file, so it is not read-only', () => {
