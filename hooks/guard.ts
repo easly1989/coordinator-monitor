@@ -47,13 +47,15 @@ const collapse = (s: string, spaces: boolean): string => {
   return out.join('/')
 }
 
+// A `cd` (`chdir`, `sl`, `Set-Location`) with no target (or only `--`) goes home, as `cd ~` does.
+const BARE_CD = /(?<=^|[\s;&|(])(?:cd|chdir|sl|set-location)(?:[ \t]+--)?(?=[ \t]*(?:$|[;&|)\n]))/g
+
 /** The text as the file system reads it, in two views: names end at a space or an operator, or only at an operator. */
 const clean = (text: string, home: string): [string, string] => {
   const s = drive(
     text
       .toLowerCase()
-      // A `cd` (`chdir`, `sl`, `Set-Location`) with no target (or only `--`) goes home, as `cd ~` does.
-      .replace(/(?<=^|[\s;&|(])(?:cd|chdir|sl|set-location)(?:[ \t]+--)?(?=[ \t]*(?:$|[;&|)\n]))/g, 'cd ~')
+      .replace(BARE_CD, 'cd ~')
       // `-Path:value` is `-Path value`.
       .replace(/(?<=^|[\s;&|(])(-[a-z]+):(?=\S)/g, '$1 ')
       .replace(/\\/g, '/')
@@ -600,8 +602,12 @@ export const touchesBus = (e: BusCall, base: string, home: string): boolean => {
       (x === s ? [s] : [s, x]).some(v => globHits(v) || cdThen(v, h, own) || (isLink(v) && (DSEG.test(v) || anyD(v))) || destHit(v, h, own))
     )
   }
-  // Home is 14 characters or more for each `~`: a text that would grow by more than 64 KB is not read (denied).
-  const grows = (t: string): boolean => h.length * (t.toLowerCase().match(HOME)?.length ?? 0) > 65536
+  // Home is 14 characters or more for each `~` and for each bare `cd` (which `clean` sends home): a text that would grow
+  // by more than 64 KB is not read (denied).
+  const grows = (t: string): boolean => {
+    const low = t.toLowerCase()
+    return h.length * ((low.match(HOME)?.length ?? 0) + (low.match(BARE_CD)?.length ?? 0)) > 65536
+  }
   const check = (text: string): boolean =>
     [...new Set([text, unquote(text, ps), unquote(text.replace(/\\/g, '/'), ps)])].some(t => {
       if (flat(t) || grows(t)) return true
@@ -610,7 +616,10 @@ export const touchesBus = (e: BusCall, base: string, home: string): boolean => {
     })
   // Text only mentions the folder when every step prints or stores nothing (`git commit -m "…~/.claude/coordinator-monitor"`):
   // then only a `cd` is judged, for it moves the shell into the folder whatever it is quoted with.
-  if (!ps && !i.command.includes('<<') && dataMask(i.command) !== null) {
+  // A path written outside the quotes (`git add <folder>/answers/x.json`) is not text: it is the floor, as before.
+  const masked = !ps && !i.command.includes('<<') ? dataMask(i.command) : null
+  if (masked !== null) {
+    if (flat(masked)) return true
     const cds = i.command.split(/[;&|\n]+/).filter(x => CD_STEP.test(x))
     return cds.length > 0 && check(cds.join(';'))
   }

@@ -664,3 +664,14 @@ test('round 17: 64 KB of repeated git heads with an open quote is judged in unde
       expect(fast(() => sh(s, tool))).toBeLessThan(200)
     }
 })
+
+test('round 19: 64 KB of repeated bare cd or sl is judged in under 200 ms', () => {
+  for (const unit of ['(cd)' + BS, "(cd)'", '(cd)"', "(sl)'", "(cd)'x"])
+    for (const tool of ['Bash', 'PowerShell'])
+      expect(fast(() => sh(unit.repeat(Math.ceil(65536 / unit.length)), tool))).toBeLessThan(200)
+})
+
+test('round 19: in a command whose quoted text is data, a bus path outside the quotes is still denied', () => {
+  for (const cmd of [`git add ${D}/${CM}/answers/x.json`, `echo ~/${D}/${CM}/answers/x.json`, `git add ${BASE}/answers/x.json`]) expect(sh(cmd)).toBe(true)
+  expect(sh(`git commit -m "touch ~/${D}/${CM}/a"`)).toBe(false)
+})
