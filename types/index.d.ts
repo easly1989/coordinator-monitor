@@ -65,6 +65,16 @@ export type FlowInfo = { title: string; done: number; total: number; phase?: str
 
 export type SessionState = 'running' | 'idle' | 'waiting' | 'ended'
 
+/** One approval a session holds for the rest of its life: `id` names it for a revoke, `label` and `line` (the command's first line) show it. */
+export type GrantInfo = { id: string; label: string; line: string }
+
+/**
+ * A card that closed without the person answering it, kept as one muted line for ten minutes: `elsewhere`
+ * (the session moved on, or it was answered elsewhere), `ended` (the subagent's loop ended), `unsent`
+ * (an answer to a subagent that was gone: nothing was sent and nothing granted).
+ */
+export type HistoryRow = { id: string; at: number; why: 'elsewhere' | 'ended' | 'unsent' }
+
 export type SessionStatus = {
   v: 1
   sessionId: string
@@ -89,6 +99,9 @@ export type SessionStatus = {
   requests: MonitorRequest[]
   /** The session's own task list, as its plan tool last left it; absent before 0.6. */
   plan?: PlanItem[]
+  /** The approvals it holds for the session, and the cards that closed unanswered in the last ten minutes; absent before 0.7.1. */
+  grants?: GrantInfo[]
+  history?: HistoryRow[]
   /** The desktop app's id for the session (`local_…`), added by the pane: it opens the session. */
   localId?: string
   /** What the coordinator queued for it, added by the pane. */
@@ -98,9 +111,10 @@ export type SessionStatus = {
 /**
  * `dismiss` drops a request without telling the session anything; `read` drops a report and tells the
  * session it was read. `order` names no request: its text is the planned tasks in the order the
- * person set, for the session to follow.
+ * person set, for the session to follow. `revoke` names no request either: its text is a grant's id, to be
+ * taken from the session's approvals (for the session and pending once).
  */
-export type AnswerKind = 'approve-once' | 'approve-session' | 'deny' | 'answer' | 'dismiss' | 'read' | 'order'
+export type AnswerKind = 'approve-once' | 'approve-session' | 'deny' | 'answer' | 'dismiss' | 'read' | 'order' | 'revoke'
 
 export type Answer = { requestId: string; at: number; kind: AnswerKind; text?: string }
 
@@ -115,6 +129,8 @@ export type Local = {
   plan?: PlanItem[]
   /** The requests this session is done with: answered from the pane, or retired. */
   applied: string[]
+  /** Cards that closed unanswered, newest last (see HistoryRow). */
+  history?: HistoryRow[]
   /** The coordinator's version this session last reloaded its plugins to follow. */
   reloadTried?: string
 }

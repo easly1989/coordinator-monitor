@@ -16,11 +16,12 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderChildren, RenderNode } from 'claude-code'
 
-import type { AgentRow, Answer, AnswerKind, Board, ChoiceOption, ChoiceQuestion, Digest, Local, MonitorRequest, PaneUi, PlanItem, Queues, SessionStatus } from '../types'
+import type { AgentRow, Answer, AnswerKind, Board, ChoiceOption, ChoiceQuestion, Digest, GrantInfo, HistoryRow, Local, MonitorRequest, PaneUi, PlanItem, Queues, SessionStatus } from '../types'
 import { CRAB_H, TIER_COLOR, TIER_MODEL, crabSvg, hatFor, tierOf } from './crab'
 import { NO_QUESTIONS, QUESTIONS_HEADING, asksGoAhead, pickStrings, type Strings } from './i18n'
 import { lineCount, segmentsOf, viewOf, visible } from './request'
 import { rowsOf, type Piece } from './scroll'
+import { SHELL_TOOLS, touchesBus } from './guard'
 import { compileRules, criticalIn, matchRule, type Rule, type RulesFile } from './rules'
 
 const PANE = 'coordinator-monitor'
@@ -34,8 +35,7 @@ const ENDED_KEEP_MS = 60 * 60 * 1000
 // How long a closed session without a pending card or a queue stays in the pane.
 const ENDED_GRACE_MS = 5 * 60 * 1000
 /** Published in every status, so the pane can flag a session still running an older copy. Keep in step with plugin.json. */
-const MOD_VERSION = '0.7.0'
-const SHELL_TOOLS = new Set(['Bash', 'PowerShell'])
+const MOD_VERSION = '0.7.1'
 const STEP_TOOL = 'mcp__savvy-progress__step'
 const FLOW_TOOL = 'mcp__savvy-progress__progress'
 // The desktop app's task list, and the CLI's.
@@ -238,6 +238,8 @@ const publish = async ($: $, state?: SessionStatus['state']): Promise<void> => {
     flow: l.flow,
     requests: l.requests,
     plan: l.plan,
+    grants: l.grantsSession.map(describeGrant),
+    history: (l.history ?? []).filter(x => now - x.at < HISTORY_MS),
   }
   await $.fs.write(`${base}/sessions/${sessionId}.json`, JSON.stringify(status))
 }
@@ -257,12 +259,24 @@ const applyAnswers = async ($: $): Promise<void> => {
     // The list is the bus answers file's text, and sits inside a numbered digest row: data, fenced.
     if (isMine) await queueNote($, S.orderMsg(fence(visible(a.text ?? ''))))
   }
+  // A revoke takes the approval out of both lists, so the next matching call asks again. Claimed atomically, like an order.
+  let isRevoked = false
+  for (const a of answers.filter(x => x.kind === 'revoke' && x.text && !l.applied.includes(x.requestId))) {
+    await update($, local, cur => {
+      if (cur.applied.includes(a.requestId)) return cur
+      isRevoked = true
+      const keep = (k: string) => grantId(k) !== a.text
+      return { ...cur, applied: [...cur.applied, a.requestId].slice(-300), grantsSession: cur.grantsSession.filter(keep), grantsOnce: cur.grantsOnce.filter(keep) }
+    })
+  }
+  if (isRevoked) void publish($)
   // An app ask, and a protected command held in its call, are answered by the hook that waits on them.
   const fresh = answers.filter(
     a => !l.applied.includes(a.requestId) && !holding.has(a.requestId) && l.requests.some(r => r.id === a.requestId && r.kind !== 'ask'),
   )
   if (!fresh.length) return
-  const prompts: { text: string; agentId?: string }[] = []
+  // `verdict`: an approval or a denial, which only the subagent it is for may hear; `undo` takes back the grant it made.
+  const prompts: { text: string; agentId?: string; reqId: string; verdict?: boolean; undo?: { key: string; isOnce: boolean; hadIt: boolean } }[] = []
   const notes: string[] = []
   await update($, local, cur => {
     const next: Local = { ...cur, requests: [...cur.requests], grantsOnce: [...cur.grantsOnce], grantsSession: [...cur.grantsSession], applied: [...cur.applied] }
@@ -274,31 +288,51 @@ const applyAnswers = async ($: $): Promise<void> => {
       // Fenced: the command is the session's text, sent on in the person's voice.
       const cmd = fence(req.command ?? '')
       const to = req.agentId
-      if (a.kind === 'approve-once') {
+      // The revokes above ran first: an approval the person gave before a revoke of the same grant would bring it back.
+      const isStale = (a.kind === 'approve-once' || a.kind === 'approve-session') && answers.some(r => r.kind === 'revoke' && r.text === grantId(grantKey(req)) && r.at >= a.at)
+      if (isStale) {
+        prompts.push({ text: S.supersededMsg(cmd), agentId: to, reqId: req.id, verdict: true })
+      } else if (a.kind === 'approve-once') {
         next.grantsOnce.push(grantKey(req))
-        prompts.push({ text: S.approvedMsg(cmd, true), agentId: to })
+        prompts.push({ text: S.approvedMsg(cmd, true), agentId: to, reqId: req.id, verdict: true, undo: { key: grantKey(req), isOnce: true, hadIt: false } })
       } else if (a.kind === 'approve-session') {
-        next.grantsSession.push(grantKey(req))
-        prompts.push({ text: S.approvedMsg(cmd, false), agentId: to })
+        const hadIt = next.grantsSession.includes(grantKey(req))
+        if (!hadIt) next.grantsSession.push(grantKey(req))
+        prompts.push({ text: S.approvedMsg(cmd, false), agentId: to, reqId: req.id, verdict: true, undo: { key: grantKey(req), isOnce: false, hadIt } })
       } else if (a.kind === 'deny') {
-        prompts.push({ text: S.deniedMsg(cmd), agentId: to })
+        prompts.push({ text: S.deniedMsg(cmd), agentId: to, reqId: req.id, verdict: true })
       } else if (a.kind === 'read') {
         // A note, not a prompt: it starts no turn, so nothing answers it and no report follows it.
         notes.push(S.readMsg(fmtTime(req.createdAt)))
       } else if (a.text?.trim()) {
         const [t, id, quote] = [fmtTime(req.createdAt), shortId(req.id), quoteOf(req.text ?? '')]
-        prompts.push({ text: req.kind === 'report' ? S.reportReplyMsg(a.text.trim(), t, id, quote) : S.answerMsg(a.text.trim(), t, id, quote), agentId: to })
+        prompts.push({ text: req.kind === 'report' ? S.reportReplyMsg(a.text.trim(), t, id, quote) : S.answerMsg(a.text.trim(), t, id, quote), agentId: to, reqId: req.id })
       }
     }
     return next
   })
   for (const text of notes) await queueNote($, text)
   for (const p of prompts) {
-    // A subagent's request is answered to that agent. Only when it cannot be reached does the parent
-    // hear of it, told whose it is, so the parent does not run another agent's command as its own.
+    // A subagent's request is answered to that agent. An approval or a denial that cannot reach it is not
+    // passed on: it grants nothing (what it granted is taken back) and the card closes as a line saying so.
+    // Any other answer, a free-text one, goes to the parent, told whose it is, so the parent does not run
+    // another agent's command as its own.
     if (p.agentId) {
       const sent = await $.session.send({ to: { agentId: p.agentId }, text: p.text }).catch(() => ({ isDelivered: false }))
       if (sent.isDelivered) continue
+      if (p.verdict) {
+        await update($, local, cur => {
+          const k = p.undo?.key
+          const i = p.undo?.isOnce && k !== undefined ? cur.grantsOnce.indexOf(k) : -1
+          return {
+            ...cur,
+            grantsOnce: i >= 0 ? cur.grantsOnce.filter((_, j) => j !== i) : cur.grantsOnce,
+            grantsSession: p.undo && !p.undo.isOnce && !p.undo.hadIt ? cur.grantsSession.filter(x => x !== k) : cur.grantsSession,
+            history: closedRows(cur.history, p.reqId, 'unsent'),
+          }
+        })
+        continue
+      }
     }
     const text = p.agentId ? S.forAgentMsg(await agentLabel($, p.agentId), p.text) : p.text
     // Heard at once, and after the notes that came before it: if they cannot be delivered, it waits behind them.
@@ -449,6 +483,30 @@ const askKey = (tool: string, what: string): string => `ask\u0000${tool}\u0000${
 /** A grant belongs to whoever asked: a subagent's serves that agent alone, never its parent or another agent. */
 const scoped = (agentId: string | undefined, key: string): string => (agentId ? `agent\u0000${agentId}\u0000${key}` : key)
 const grantKey = (r: MonitorRequest): string => scoped(r.agentId, r.kind === 'ask' ? askKey(r.tool ?? '', r.command ?? '') : (r.command ?? ''))
+
+// How long a card that closed unanswered stays as one line in the pane.
+const HISTORY_MS = 10 * 60_000
+/** `rows` with the ones past their ten minutes dropped, and `id` closed for `why` now. */
+const closedRows = (rows: HistoryRow[] | undefined, id: string, why: HistoryRow['why']): HistoryRow[] =>
+  [...(rows ?? []).filter(x => x.id !== id && Date.now() - x.at < HISTORY_MS), { id, at: Date.now(), why }].slice(-20)
+
+/** A short name for a grant key: the pane names a revoke by it, so a long command never rides the bus twice. */
+const grantId = (key: string): string => {
+  let h = 5381
+  for (let i = 0; i < key.length; i++) h = (Math.imul(h, 33) + key.charCodeAt(i)) | 0
+  return `${(h >>> 0).toString(36)}-${key.length.toString(36)}`
+}
+/** What the pane shows of a grant: the tool (or "command"), a subagent's short id, and the command's first line. */
+const describeGrant = (key: string): GrantInfo => {
+  const agent = /^agent\u0000([^\u0000]*)\u0000([\s\S]*)$/.exec(key)
+  const rest = agent ? (agent[2] ?? '') : key
+  const ask = /^ask\u0000([^\u0000]*)\u0000([\s\S]*)$/.exec(rest)
+  const what = ask ? (ask[2] ?? '') : rest
+  const tool = ask ? (ask[1] ?? '') : S.grantCommand
+  // An ask's input may be pretty-printed JSON: its first line would be a brace, so its whitespace is folded.
+  const line = (ask ? what.replace(/\s+/g, ' ') : what.trim().split('\n')[0] ?? '').slice(0, 200)
+  return { id: grantId(key), label: agent ? `${tool} (${S.grantAgent(shortId(agent[1] ?? ''))})` : tool, line }
+}
 
 // How long an app ask waits for the pane before the app's own dialog takes it (a process waits ten minutes at most).
 const ASK_WAIT_MS = 9 * 60_000
@@ -609,11 +667,19 @@ const explainLater = async ($: $, id: string, tool: string, what: string): Promi
   void publish($)
 }
 
-/** Drops the requests `gone` picks, once the session has moved past them, and republishes. */
-const retire = async ($: $, gone: (r: MonitorRequest) => boolean): Promise<void> => {
+/**
+ * Drops the requests `gone` picks, once the session has moved past them, and republishes. A card that
+ * waited on the person (not a report) leaves a line for ten minutes saying why it closed (`why`).
+ */
+const retire = async ($: $, gone: (r: MonitorRequest) => boolean, why: HistoryRow['why']): Promise<void> => {
   if (!(await read($, local)).requests.some(gone)) return
   // Kept as done with, so a later message naming one is known to point at a settled card.
-  await update($, local, cur => ({ ...cur, requests: cur.requests.filter(r => !gone(r)), applied: [...cur.applied, ...cur.requests.filter(gone).map(r => r.id)].slice(-300) }))
+  await update($, local, cur => ({
+    ...cur,
+    requests: cur.requests.filter(r => !gone(r)),
+    applied: [...cur.applied, ...cur.requests.filter(gone).map(r => r.id)].slice(-300),
+    history: cur.requests.filter(r => gone(r) && r.kind !== 'report').reduce((rows, r) => closedRows(rows, r.id, why), cur.history),
+  }))
   void publish($)
 }
 
@@ -697,6 +763,15 @@ const gather = async ($: $): Promise<void> => {
     s.plan = arr<PlanItem>(s.plan)
       .filter(p => p && typeof p.text === 'string')
       .map(p => ({ text: visible(p.text), status: p.status === 'completed' || p.status === 'in_progress' ? p.status : 'pending' }))
+    // The approvals and the closed cards another session lists: ids only as plain tokens, texts drawn as strings.
+    s.grants = arr<GrantInfo>(s.grants)
+      .filter(g => g && typeof g.id === 'string' && /^[\w-]{1,40}$/.test(g.id))
+      .slice(0, 50)
+      .map(g => ({ id: g.id, label: (txt(g.label) ?? '').slice(0, 80), line: (txt(g.line) ?? '').slice(0, 200) }))
+    s.history = arr<HistoryRow>(s.history)
+      .filter(h => h && typeof h.id === 'string' && /^[\w-]{1,40}$/.test(h.id) && typeof h.at === 'number' && now - h.at < HISTORY_MS && (h.why === 'elsewhere' || h.why === 'ended' || h.why === 'unsent'))
+      .slice(-20)
+      .map(h => ({ id: h.id, at: h.at, why: h.why }))
     s.queue = own(queues, s.sessionId)?.map(visible)
     s.agents = arr<AgentRow>(s.agents)
       .filter(a => a && typeof a.id === 'string')
@@ -732,8 +807,8 @@ const postAnswer = async ($: $, target: SessionStatus, a: Answer): Promise<void>
   const path = `${base}/answers/${target.sessionId}.json`
   const live = new Set(target.requests.map(r => r.id))
   const prev = (await readJson<Answer[]>($, path)) ?? []
-  // An order names no request: it stays a minute, time enough for the session's tick.
-  const kept = prev.filter(x => (live.has(x.requestId) || (x.kind === 'order' && Date.now() - x.at < 60_000)) && x.requestId !== a.requestId)
+  // An order or a revoke names no request: it stays a minute, time enough for the session's tick.
+  const kept = prev.filter(x => (live.has(x.requestId) || ((x.kind === 'order' || x.kind === 'revoke') && Date.now() - x.at < 60_000)) && x.requestId !== a.requestId)
   await $.fs.write(path, JSON.stringify([...kept, a]))
   if (target.sessionId === sessionId) await applyAnswers($)
 }
@@ -815,6 +890,16 @@ const movePlanned = async ($: $, s: SessionStatus, i: number, to: number): Promi
   await postAnswer($, s, { requestId: id, at: Date.now(), kind: 'order', text })
   // Not the list: its tasks are the session's own words.
   if (s.sessionId !== sessionId) await queueNote($, answeredNote(s, id, 'order'))
+}
+
+/** Takes an approval back from session `s`: its next matching call asks again. */
+const revokeGrant = async ($: $, s: SessionStatus, g: GrantInfo): Promise<void> => {
+  const id = `revoke-${newId()}`
+  await postAnswer($, s, { requestId: id, at: Date.now(), kind: 'revoke', text: g.id })
+  // Not the command: it is the session's own text.
+  if (s.sessionId !== sessionId) await queueNote($, answeredNote(s, id, 'revoke'))
+  $.ui.toast(s.sessionId === sessionId ? S.revokedToast(s.title) : S.revokingToast(s.title))
+  void gather($)
 }
 
 const newer = (a: string, b: string): boolean => a.localeCompare(b, undefined, { numeric: true }) > 0
@@ -1023,7 +1108,7 @@ export const register: Register = (on, options) => {
         const prev = (await readJson<Answer[]>($, path)) ?? []
         await $.fs.write(path, JSON.stringify([...prev, ...held.map(r => ({ requestId: r.id, at: Date.now(), kind: 'dismiss' as const }))]))
       }
-      await retire($, r => (r.kind === 'permission' || r.kind === 'questions' || r.kind === 'choice' || r.kind === 'report') && !answered.has(r.id))
+      await retire($, r => (r.kind === 'permission' || r.kind === 'questions' || r.kind === 'choice' || r.kind === 'report') && !answered.has(r.id), 'elsewhere')
     }
     return next(e)
   }).catch(($, e, next) => next(e))
@@ -1031,14 +1116,14 @@ export const register: Register = (on, options) => {
   on('turn.complete', async ($, e, next) => {
     const done = await next(e)
     // A loop that ended waits on no dialog of its own any more, whoever answered it.
-    await retire($, r => r.kind === 'ask' && r.agentId === e.agentId)
+    await retire($, r => r.kind === 'ask' && r.agentId === e.agentId, e.agentId ? 'ended' : 'elsewhere')
     if (e.agentId) return done
     isBusy = false
     if (forward && !e.isAborted && e.answer.trim()) {
       // A turn that ends saying something new supersedes what the session asked or reported before it
       // (its answer may have come through another session); a choice asked during this turn stays.
       const asked = (r: MonitorRequest) => r.kind === 'questions' || r.kind === 'choice' || r.kind === 'report'
-      await retire($, r => asked(r) && r.createdAt < turnStartedAt)
+      await retire($, r => asked(r) && r.createdAt < turnStartedAt, 'elsewhere')
       const m = QUESTIONS_HEADING.exec(e.answer)
       const own = ownIds(await read($, local))
       const rest = m ? e.answer.slice(m.index + m[0].length) : ''
@@ -1092,7 +1177,7 @@ export const register: Register = (on, options) => {
     const ran = await next(e)
     const { tool, tool_use_id: _, agentId: __, requestMeta: ___, ...args } = e as Record<string, unknown>
     const key = askKey(String(tool), askWhat(args))
-    await retire($, r => r.kind === 'ask' && grantKey(r) === key)
+    await retire($, r => r.kind === 'ask' && grantKey(r) === key, 'elsewhere')
     return ran
   }).catch(($, e, next) => next(e))
 
@@ -1211,21 +1296,18 @@ export const register: Register = (on, options) => {
 
   // Protected commands wait for the person's approval from the pane.
   on('tool.check', async ($, e, next) => {
-    // Only the mod writes the bus: answers would let a session grant itself anything, rules.json or a
-    // status file loosen the rules or pose as another session. Reading it is harmless; a file tool is
-    // judged by its target, so the mod's own source and docs stay editable.
-    if (!e.isReadOnly) {
-      const i = (e.input ?? {}) as Record<string, unknown>
-      const target = JSON.stringify(i.file_path ?? i.notebook_path ?? i).replace(/\\\\/g, '/').toLowerCase()
-      if (target.includes('.claude/coordinator-monitor') || (base && target.includes(base.toLowerCase()))) return { decision: 'deny', reason: S.answersGuard }
-    }
+    // Only the mod writes the bus (see guard.ts).
+    if (touchesBus(e, base, home)) return { decision: 'deny', reason: S.answersGuard }
     if (!SHELL_TOOLS.has(e.tool) || !e.tool_use_id) return next(e)
     const command = String((e.input as { command?: unknown } | null)?.command ?? '')
-    const rule = command && matchRule(rules, command)
+    // PowerShell text is never masked: `echo` there is Write-Output, `iex` runs what it printed.
+    const rule = command && matchRule(rules, command, e.tool === 'PowerShell')
     if (!rule) return next(e)
     // The coordinator's person is in its own chat: ask there, with the app's dialog, not with a pane card.
     // Only where a person answers the ask; a headless run keeps the card path.
     if (isCoordinator && e.approver === 'person') return { decision: 'ask', reason: S.askInChat(rule.label) }
+    // Pending answers first: a revoke the person just gave must take its grant out before this check reads it.
+    await applyAnswers($)
     const l = await read($, local)
     const key = scoped(e.agentId, command)
     if (l.grantsSession.includes(key)) return { decision: 'allow', reason: 'approved for this session from the coordinator pane' }
@@ -1244,7 +1326,8 @@ export const register: Register = (on, options) => {
         void explainLater($, id, e.tool, command)
         const a = isHeld ? await waitAnswer($, id, HOLD_MS) : undefined
         if (a?.kind === 'approve-once' || a?.kind === 'approve-session' || a?.kind === 'deny') {
-          // A call interrupted meanwhile runs nothing: an approval for it is kept for the next try.
+          // A call interrupted meanwhile runs nothing: an approval for it is kept for the next try. (A
+          // subagent that ended in the meantime cannot be told apart from an interrupted one here: no signal.)
           const isGone = !!next.signal?.aborted
           await update($, local, cur => ({
             ...cur,
@@ -1351,6 +1434,10 @@ export const register: Register = (on, options) => {
     // A closed session waits on nothing: what it asked for is moot.
     for (const s of b.sessions) if (s.state !== 'ended') for (const r of s.requests) if (!sent.has(r.id)) inbox.push({ s, r })
     inbox.sort((x, y) => x.r.createdAt - y.r.createdAt)
+    // Cards that closed unanswered in the last ten minutes, newest last. A card the pane just answered leaves none.
+    const closed: { s: SessionStatus; h: HistoryRow }[] = []
+    for (const s of b.sessions) for (const h of s.history ?? []) if (!sent.has(h.id) && Date.now() - h.at < HISTORY_MS) closed.push({ s, h })
+    closed.sort((x, y) => x.h.at - y.h.at)
 
     const stat = (key: string, label: string, value: string, sub: RenderChildren): RenderNode => (
       <Box key={key} flexDirection="column" width="32%" flexGrow={1} gap="xs" padding="sm" backgroundColor={fill(CARD)} borderStyle={isTerm ? 'round' : undefined} borderDimColor>
@@ -1969,6 +2056,29 @@ export const register: Register = (on, options) => {
               ) : null}
             </Box>
           ) : null}
+          {/* The approvals this session holds for its life, each one revocable: its next matching call asks again. */}
+          {s.state !== 'ended' && s.grants?.length ? (
+            <Box flexDirection="column" gap="xs" paddingX="md" paddingY="sm">
+              <Text size="caption" color="subtle">
+                {`${S.grantsHeading} · ${s.grants.length}`}
+              </Text>
+              {s.grants.map(g => (
+                <Box key={`grant-${id}-${g.id}`} flexDirection="row" gap="sm" alignItems="center" paddingX="sm">
+                  <Box flexShrink={0}>
+                    <Text size="caption" color="subtle">
+                      {g.label}
+                    </Text>
+                  </Box>
+                  <Box flexGrow={1} flexShrink={1} minWidth={0}>
+                    <Text size="footnote" wrap="truncate-end">
+                      {g.line}
+                    </Text>
+                  </Box>
+                  <Button key={`revoke-${id}-${g.id}`} variant="secondary" label={S.revoke} onPress={() => void revokeGrant($, s, g)} />
+                </Box>
+              ))}
+            </Box>
+          ) : null}
           {!isCol &&
             s.agents.map(a => {
               const tier = tierOf(a.type)
@@ -2085,6 +2195,16 @@ export const register: Register = (on, options) => {
           <Text size="footnote" color="subtle">
             {S.nothingWaiting}
           </Text>
+        ) : null}
+        {/* Cards that closed without the person: one muted line each for ten minutes, nothing to press. */}
+        {u.filter !== 'active' && closed.length ? (
+          <Box flexDirection="column">
+            {closed.map(({ s, h: row }) => (
+              <Text key={`closed-${s.sessionId}-${row.id}`} size="caption" color="subtle" wrap="truncate-end">
+                {`${fmtTime(row.at)} · #${shortId(row.id)} · ${row.why === 'unsent' ? S.historyUnsent(s.title) : row.why === 'ended' ? S.historyEnded(s.title) : S.historyElsewhere(s.title)}`}
+              </Text>
+            ))}
+          </Box>
         ) : null}
         <Text size="caption" weight="bold" color="subtle">
           {S.sessionsAndAgents}

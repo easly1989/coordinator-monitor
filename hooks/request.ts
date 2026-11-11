@@ -16,7 +16,7 @@ export type RequestView =
  * variation selectors, tag characters, lone surrogates, and every other default-ignorable or format
  * character Unicode lists.
  */
-const HIDDEN =
+export const HIDDEN =
   /[\u0000-\u0008\u000B-\u001F\u007F-\u009F\u00AD\u034F\u061C\u115F-\u1160\u17B4-\u17B5\u180B-\u180F\u200B-\u200F\u2028-\u202E\u2060-\u206F\u3164\uFE00-\uFE0F\uFEFF\uFFA0\uFFF0-\uFFFB\u{1D173}-\u{1D17A}\u{E0000}-\u{E0FFF}\uD800-\uDFFF\p{Default_Ignorable_Code_Point}\p{Cf}]/u
 
 /**
@@ -196,7 +196,7 @@ const runsUnnamed = (text: string): boolean =>
  *   way the mention test misses (a glob, a quote, a variable, `./sub/../`).
  * A false "may run" costs a word; a missed one costs the label.
  */
-const laterUse = (text: string, base: string): { runBy?: string; isPiped?: boolean } => {
+export const laterUse = (text: string, base: string): { runBy?: string; isPiped?: boolean } => {
   const runBy = runnerOf(text, base)
   if (runBy) return { runBy }
   const esc = base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')

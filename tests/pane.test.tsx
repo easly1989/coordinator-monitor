@@ -116,6 +116,18 @@ const FILES: Record<string, SessionStatus> = {
     agents: [{ id: 'w1', type: 'savvy-medium', description: 'Migrate schema', status: 'running', stepDone: 2, stepTotal: 4, stepNote: 'events', ctxPct: 22, tokens: 44_000 }],
     // Its turn ended on a report that waits for a go-ahead.
     requests: [{ id: 'r1', kind: 'report', createdAt: now + 3, text: 'Migrated the schema.\n\nShall I deploy it?', summary: 'Schema migrated; deploy pending', decision: 'Deploy to staging?', awaits: true }],
+    // Approved for its life, one of them a subagent's; and cards that closed without the person (one too old to show).
+    grants: [
+      { id: 'g1', label: 'command', line: 'npm publish​' },
+      { id: 'g2', label: 'Bash (agent w1)', line: 'gh release create v1' },
+      { id: 'bad id', label: 'command', line: 'not a grant id' },
+    ],
+    history: [
+      { id: 'zz1xyz', at: now - 1000, why: 'ended' },
+      { id: 'zz2xyz', at: now - 2000, why: 'unsent' },
+      { id: 'zz3xyz', at: now - 3000, why: 'elsewhere' },
+      { id: 'zz4old', at: now - 11 * 60_000, why: 'elsewhere' },
+    ],
   }),
   // The coordinator: its request reaches the inbox, its own card stays out of the list.
   'c.json': status({
@@ -229,7 +241,7 @@ test('the pane draws sessions, workers and every kind of request, on every surfa
   expect(mine.title).toBe('Coordinatore')
   expect(mine.folder).toBe('coordinator')
   expect(mine.effort).toBe('high')
-  expect(mine.version).toBe('0.7.0')
+  expect(mine.version).toBe('0.7.1')
 
   for (const surface of ['terminal', 'desktop', 'vscode', 'mobile'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface })
@@ -333,6 +345,23 @@ test('the pane draws sessions, workers and every kind of request, on every surfa
   expect(copied).toEqual(['p4'])
   expect(await ui.find({ key: 'open-me' })).toBeFalsy()
   expect(await ui.find({ key: 'open-b' })).toBeFalsy()
+  // A session's approvals for its life are listed, each revocable: another session's text is drawn as a string.
+  expect(await ui.find({ type: 'Text', text: /^Approved for the session · 2$/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /^npm publish\\u200B$/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /gh release create v1/ })).toBeTruthy()
+  expect(await ui.find({ text: /not a grant id/ })).toBeFalsy()
+  // Cards that closed on their own are one muted line for ten minutes, with nothing to press.
+  expect(await ui.find({ type: 'Text', text: /#zz1xyz.*closed: Recipes moved on \(subagent ended\)/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /#zz2xyz.*closed: Recipes: subagent ended, nothing sent/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /#zz3xyz.*closed: Recipes moved on \(answered elsewhere\)/ })).toBeTruthy()
+  expect(await ui.find({ text: /zz4old/ })).toBeFalsy()
+  expect(await ui.find({ key: 'once-zz1xyz' })).toBeFalsy()
+  await ui.press({ key: 'revoke-b-g1' })
+  expect(Object.entries(written).find(([k]) => k.endsWith('/answers/b.json'))?.[1]).toMatch(/"kind":"revoke"[^}]*"text":"g1"/)
+  // The coordinator's own note says an approval was revoked, never what it was for.
+  expect(notes.at(-1)).toMatch(/of the session titled \\"Recipes\\"[\s\S]*asked to revoke an approval for the session/)
+  expect(notes.at(-1)).not.toMatch(/npm publish/)
+  notes.pop()
   // Every answer given here is noted in this session (the coordinator) too: the session's title quoted,
   // the request id and the answer, nothing else the session wrote. A dismissal leaves no note.
   await ui.press({ key: 'once-p1' })
@@ -1446,38 +1475,188 @@ describe('a session reporting', () => {
     })
   })
 
-  test("a subagent's request is answered to that agent; when it is gone, the parent is told whose it is", async ($, on) => {
-    const { mine, settle, written, prompts, answersFile } = setup(on, [{ id: 'w1', type: 'savvy-medium', description: 'Release worker', status: 'completed' }])
+  // A subagent that asks for a command, while it can be reached (`env.isReachable`) or once it is gone.
+  const subagent = (on: TestOn) => {
+    const env = setup(on, [{ id: 'w1', type: 'savvy-medium', description: 'Release worker', status: 'completed' }])
     on('tool.check', () => ({ decision: 'allow' }) as never)
     const sent: string[] = []
-    let isReachable = true
+    const state = { isReachable: true }
     on('session.send', (_, e) => {
       sent.push(e.text)
-      return isReachable ? { isDelivered: true } : { isDelivered: false, reason: 'gone' }
+      return state.isReachable ? { isDelivered: true } : { isDelivered: false, reason: 'gone' }
     })
+    return { ...env, sent, state }
+  }
+  const settleUntil = async (isDone: () => boolean) => {
+    for (let i = 0; i < 300 && !isDone(); i++) await new Promise<void>(r => setTimeout(r, 10))
+    expect(isDone()).toBe(true)
+  }
+
+  test("a subagent's approval is sent to that agent, and is its alone", async ($, on) => {
+    const { mine, settle, written, prompts, answersFile, sent } = subagent(on)
     await $.session.start({ cwd: '/repos/project', surface: 'desktop', isInteractive: true })
     await $.tool.check({ tool: 'Bash', input: { command: 'npm publish' }, tool_use_id: 'u1', agentId: 'w1' } as never)
     await settle()
     const [a] = mine().requests
     expect(a?.agentId).toBe('w1')
     written[answersFile()] = JSON.stringify([{ requestId: a?.id, at: Date.now(), kind: 'approve-once' }])
-    for (let i = 0; i < 300 && !sent.length; i++) await new Promise<void>(r => setTimeout(r, 10))
+    await settleUntil(() => sent.length > 0)
     expect(sent[0]).toMatch(/Approved[\s\S]*npm publish/)
     expect(prompts.some(t => t.includes('npm publish'))).toBe(false)
-
-    isReachable = false
-    const check = async (u: string, agentId?: string) =>
-      ((await $.tool.check({ tool: 'Bash', input: { command: 'gh release create v1' }, tool_use_id: u, agentId } as never)) as { decision?: string }).decision
-    await check('u2', 'w1')
-    await settle()
-    const [b] = mine().requests
-    written[answersFile()] = JSON.stringify([{ requestId: b?.id, at: Date.now(), kind: 'approve-once' }])
-    for (let i = 0; i < 300 && !prompts.some(t => t.includes('gh release create v1')); i++) await new Promise<void>(r => setTimeout(r, 10))
-    expect(prompts.at(-1)).toMatch(/subagent "w1 \(Release worker\)"[\s\S]*that agent's, not yours[\s\S]*for that agent alone[\s\S]*Approved[\s\S]*gh release create v1/)
     // The approval is the agent's alone: the parent running the same command is asked again.
-    expect(await check('u3')).toBe('deny')
-    expect(await check('u4', 'w1')).toBe('allow')
+    const check = async (u: string, agentId?: string) =>
+      ((await $.tool.check({ tool: 'Bash', input: { command: 'npm publish' }, tool_use_id: u, agentId } as never)) as { decision?: string }).decision
+    expect(await check('u2')).toBe('deny')
+    expect(await check('u3', 'w1')).toBe('allow')
     await settle()
+  })
+
+  describe('a subagent that is gone', () => {
+    const ask = async ($: $, command: string, u: string) =>
+      ((await $.tool.check({ tool: 'Bash', input: { command }, tool_use_id: u, agentId: 'w1' } as never)) as { decision?: string }).decision
+
+    for (const kind of ['approve-once', 'approve-session', 'deny'] as const)
+      test(`${kind} is not forwarded, grants nothing, and the card closes as a line saying so`, async ($, on) => {
+        const { mine, settle, written, prompts, answersFile, sent, state } = subagent(on)
+        await $.session.start({ cwd: '/repos/project', surface: 'desktop', isInteractive: true })
+        state.isReachable = false
+        await ask($, 'gh release create v1', 'u1')
+        await settle()
+        const [b] = mine().requests
+        expect(b?.agentId).toBe('w1')
+        written[answersFile()] = JSON.stringify([{ requestId: b?.id, at: Date.now(), kind }])
+        // The answer was tried on the agent, once, and refused.
+        await settleUntil(() => sent.length > 0 && mine().requests.length === 0)
+        await settle()
+        expect(sent.length).toBe(1)
+        // Nothing reached the parent: no prompt names the command.
+        expect(prompts.some(t => t.includes('gh release create v1'))).toBe(false)
+        expect(mine().requests).toEqual([])
+        expect(mine().history).toEqual([expect.objectContaining({ id: b?.id, why: 'unsent' })])
+        expect(mine().grants ?? []).toEqual([])
+        // No key was left behind: the agent's next call asks again.
+        expect(await ask($, 'gh release create v1', 'u2')).toBe('deny')
+        expect(mine().requests.length).toBe(1)
+      })
+
+    test("a free-text answer still goes to the parent, told whose it is", async ($, on) => {
+      const { mine, settle, written, prompts, answersFile, state } = subagent(on)
+      await $.session.start({ cwd: '/repos/project', surface: 'desktop', isInteractive: true })
+      state.isReachable = false
+      await ask($, 'gh release create v1', 'u1')
+      await settle()
+      const [b] = mine().requests
+      written[answersFile()] = JSON.stringify([{ requestId: b?.id, at: Date.now(), kind: 'answer', text: 'use v2 instead' }])
+      await settleUntil(() => prompts.some(t => t.includes('use v2 instead')))
+      expect(prompts.at(-1)).toMatch(/subagent "w1 \(Release worker\)"[\s\S]*that agent's, not yours[\s\S]*use v2 instead/)
+      // Not a verdict: no history line, and the parent is asked again for the same command.
+      expect(mine().history ?? []).toEqual([])
+      expect(await $.tool.check({ tool: 'Bash', input: { command: 'gh release create v1' }, tool_use_id: 'u2' } as never)).toMatchObject({ decision: 'deny' })
+    })
+  })
+
+  test('a revoke takes back an approval for the session and one still pending once: the next call asks again', async ($, on) => {
+    const { mine, settle, written, answersFile, prompts: sent } = subagent(on)
+    await $.session.start({ cwd: '/repos/project', surface: 'desktop', isInteractive: true })
+    const check = async (u: string) =>
+      ((await $.tool.check({ tool: 'Bash', input: { command: 'npm publish' }, tool_use_id: u } as never)) as { decision?: string }).decision
+    const card = () => mine().requests.find(r => r.command === 'npm publish')?.id ?? ''
+    // A card that waits keeps the session looking for answers every second, not every three.
+    await $.tool.check({ tool: 'Bash', input: { command: 'gh release create v1' }, tool_use_id: 'u0' } as never)
+    const answer = (requestId: string, kind: string, text?: string) => ({ requestId, at: Date.now(), kind, text })
+    const answers: ReturnType<typeof answer>[] = []
+    const send = async (a: ReturnType<typeof answer>) => {
+      answers.push(a)
+      written[answersFile()] = JSON.stringify(answers)
+      await settle()
+    }
+
+    // Approved for the session: listed with its label and first line, and the call runs.
+    expect([await check('u1'), 'u1']).toEqual(['deny', 'u1'])
+    await settle()
+    await send(answer(card(), 'approve-session'))
+    await settleUntil(() => (mine().grants ?? []).length > 0)
+    expect(mine().grants).toEqual([expect.objectContaining({ label: 'command', line: 'npm publish' })])
+    const id = mine().grants?.[0]?.id ?? ''
+    expect([await check('u2'), 'u2']).toEqual(['allow', 'u2'])
+
+    // Revoked: no longer listed, and the same call asks again.
+    await send(answer('revoke-1', 'revoke', id))
+    await settleUntil(() => (mine().grants ?? []).length === 0)
+    expect(mine().grants ?? []).toEqual([])
+    expect([await check('u3'), 'u3']).toEqual(['deny', 'u3'])
+    await settle()
+
+    // Approved once and not yet used: the same id takes it back too.
+    await send(answer(card(), 'approve-once'))
+    await settleUntil(() => !card())
+    // A revoke republishes the session's status: that is when it has been applied.
+    const before = mine().heartbeat
+    await send(answer('revoke-2', 'revoke', id))
+    await settleUntil(() => mine().heartbeat !== before)
+    expect([await check('u4'), 'u4']).toEqual(['deny', 'u4'])
+
+    // An id that names nothing changes nothing.
+    await send(answer(card(), 'approve-session'))
+    await settleUntil(() => (mine().grants ?? []).length > 0)
+    await send(answer('revoke-3', 'revoke', 'zzzz-9'))
+    expect(mine().grants?.length).toBe(1)
+    expect([await check('u5'), 'u5']).toEqual(['allow', 'u5'])
+
+    // An approval older than a revoke of the same grant, both waiting in one pass, does not bring it back.
+    await send(answer('revoke-4', 'revoke', id))
+    await settleUntil(() => (mine().grants ?? []).length === 0)
+    expect([await check('u6'), 'u6']).toEqual(['deny', 'u6'])
+    await settle()
+    const heard = sent.length
+    const stale = { requestId: card(), at: Date.now() - 5000, kind: 'approve-session' }
+    written[answersFile()] = JSON.stringify([stale, answer('revoke-5', 'revoke', id)])
+    await settleUntil(() => !card())
+    expect(mine().grants ?? []).toEqual([])
+    expect([await check('u7'), 'u7']).toEqual(['deny', 'u7'])
+    // The person is not told it was approved: the message says the approval was withdrawn.
+    await settleUntil(() => sent.slice(heard).some(t => /withdrawn by a revoke/.test(t)))
+    expect(sent.slice(heard).some(t => /^Approved from the coordinator pane/.test(t))).toBe(false)
+    // The same instant counts as older too.
+    await settle()
+    const t0 = Date.now()
+    written[answersFile()] = JSON.stringify([{ requestId: card(), at: t0, kind: 'approve-once' }, { requestId: 'revoke-6', at: t0, kind: 'revoke', text: id }])
+    await settleUntil(() => !card())
+    expect([await check('u8'), 'u8']).toEqual(['deny', 'u8'])
+  })
+
+  test('a revoke still waiting for its tick is applied before the next call reads its grant', async ($, on) => {
+    const { mine, settle, written, answersFile } = subagent(on)
+    await $.session.start({ cwd: '/repos/project', surface: 'desktop', isInteractive: true })
+    const check = async (u: string) =>
+      ((await $.tool.check({ tool: 'Bash', input: { command: 'npm publish' }, tool_use_id: u } as never)) as { decision?: string }).decision
+    expect(await check('u1')).toBe('deny')
+    await settle()
+    const card = mine().requests.find(r => r.command === 'npm publish')?.id ?? ''
+    written[answersFile()] = JSON.stringify([{ requestId: card, at: Date.now(), kind: 'approve-session' }])
+    await settleUntil(() => (mine().grants ?? []).length > 0)
+    const id = mine().grants?.[0]?.id ?? ''
+    expect(await check('u2')).toBe('allow')
+    // The revoke is written and the next call comes before any tick: it must ask, not run on the old grant.
+    written[answersFile()] = JSON.stringify([
+      { requestId: card, at: Date.now() - 1000, kind: 'approve-session' },
+      { requestId: 'revoke-1', at: Date.now(), kind: 'revoke', text: id },
+    ])
+    expect(await check('u3')).toBe('deny')
+    expect(mine().requests.some(r => r.command === 'npm publish')).toBe(true)
+  })
+
+  test('a card that closed on its own is a line for ten minutes, and is gone after', async ($, on) => {
+    const { mine, settle } = subagent(on)
+    await $.session.start({ cwd: '/repos/project', surface: 'desktop', isInteractive: true })
+    await $.tool.check({ tool: 'Bash', input: { command: 'npm publish' }, tool_use_id: 'u1' } as never)
+    await settle()
+    const [r] = mine().requests
+    // The person answers in the session itself: the card goes, and leaves its line.
+    await $.prompt.submit({ text: 'go on', origin: { kind: 'composer' }, wait: false } as never)
+    await settle()
+    expect(mine().requests).toEqual([])
+    expect(mine().history).toEqual([expect.objectContaining({ id: r?.id, why: 'elsewhere' })])
   })
 })
 describe('the app asking for a permission', () => {
