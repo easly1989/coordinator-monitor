@@ -538,6 +538,60 @@ test('round 13: python zipfile and tarfile extracts and ExtractToDirectory write
   expect(sh(`[IO.Compression.ZipFile]::ExtractToDirectory('C:/tmp/x.zip', 'C:/tmp/out')`, 'PowerShell')).toBe(false)
 })
 
+test('round 14: a 64 KB run of home expansions is judged in under 200 ms', () => {
+  for (const unit of ["'~|", "'~;", "'~&", '"~|'])
+    for (const tool of ['Bash', 'PowerShell']) {
+      const ms = fast(() => sh(unit.repeat(Math.ceil(65536 / 3)), tool))
+      expect(ms).toBeLessThan(200)
+    }
+})
+
+test('round 14: a path joined with -join or + at run time, in any spacing, that could name the folder is a hit', () => {
+  const p = (cmd: string) => sh(cmd, 'PowerShell')
+  const bt = String.fromCharCode(96)
+  const half = `coord','inator-monitor/answers/x.json`
+  for (const cmd of [
+    `Set-Content (-join ('~/${D}/${half}')) 1`,
+    `Set-Content (-join('~/${D}/${half}')) 1`,
+    `Set-Content (('~/${D}/${half}')-join'') 1`,
+    `Set-Content (('~/${D}/${half}') -join'') 1`,
+    `Set-Content (-join ('~/${D}/coord','inator-monitor/answers/x.json')) 1`,
+    `Set-Content (("$HOME/${D}/"+'coordi')+'nator-monitor/answers/x.json') 1`,
+    `Set-Content ('~/${D}/coordi'+ <#x#> 'nator-monitor/answers/x.json') 1`,
+    `Set-Content ('~/${D}/coordi'+${bt}\n'nator-monitor/answers/x.json') 1`,
+    `Set-Content ('~/${D}/coordi'+(${bt}\n'nator-monitor/answers/x.json')) 1`,
+    // A comment marker inside a string is no comment.
+    `Set-Content '<#' ~/${D}/${CM}/answers/x.json '#>'`,
+  ])
+    expect(p(cmd)).toBe(true)
+})
+
+test('round 14: a path joined with a globbed .claude is a hit', () => {
+  const p = (cmd: string) => sh(cmd, 'PowerShell')
+  for (const cmd of [
+    `Set-Content (Join-Path ~/.cl* ${CM}/rules.json) 1`,
+    `Set-Content ([IO.Path]::Combine($HOME,'.cl?ude','${CM}','rules.json')) 1`,
+    `Set-Content (Join-Path ~ .cl* ${CM}/rules.json) 1`,
+    `Set-Content (Join-Path ~/.cl[a]ude ${CM}/rules.json) 1`,
+    `Set-Content (Join-Path $HOME '.cl?ude' '${CM}' 'rules.json') 1`,
+  ])
+    expect(p(cmd)).toBe(true)
+})
+
+test('round 14: everyday joins and sums in PowerShell are no hit', () => {
+  const p = (cmd: string) => sh(cmd, 'PowerShell')
+  const bt = String.fromCharCode(96)
+  for (const cmd of [
+    `$path = Join-Path $root ($name + '.txt')`,
+    `Set-Content (Join-Path $PWD 'a.txt') (($lines) -join "${bt}n")`,
+    `[IO.Path]::Combine($base, $name + '.json')`,
+    `Get-ChildItem (Join-Path $env:TEMP 'logs') | ForEach-Object { $n = $n + 1 }`,
+  ])
+    expect(p(cmd)).toBe(false)
+  // ...while a join under the home folder with a piece of the folder's name still is.
+  expect(p(`$path = Join-Path $HOME ($name + '.cl')`)).toBe(true)
+})
+
 test('round 13: tree -o writes a file, so it is not read-only', () => {
   expect(sh(`cd ~/${D} && tree -o ${CM}/rules.json .`)).toBe(true)
   expect(sh(`cd ~/${D} && tree -L 2`)).toBe(false)

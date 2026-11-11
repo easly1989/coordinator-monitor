@@ -15,7 +15,11 @@ const HOME = /\$\{home\}|\$home(?![\w])|\$env:(?:userprofile|home)(?![\w])|\$\{e
 // drive: they are dropped at the start of a word, in `/` spelling.
 const DEVICE = /(?<=^|[\s;&|('"=])\/\/[.?]\/(?:unc\/[^/\s]+\/)?/g
 const ADMIN = /(?<=^|[\s;&|('"=])(?:\/\/[^/\s]+\/)?([a-z])\$\//g
-const drive = (s: string): string => s.replace(DEVICE, '').replace(ADMIN, '$1:/')
+// A regex runs over a long text only when the text has what it needs: home expands to 14 characters per `~`.
+const drive = (s: string): string => {
+  const d = s.includes('//') ? s.replace(DEVICE, '') : s
+  return d.includes('$/') ? d.replace(ADMIN, '$1:/') : d
+}
 
 // `a/b/../c` is `a/c`, at any depth. A name may hold spaces, and the text does not say where a name starts, so it is
 // read twice: a name ends at a quote, a separator or an operator (`spaces`), or also at a space.
@@ -43,8 +47,9 @@ const collapse = (s: string, spaces: boolean): string => {
   return out.join('/')
 }
 
-const clean = (text: string, home: string, spaces = false): string => {
-  let s = drive(
+/** The text as the file system reads it, in two views: names end at a space or an operator, or only at an operator. */
+const clean = (text: string, home: string): [string, string] => {
+  const s = drive(
     text
       .toLowerCase()
       // `-Path:value` is `-Path value`.
@@ -57,9 +62,13 @@ const clean = (text: string, home: string, spaces = false): string => {
   // Windows drops the dots at the end of a segment (`.claude./x` is `.claude/x`) and an alternate data stream
   // (`.claude::$INDEX_ALLOCATION/x` is `.claude/x`); `$(:)` is no stream.
   // A blank at the end of a segment is dropped too, but only in the view that reads names with blanks in them.
-  if (spaces) s = s.replace(/(?<=claude(?:~\d)?) +(?=\/)/g, '')
   // A drive (`>>D:/bus`, `--target-directory=D:/bus`) is a letter that starts a word, then a bare colon: it stays.
-  return collapse(streams(s.replace(/(?<=[^/\s.])\.+(?=\/|$)/g, '')), spaces)
+  const bare = (t: string): string => streams(t.includes('.') ? t.replace(/(?<=[^/\s.])\.+(?=\/|$)/g, '') : t)
+  const blanks = s.includes('claude') ? s.replace(/(?<=claude(?:~\d)?) +(?=\/)/g, '') : s
+  const pre = bare(s)
+  const plain = collapse(pre, false)
+  // The second view differs only where a blank ends a name or `..` is collapsed: otherwise it is the first.
+  return [plain, blanks === s && !pre.includes('..') ? plain : collapse(blanks === s ? pre : bare(blanks), true)]
 }
 
 /**
@@ -100,7 +109,7 @@ const CD_STEP = /^\s*(?:cd|chdir|pushd|sl|set-location|push-location)(?:\s|$)/i
 const BUS_ENTRY = /\/coordinator-monitor\/(?:answers|sessions|rules\.json|queues\.json)(?=\/|$)/
 const JOINED = /join-path|path\]::(?:combine|join)/
 // A path built from pieces at run time: `-join`, or `+` between two terms.
-const DYNAMIC = /\s-join\s|\s\+\s/
+const DYNAMIC = /-join(?![\w-])|\+/
 // A link that can make the folder reachable under another name: a junction, a symlink or a hard link.
 const LINK = /\bmklink\b|\bfsutil\s+hardlink\b|createsymboliclink|(?:^|[\s;&|(])ln(?:\.exe)?\s/
 const LINK_ITEM = afterRule('link', String.raw`(?:\bnew-item\b|(?:^|[\s;&|(])ni(?=\s))`, /-(?:item)?type\s+['"]?(?:junction|symboliclink|hardlink)/)
@@ -467,11 +476,26 @@ const destHit = (s: string, home: string, own: string[]): boolean =>
     return dests.some(d => d && (isD(d, home) || (tree && above(d, own, home))))
   })
 
+/** A PowerShell command with the strings that `+` joins run together: `'a' + <#c#> ('b')` is `'a` `b'`. */
+const plus = (cmd: string): string => {
+  let text = ''
+  let at = 0
+  // A block comment is a blank (one in a string is text, so the command is judged with it as well); an unterminated one
+  // is left alone (each search starts after the last, so it is one pass).
+  for (let a = cmd.indexOf('<#'); a >= 0; a = cmd.indexOf('<#', at)) {
+    const end = cmd.indexOf('#>', a + 2)
+    if (end < 0) break
+    text += cmd.slice(at, a) + ' '
+    at = end + 2
+  }
+  return (text + cmd.slice(at)).replace(/`\r?\n/g, ' ').replace(/(['"])[\s)]*\+[\s(]*['"]/g, '')
+}
+
 /** True when a call that is not read-only writes the bus folder `base`. `home` is the person's home folder. */
 export const touchesBus = (e: BusCall, base: string, home: string): boolean => {
   if (e.isReadOnly) return false
   const h = home.toLowerCase()
-  const b = clean(base, h)
+  const [b] = clean(base, h)
   // A drive also reads `/d/…` (MSYS, `/mnt/d/…`).
   const bm = b.replace(/^([a-z]):\//, '/$1/')
   const names = (s: string) => NAMES.test(s) || (!!b && (s.includes(b) || s.includes(bm)))
@@ -483,7 +507,7 @@ export const touchesBus = (e: BusCall, base: string, home: string): boolean => {
     const target = i.file_path ?? i.notebook_path ?? i
     if (typeof target === 'string' && (target.length > 1024 || target.split(/[\\/]/).length > 64)) return true
     const text = typeof target === 'string' ? target : JSON.stringify(target)
-    const c = clean(text, h)
+    const [c] = clean(text, h)
     // The bus folder's own entries under a folder of that name, whatever the path before it: a junction to `.claude`
     // makes the same folder appear elsewhere, and a host with no way to resolve a path still sees the entry.
     if (names(c) || BUS_ENTRY.test(c) || flat(text)) return true
@@ -500,24 +524,32 @@ export const touchesBus = (e: BusCall, base: string, home: string): boolean => {
     })()
   }
   const ps = e.tool === 'PowerShell'
-  // PowerShell joins two strings with `+`: 'coord' + 'inator-monitor', in any mix of quotes.
+  // PowerShell joins two strings with `+`: 'coord' + 'inator-monitor', in any mix of quotes, with a comment, a
+  // continuation line or a closing parenthesis between the pieces.
   const raw = ps ? i.command.replace(/(['"])\s*\+\s*['"]/g, '') : i.command
+  const joined = ps ? plus(i.command) : raw
   // The text, its words with the quotes and escapes gone, and the same where a backslash was a path separator.
   const own = segments(base, h)
   work = 0
   // A path built from pieces (`Join-Path`, `-join`, `+`, `Combine`): the pieces name the folder, or are joined at run
   // time and could. A step that holds the folder's name and a word that could be the bus folder's name is a hit.
+  // A piece that is the folder `.claude` or a start of it, or could be one through a glob.
+  const dish = (seg: string): boolean => (seg.length > 1 && '.claude'.startsWith(seg)) || couldBeD(seg) || /^claude~\d$/.test(seg)
   const pieced = (s: string): boolean =>
     ps &&
     (JOINED.test(s) || DYNAMIC.test(s)) &&
     ((JOINED.test(s) && s.includes('.claude') && s.includes('coordinator')) ||
-      s.split(/[;\n]/).some(
-        st =>
-          (JOINED.test(st) && DYNAMIC.test(st)) ||
-          ((JOINED.test(st) || DYNAMIC.test(st)) &&
-            /\.claude|claude~\d/.test(st) &&
-            st.split(/[\s;&|('")=,]+/).some(w => w.split('/').some(seg => seg !== '' && (CM_NAMES.some(n => n.startsWith(seg)) || (/[*?[{]/.test(seg) && globs(seg, CM_NAMES)))))),
-      ))
+      s.split(/[;\n]/).some(st => {
+        const joins = JOINED.test(st)
+        if (!joins && !DYNAMIC.test(st)) return false
+        const segs = st.split(/[\s;&|('")=,]+/).flatMap(w => w.split('/')).filter(Boolean)
+        // Joined at run time with a home folder or a piece of the folder's name in the step: it could be the bus folder.
+        if (joins && DYNAMIC.test(st) && ((h !== '' && st.includes(h)) || /~|\$env:homepath|\/users\//.test(st) || segs.some(dish))) return true
+        return (
+          (/\.claude|claude~\d/.test(st) || segs.some(couldBeD)) &&
+          segs.some(seg => CM_NAMES.some(n => n.startsWith(seg)) || (/[*?[{]/.test(seg) && globs(seg, CM_NAMES)))
+        )
+      }))
   // Each distinct text is judged once.
   const judged = new Set<string>()
   const judge = (s: string): boolean => {
@@ -530,11 +562,12 @@ export const touchesBus = (e: BusCall, base: string, home: string): boolean => {
       (x === s ? [s] : [s, x]).some(v => globHits(v) || cdThen(v, h, own) || (isLink(v) && (DSEG.test(v) || anyD(v))) || destHit(v, h, own))
     )
   }
+  // Home is 14 characters or more for each `~`: a text that would grow by more than 64 KB is not read (denied).
+  const grows = (t: string): boolean => h.length * (t.match(HOME)?.length ?? 0) > 65536
   const check = (text: string): boolean =>
     [...new Set([text, unquote(text, ps), unquote(text.replace(/\\/g, '/'), ps)])].some(t => {
-      if (flat(t)) return true
-      const s = clean(t, h)
-      const sp = clean(t, h, true)
+      if (flat(t) || grows(t)) return true
+      const [s, sp] = clean(t, h)
       return judge(s) || (sp !== s && judge(sp))
     })
   // Text only mentions the folder when every step prints or stores nothing (`git commit -m "…~/.claude/coordinator-monitor"`):
@@ -543,5 +576,5 @@ export const touchesBus = (e: BusCall, base: string, home: string): boolean => {
     const cds = i.command.split(/[;&|\n]+/).filter(x => CD_STEP.test(x))
     return cds.length > 0 && check(cds.join(';'))
   }
-  return check(raw)
+  return check(raw) || (joined !== raw && check(joined))
 }
