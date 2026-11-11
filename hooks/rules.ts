@@ -72,16 +72,18 @@ export const compileRules = (file: RulesFile | null): { rules: Rule[]; critical:
 // Anything else returns null and the rule sees the raw text, as before:
 // - any step that is not on the list, a pipe or a variable as a command included (`… | sh`, `$c`, cp, mv,
 //   npm, bun, make, `git log`, `git notes`, `printf`, whose `-v` evaluates an array subscript), or on it
-//   with a flag that is not (`--output=`) or one written in quotes (`git commit '-m' …`: a quoted word of a
-//   flag's shape, `-v` or `--pre=sh`, leaves the whole text unmasked unless it is the value of `-m`, `--body`…);
+//   with a flag that is not (`--output=`) or one written in quotes (`git commit '-m' …`: a quoted word that
+//   starts like a flag, `-v` or `--output=a b`, leaves the whole text unmasked unless it is the value of a flag
+//   of that tool, `-m`, `--body`, `grep -e`…), or a backslash-newline inside double quotes;
 // - a step that writes a file with `>`; a here-doc body that goes anywhere but a .md or .txt file or stdout;
 // - the text has a hidden character, a curly quote, a CR, a backtick, `$'`, `$(` or `${` (but for the
 //   one `git commit -m "$(cat <<'EOF'` form), a here-string, process substitution, a line continuation,
 //   a backslash before a quote or a metacharacter, a comment, a subshell or a brace, `eval`, a shell or
 //   interpreter given a code string (`bash -c`, `python -c`, `node -e`, `pwsh -Command`), a descriptor
 //   or pipe set up for later (`exec 3>`, mkfifo, coproc), or a /dev or /proc target;
-// - a quote is left open, a here-doc has no end line or two openers share a line, or an unquoted here-doc
-//   body expands `$( )`.
+// - a quote is left open, a here-doc has no end line (or a line that starts with the word and goes on with
+//   `)`, `;`, `|`, `&` or a blank) or two openers share a line, or an unquoted here-doc body, its
+//   backslash-newlines dropped, expands `$( )` or holds the end word.
 // PowerShell text is never masked: there `echo` is Write-Output and `iex` runs what it printed.
 const OPAQUE: RegExp[] = [
   HIDDEN,
@@ -116,8 +118,11 @@ const scan = (text: string, q0 = ''): { steps: Step[]; q: string } | null => {
     const c = text[i] ?? ''
     const next = text[i + 1] ?? ''
     if (q) {
-      if (q === '"' && c === '\\') i++
-      else if (c === q) {
+      // In double quotes a backslash-newline is dropped by the shell: it can split a flag (`"--out\<nl>put=x"`).
+      if (q === '"' && c === '\\') {
+        if (!next || next === '\n') return null
+        i++
+      } else if (c === q) {
         quotes.push([qs, i])
         q = ''
       } else if (q === '"' && c === '$' && (next === '(' || next === '{')) return null
@@ -208,14 +213,17 @@ const withoutDocs = (cmd: string): string | null => {
     const m = opens === 1 && !q ? DOC.exec(line) : null
     if (!m) return null
     const word = m[3] ?? ''
-    // Inside `$( )` bash also ends the body at a line that only starts with the word (`EOF)`, `EOF ;`): a line
-    // that starts with it but is not exactly it, is not read.
+    // Inside `$( )` bash also ends the body at a line that starts with the word and goes on with `)`, `;`, `|`,
+    // `&` or a blank (`EOF)`, `EOF ;`): such a line that is not exactly the word is not read. A line that
+    // goes on with a word character (`EOFs are fine`) is plain body.
     const strip = (l: string) => (m[1] ? l.replace(/^\t+/, '') : l)
-    const end = lines.findIndex((l, j) => j > i && strip(l).startsWith(word))
+    const ends = (l: string) => strip(l).startsWith(word) && /^(?:[);|&\s]|$)/.test(strip(l).slice(word.length))
+    const end = lines.findIndex((l, j) => j > i && ends(l))
     if (end < 0 || strip(lines[end] ?? '') !== word) return null
-    // An unquoted word: the shell runs each `$( )` in the body as it reads it, a backslash-newline can hide
-    // the `(` from a look at the text, and one in the end word ends the body early.
-    if (!m[2] && /\$[({]|\\$/m.test(lines.slice(i + 1, end).join('\n'))) return null
+    // An unquoted word: the shell drops each backslash-newline, then runs each `$( )` in the body as it reads
+    // it, and a joined line can be the end word (`EO\<nl>F`) that ends the body early.
+    const joined = lines.slice(i + 1, end).join('\n').replace(/\\\n/g, '')
+    if (!m[2] && (/\$[({]|`/.test(joined) || joined.split('\n').some(ends))) return null
     const head = line.slice(0, m.index)
     const after = line.slice((m.index ?? 0) + m[0].length)
     const sub = /^(.*?)\$\([ \t]*cat[ \t]*$/.exec(head)
@@ -246,14 +254,28 @@ const withoutDocs = (cmd: string): string | null => {
   return q ? null : out.join('\n')
 }
 
-// A flag written in quotes (`grep '--pre=sh' …`) is hidden by the shaped text, so a quoted word of a flag's shape
-// (`-v`, `--pre=sh`: no space) leaves the text unmasked, unless it is the value of a git commit / gh flag that
-// takes one (`git commit -m '-fix'`): there it is a message, and a plain mention of `- item` or `-fix` stays quiet.
-const FLAG_SHAPE = /^--?[A-Za-z]\S*$/
-const VALUE_STEP = /^(?:git[ \t]+commit|gh[ \t])/
-const VALUE_FLAG = /(?:^|[ \t])(?:-m|-am|-F|--title|-t|--body|-b|--body-file|--base|-B|--head|-H|--label|-l|--assignee|-a|--reviewer|-r|--milestone|--repo|-R)[ \t]+$/
-const hasQuotedFlag = (text: string, s: Step, shaped: string): boolean =>
-  s.quotes.some(([a, b]) => FLAG_SHAPE.test(text.slice(a, b)) && !(VALUE_STEP.test(shaped) && VALUE_FLAG.test(text.slice(s.start, a - 1))))
+// A flag written in quotes (`grep '--pre=sh' …`, `git diff '--output=a b'`) is hidden by the shaped text, so a
+// quoted word that starts like a flag (a dash, a letter; `- item` does not) leaves the text unmasked, unless it
+// is the value of a flag of that step that takes one (`git commit -m '-fix'`, `grep -e '-v'`): there it is a
+// message or a pattern, and a plain mention of `- item` or `-fix` stays quiet. The value flags are those of
+// each tool; one that takes no value in a step (`gh pr review -r`, `git commit --template`) is not listed.
+const FLAG_SHAPE = /^--?[A-Za-z]/
+const GH = '--body|-b|--body-file|-F|--repo|-R'
+const VALUE_FLAGS: [RegExp, RegExp][] = (
+  [
+    [String.raw`git[ \t]+commit`, '-m|-am|-F'],
+    [String.raw`gh[ \t]+pr[ \t]+create`, `${GH}|--title|-t|--base|-B|--head|-H|--label|-l|--assignee|-a|--reviewer|-r|--milestone|-m`],
+    [String.raw`gh[ \t]+pr[ \t]+edit`, `${GH}|--title|-t|--base|-B|--milestone|-m`],
+    [String.raw`gh[ \t]+issue[ \t]+create`, `${GH}|--title|-t|--label|-l|--assignee|-a|--milestone|-m`],
+    [String.raw`gh[ \t]+issue[ \t]+edit`, `${GH}|--title|-t|--milestone|-m`],
+    [String.raw`gh[ \t]+(?:pr|issue)[ \t]+(?:comment|review)`, GH],
+    [String.raw`(?:grep|egrep|fgrep)`, '-[nivwxcHhrIE]*[ef]'],
+  ] as const
+).map(([head, flags]) => [new RegExp(`^${head}(?![\\w-])`), new RegExp(String.raw`(?:^|[ \t])(?:${flags})[ \t]+$`)])
+const hasQuotedFlag = (text: string, s: Step, shaped: string): boolean => {
+  const value = VALUE_FLAGS.find(([head]) => head.test(shaped))?.[1]
+  return s.quotes.some(([a, b]) => FLAG_SHAPE.test(text.slice(a, b)) && !value?.test(text.slice(s.start, a - 1)))
+}
 
 /** The text the rules match: the command with what a program only stores or prints blanked; null unless every step is certain and inert. */
 export const dataMask = (cmd: string): string | null => {

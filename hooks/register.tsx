@@ -1313,7 +1313,6 @@ export const register: Register = (on, options) => {
     // Only where a person answers the ask; a headless run keeps the card path.
     if (isCoordinator && e.approver === 'person') return { decision: 'ask', reason: S.askInChat(rule.label) }
     // Pending answers first: a revoke the person just gave must take its grant out before this check reads it.
-    // Pending answers first: a revoke the person just gave must take its grant out before this check reads it.
     await applyAnswers($)
     const l = await read($, local)
     const key = scoped(e.agentId, command)

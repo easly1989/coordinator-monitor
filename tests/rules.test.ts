@@ -134,6 +134,60 @@ test('a flag written in quotes, or joined from quoted parts, leaves the text unm
     expect(label(cmd)).toBe('merge')
 })
 
+test('a quoted flag with a blank in it, or split by a backslash-newline, leaves the text unmasked', () => {
+  const head = `cat > notes.md <<'EOF'\n${M}\nEOF\ngit add -N notes.md\n`
+  for (const cmd of [
+    // A here-doc to a .md file, then git diff writes a hook through quoted flags, one with a blank in it.
+    `${head}git diff '--output=.git/hooks/x y/../pre-commit' "--line-prefix=#!/bin/sh\n" "--output-indicator-new= " notes.md\ngit commit -m x`,
+    `git diff '--output=a b' '${M}'`,
+    // Double quotes drop a backslash-newline: the flag is whole to git.
+    `${head}git diff "--out\\\nput=.git/hooks/pre-commit" notes.md`,
+    `git diff "--out\\\nput=x" '${M}'`,
+    // Split before the first letter, where the shape of a flag is not yet there.
+    `git diff "--\\\noutput=x" '${M}'`,
+    `git diff "-\\\n-output=x" '${M}'`,
+    `${head}git diff "--\\\noutput=.git/hooks/pre-commit" notes.md`,
+  ])
+    expect(label(cmd)).toBe('merge')
+  expect(dataMask('git diff "--\\\noutput=x" notes.md')).toBe(null)
+})
+
+test('a quoted word is a value only after a value flag of its own tool', () => {
+  for (const cmd of [
+    `git commit -a '--template=x' -m '${M}'`,
+    `git commit --template '--x' -m '${M}'`,
+    `gh pr review -r '--x' -b '${M}'`,
+    `gh pr comment 5 -r '--x' -b '${M}'`,
+    `gh pr edit 5 -a '--x' -b '${M}'`,
+    `grep -m '--pre=sh' '${M}' x`,
+  ])
+    expect(label(cmd)).toBe('merge')
+  for (const cmd of [
+    `grep -n -e '-v' notes.md && echo '${M}'`,
+    `grep -ne '-v' notes.md && echo '${M}'`,
+    `gh pr create --title '-fix' --body '${M}'`,
+    `gh pr create -r '-x' -b '${M}'`,
+    `gh issue create -l '-x' -b '${M}'`,
+    `git commit -am '-x' -m '${M}'`,
+  ])
+    expect(label(cmd)).toBe(undefined)
+})
+
+test('a here-doc body that only looks like an end or a continuation stays masked', () => {
+  for (const cmd of [
+    // A line that starts with the end word and goes on with a word character is body.
+    `cat <<EOF\nEOFs are fine\n${M}\nEOF`,
+    `cat <<'EOF' > notes.md\nEOF.\n${M}\nEOF`,
+    // A path ending in a backslash does not hide a substitution: none is there.
+    `cat <<EOF\nsee C:\\repos\\\n${M}\nEOF`,
+    `cat > notes.md <<EOF\nC:\\Users\\\n${M}\nEOF`,
+  ])
+    expect(label(cmd)).toBe(undefined)
+  // The joined text is what the shell reads: `$` + `(` is a substitution, `EO` + `F` the end word.
+  expect(label(`cat <<EOF\n$\\\n(${M})\nEOF`)).toBe('merge')
+  expect(label(`cat <<EOF\nx\nEO\\\nF\n${M}\nEOF`)).toBe('merge')
+})
+
 test('PowerShell text is never masked', () => {
   expect(matchRule(DEFAULT_RULES, "echo 'git push origin main' -OutVariable c; iex \"$c\"", true)?.label).toBe('merge')
   expect(matchRule(DEFAULT_RULES, "echo 'gh pr merge 7'", true)?.label).toBe('merge')
