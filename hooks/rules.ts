@@ -91,7 +91,7 @@ const overflow = (rest: string): boolean => rest.trim().split(/\s+/).some((w, i)
 // A push to main (or of every branch), a forced one, or an alias set to run a merge or a push.
 // A refspec with a wildcard, a brace list or a bare `:` may name main without saying so; `-f` may sit in a bundle
 // of short flags (`-uf`).
-const PUSH = new RegExp(String.raw`${MAIN}|\s--(?:all|mirror)(?![\w-])|--force\b|\s-[a-z]*f[a-z]*(?![\w-])|\*|(?<!\$)\{|(?:^|\s)['"]?\+?:['"]?(?=\s|$)`, 'i')
+const PUSH = new RegExp(String.raw`${MAIN}|\s--(?:all|mirror)(?![\w-])|--force\b|\s-[a-z]*f[a-z]*(?![\w-])|(?<!refs\/tags\/)\*|(?<!\$)\{|(?:^|\s)['"]?\+?:['"]?(?=\s|$)`, 'i')
 const gitTail = (rest: string, m: RegExpExecArray): boolean => !m[2] || (/^(?:push|send-pack)$/i.test(m[2]) ? PUSH.test(rest) : aliasDefinesMerge(rest))
 
 export const DEFAULT_RULES: readonly Rule[] = [
@@ -474,7 +474,7 @@ const flatten = (text: string, isPowerShell: boolean): string => {
         out += c + (text[++i] ?? '')
         continue
       }
-      out += '|;&'.includes(c) ? '_' : c
+      out += '|;&'.includes(c) ? '_' : c === '\n' ? ' ' : c
     } else if (c === "'" || c === '"') {
       q = c
       out += c
@@ -491,9 +491,12 @@ export const matchRule = (rules: readonly Rule[], command: string, isPowerShell 
   if (isPowerShell) command = command.replace(/(?<=\s)--%(?=\s)/g, '')
   const text =(isPowerShell ? null : dataMask(command)) ?? command
   const flat = flatten(text, isPowerShell)
-  // A backslash (a backtick in PowerShell) before a line break joins the lines, in either line ending.
-  const joined = /[\\`]\r\n/.test(text) ? text.replace(/[\\`]\r\n/g, ' ') : text
-  const views = [...new Set([text, unquote(text, isPowerShell), flat, unquote(flat, isPowerShell), ...(joined === text ? [] : [joined, unquote(joined, isPowerShell)])])]
+  // A backslash, a backtick or a trailing comma before a line break joins the lines, in either line ending (the comma
+  // only continues a PowerShell line, but main matched across it in both shells, so the floor keeps it); a line break
+  // in quotes is flattened to a blank.
+  const joined = text.replace(/[\\`,][ \t]*\r?\n/g, ' ')
+  const lines = joined === text ? [] : [joined, flatten(joined, isPowerShell)]
+  const views = [...new Set([text, flat, ...lines].flatMap(v => [v, unquote(v, isPowerShell)]))]
   return rules.find(r => views.some(v => r.re.test(v)))
 }
 

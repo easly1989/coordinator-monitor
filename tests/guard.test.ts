@@ -452,3 +452,16 @@ test('round 10: a quoted word after a value flag is read in linear time', () => 
   for (const s of [fill(" -m '-x'", 'git commit'), fill(" -b '-x'", 'gh pr create'), fill(" -e '-x'", 'grep'), fill(" -m '-x' -m '-y'", 'git commit')])
     for (const run of [() => sh(s), () => sh(s, 'PowerShell')]) expect(Math.min(took(run), took(run), took(run))).toBeLessThan(200)
 })
+
+test('round 11: an alternate-data-stream strip is linear, and a glob, a custom bus and a read of the .claude folder are judged', () => {
+  const s = 'aa:'.repeat(21800) + ' '
+  for (const tool of ['Bash', 'PowerShell']) expect(Math.min(took(() => sh(s, tool)), took(() => sh(s, tool)), took(() => sh(s, tool)))).toBeLessThan(200)
+  const at = (command: string, base: string, tool = 'Bash') => touchesBus({ tool, input: { command }, isReadOnly: false }, base, HOME)
+  for (const cmd of [`cd ~/${D} && echo x > co*r/rules.json`, `cd ~/${D} && rm -rf ./[c]oordinator-monitor`, `cd ~/${D} && touch {c,}oordinator-monitor/answers/x.json`, `cd ~/${D} && rm -rf ./*/answers`, `cd ~/${D} && rm -rf *`, `cd ~/${D} && cp x ${CM}/rules.json`, `cd ~/${D} && cd ${CM} && echo x > rules.json`, `cd ~/${D} && echo x > ${CM}/rules.json`, `cd ~/${D} && tar xzf dl.tgz`]) expect(sh(cmd)).toBe(true)
+  expect(sh(`Set-Location $HOME/${D}; Remove-Item -Recurse c?ordinator-monitor`, 'PowerShell')).toBe(true)
+  for (const cmd of [`cd ~/${D} && cp settings.json settings.bak`, `cd ${D} && mv settings.local.json x.json`, `cd ~/${D} && ls ${CM}`, 'ln -sf ../.env.$NODE_ENV .env', `cd ~/${D} && cp *.json bak/`]) expect(sh(cmd)).toBe(false)
+  expect(at('echo x > /d/bus/rules.json', 'D:/bus')).toBe(true)
+  expect(at('cd /d/bus && echo x > rules.json', 'D:/bus')).toBe(true)
+  expect(at('echo x >~/bus/rules.json', 'C:/Users/carlo/bus')).toBe(true)
+  expect(at('echo x > /d/other/rules.json', 'D:/bus')).toBe(false)
+})

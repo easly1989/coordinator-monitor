@@ -10,7 +10,7 @@ export const SHELL_TOOLS = new Set(['Bash', 'PowerShell'])
 export type BusCall = { tool: string; input?: unknown; isReadOnly?: boolean }
 
 // Every way to say the home folder, then one separator and one case.
-const HOME = /\$\{home\}|\$home(?![\w])|\$env:(?:userprofile|home)(?![\w])|\$\{env:(?:userprofile|home)\}|%userprofile%|(?<=^|[\s;&|('"=:])~(?=$|[\s/'";&|)])/g
+const HOME = /\$\{home\}|\$home(?![\w])|\$env:(?:userprofile|home)(?![\w])|\$\{env:(?:userprofile|home)\}|%userprofile%|(?<=^|[\s;&|('"=:<>])~(?=$|[\s/'";&|)])/g
 // A device prefix (`\.\C:\`, `\?\C:\`, `\?\UNC\host\`) and an administrative share (`\localhost\C$\`) name the same
 // drive: they are dropped at the start of a word, in `/` spelling.
 const DEVICE = /(?<=^|[\s;&|('"=])\/\/[.?]\/(?:unc\/[^/\s]+\/)?/g
@@ -59,10 +59,34 @@ const clean = (text: string, home: string, spaces = false): string => {
   // A blank at the end of a segment is dropped too, but only in the view that reads names with blanks in them.
   if (spaces) s = s.replace(/(?<=claude(?:~\d)?) +(?=\/)/g, '')
   // A drive (`>>D:/bus`, `--target-directory=D:/bus`) is a letter that starts a word, then a bare colon: it stays.
-  s = s
-    .replace(/(?<=[^/\s.])\.+(?=\/|$)/g, '')
-    .replace(/(?<=[^/\s:($'"\]]{2})(?::[^/\s:()'",\]]*)+(?=\/|$)/g, (m, at: number, all: string) => (m === ':' && /[a-z]/.test(all[at - 1] ?? '') && !/[\w.~-]/.test(all[at - 2] ?? '') ? m : ''))
-  return collapse(s, spaces)
+  return collapse(streams(s.replace(/(?<=[^/\s.])\.+(?=\/|$)/g, '')), spaces)
+}
+
+/**
+ * Drops the stream suffixes: a run of `:name` after two characters that are no separator, ending at a `/` or at the
+ * end of the text (a lone `:` after a letter that starts a word is a drive and stays). One pass, a run is measured
+ * once: a regex that backtracks over the run from every colon is quadratic.
+ */
+const streams = (s: string): string => {
+  const lead = /[/\s:($'"\]]/
+  const stop = /[/\s()'",\]]/
+  let out = ''
+  let last = 0
+  let end = -1
+  let ok = false
+  for (let p = s.indexOf(':'); p >= 0; p = s.indexOf(':', p + 1)) {
+    if (p < 2 || lead.test(s[p - 1] ?? '') || lead.test(s[p - 2] ?? '')) continue
+    if (p >= end) {
+      end = p + 1
+      while (end < s.length && !stop.test(s[end] ?? '')) end++
+      ok = end === s.length || s[end] === '/'
+    }
+    if (!ok) continue
+    out += s.slice(last, p) + (end === p + 1 && /[a-z]/.test(s[p - 1] ?? '') && !/[\w.~-]/.test(s[p - 2] ?? '') ? ':' : '')
+    last = end
+    p = end - 1
+  }
+  return out + s.slice(last)
 }
 
 // The folder `.claude` by name, or by its 8.3 name `CLAUDE~1`, as a whole path segment.
@@ -95,7 +119,15 @@ const DEST_GLUED = /^-[cdto]([^-].*)$/
 const EXTGLOB = /[@*+?!]\([^\s)]*\)?/g
 const WORDS = /[\s;&|('")=]+/
 const base = (w: string): string => w.slice(w.lastIndexOf('/') + 1).replace(/\.exe$/, '')
-const hasCopy = (s: string): boolean => s.split(WORDS).some(w => COPY.has(base(w)))
+// A step that only prints or tests: it writes nothing unless it redirects or runs a substitution.
+const READ = new Set(['ls', 'dir', 'cat', 'type', 'head', 'tail', 'less', 'more', 'stat', 'wc', 'grep', 'rg', 'tree', 'du', 'pwd', 'echo', 'printf', 'test', '[', '[[', 'get-childitem', 'gci', 'get-content', 'gc', 'get-item', 'gi', 'test-path', 'select-string', 'sls'])
+const readOnly = (step: string): boolean => !/[>`]|\$\(|<\(/.test(step) && READ.has(base(step.split(WORDS).find(Boolean) ?? ''))
+// After a `cd` into the `.claude` folder: a word whose first part, through a glob, a class or a brace, could be the bus folder.
+const globbed = (step: string): boolean =>
+  step.split(WORDS).some(w => {
+    const seg = w.replace(/^\d?[<>]+/, '').replace(/^\.\//, '').split('/')[0] ?? ''
+    return /[*?[{]/.test(seg) && globs(seg, CM_NAMES)
+  })
 
 // Matching a glob needs no regex (a regex built from the text can be made to take seconds): `*` any run, `?` one
 // character, `[a-c]` / `[!x]` a class. A class with a POSIX name inside matches anything.
@@ -184,17 +216,24 @@ const expand = (s: string, left = { n: 64 }): string[] | null => {
  * piece at a time: nothing here backtracks.
  */
 const SUB = '\u0001'
-const couldBeD = (seg: string): boolean => {
-  // A substitution stands for any text: in a segment of its own it is judged by the one after it.
-  if (seg.includes(SUB)) return seg.length > 1 && (/^[.\u0001]/.test(seg) || seg.includes('claud'))
-  if (!/[*?[{$`]/.test(seg) || !(seg.startsWith('.') || seg.includes('claud') || /^[[{]/.test(seg))) return false
-  if (/[$`]/.test(seg) || seg.length > 256) return true
+const D_NAMES = ['.claude', 'claude~1']
+const CM_NAMES = ['coordinator-monitor', 'coordi~1']
+/** A segment with a glob, a class or a brace that could spell one of `names`. */
+const globs = (seg: string, names: string[]): boolean => {
   // A brace sequence (`{a..z}`) and a PowerShell format slot (`{0}`) stand for any text.
   const words = expand(seg.replace(/\{[^{},]*\.\.[^{},]*\}|\{\d+\}/g, '*'))
   return !words || words.some(w => {
     const t = tokens(w)
-    return !t || wild(t, '.claude') || wild(t, 'claude~1')
+    return !t || names.some(n => wild(t, n))
   })
+}
+const couldBeD = (seg: string): boolean => {
+  // A substitution stands for any text: in a segment of its own it is judged by the one after it.
+  if (seg.includes(SUB)) return seg.length > 1 && (/^[.\u0001]/.test(seg) || seg.includes('claud'))
+  if (!/[*?[{$`]/.test(seg) || !(seg.startsWith('.') || seg.includes('claud') || /^[[{]/.test(seg))) return false
+  if (seg.length > 256) return true
+  // A variable or a command substitution stands for any text, like `*`.
+  return globs(seg.replace(/\$(?:\{[^}]*\}?|[\w?@*#!$-]*)|`[^`]*`?/g, '*'), D_NAMES)
 }
 
 // A word that names the folder through a glob, a class, a brace, a variable or a substitution: `.cl[^x]ude/`,
@@ -348,7 +387,7 @@ const cdThen = (s: string, home: string, own: string[]): boolean => {
     const target = CD_TARGET.exec(s)?.[0] ?? ''
     if (isD(target, home)) {
       const rest = s.slice(at + target.length)
-      return AFTER_CD.test(rest) || hasCopy(rest)
+      return rest.split(/[;&|\n]+/).some(st => !readOnly(st) && (AFTER_CD.test(st) || globbed(st))) || copySteps(rest, home).some(st => bulk(st.cmd, st.args) || st.dests.some(d => /^\.{1,2}\/?$/.test(d)))
     }
     if (seen || !above(target, own, home)) continue
     seen = true
@@ -371,7 +410,9 @@ export const touchesBus = (e: BusCall, base: string, home: string): boolean => {
   if (e.isReadOnly) return false
   const h = home.toLowerCase()
   const b = clean(base, h)
-  const names = (s: string) => NAMES.test(s) || (!!b && s.includes(b))
+  // A drive also reads `/d/…` (MSYS, `/mnt/d/…`).
+  const bm = b.replace(/^([a-z]):\//, '/$1/')
+  const names = (s: string) => NAMES.test(s) || (!!b && (s.includes(b) || s.includes(bm)))
   // The floor: the text as written, with one separator and one case, no other reading. Whatever the file system makes
   // of `..`, a dot, a colon or a name with odd characters in it, a text that holds the folder's path stays a hit.
   const flat = (s: string) => names(s.toLowerCase().replace(/[\\/]+/g, '/'))

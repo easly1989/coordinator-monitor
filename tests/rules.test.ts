@@ -445,3 +445,17 @@ test('round 10: a quoted word after a value flag is read in linear time, and the
   expect(dataMask("git commit -m'--x'")).toBe(null)
   expect(dataMask("grep -e '-v' file")).not.toBe(null)
 })
+
+test('round 11: a trailing comma, a backtick or a quoted line break does not split a protected command from its branch', () => {
+  const ps = (cmd: string) => matchRule(DEFAULT_RULES, cmd, true)?.label
+  for (const b of ['main', 'master', '+main', 'HEAD:main']) for (const nl of ['\n', '\r\n']) expect(ps(`git push origin feat,${nl}${b}`)).toBe('merge')
+  expect(ps('docker compose ps,\ndown')).toBe('restart')
+  expect(ps('git push origin `\nmain')).toBe('merge')
+  expect(label('git push origin feat,\nmain')).toBe('merge')
+  expect(label('git push --receive-pack="git-receive-pack\n" origin main')).toBe('merge')
+  expect(label('git push origin \\\nmain')).toBe('merge')
+  expect(label('git push --receive-pack="git-receive-pack\n" origin feat')).toBeUndefined()
+  expect(label('git push origin feat')).toBeUndefined()
+  expect(label('git push origin refs/tags/*')).toBeUndefined()
+  expect(label('git push origin refs/heads/*')).toBe('merge')
+})
