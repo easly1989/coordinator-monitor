@@ -10,7 +10,7 @@ export const SHELL_TOOLS = new Set(['Bash', 'PowerShell'])
 export type BusCall = { tool: string; input?: unknown; isReadOnly?: boolean }
 
 // Every way to say the home folder, then one separator and one case.
-const HOME = /\$\{home\}|\$home(?![\w])|\$env:(?:userprofile|home)(?![\w])|\$\{env:(?:userprofile|home)\}|%userprofile%|(?<=^|[\s;&|('"=:<>])~(?=$|[\s/'";&|)])/g
+const HOME = /\$\{home\}|\$home(?![\w])|\$env:(?:userprofile|home)(?![\w])|\$\{env:(?:userprofile|home)\}|%userprofile%|(?<=^|[\s;&|('"=:<>])~(?:[a-z_][\w.-]*)?(?=$|[\s/'";&|)])/g
 // A device prefix (`\.\C:\`, `\?\C:\`, `\?\UNC\host\`) and an administrative share (`\localhost\C$\`) name the same
 // drive: they are dropped at the start of a word, in `/` spelling.
 const DEVICE = /(?<=^|[\s;&|('"=])\/\/[.?]\/(?:unc\/[^/\s]+\/)?/g
@@ -52,6 +52,8 @@ const clean = (text: string, home: string): [string, string] => {
   const s = drive(
     text
       .toLowerCase()
+      // A `cd` with no target (or only `--`) goes home, as `cd ~` does.
+      .replace(/(?<=^|[\s;&|(])cd(?:[ \t]+--)?(?=[ \t]*(?:$|[;&|)\n]))/g, 'cd ~')
       // `-Path:value` is `-Path value`.
       .replace(/(?<=^|[\s;&|(])(-[a-z]+):(?=\S)/g, '$1 ')
       .replace(/\\/g, '/')
@@ -557,6 +559,8 @@ export const touchesBus = (e: BusCall, base: string, home: string): boolean => {
     })()
   }
   const ps = e.tool === 'PowerShell'
+  // No shell runs a command line this long (a Linux word stops at 128 KiB, Windows at 32 KiB): not read, denied.
+  if (i.command.length > 131072) return true
   // PowerShell joins two strings with `+`: 'coord' + 'inator-monitor', in any mix of quotes, with a comment, a
   // continuation line or a closing parenthesis between the pieces.
   const raw = ps ? i.command.replace(/(['"])\s*\+\s*['"]/g, '') : i.command

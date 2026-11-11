@@ -629,3 +629,23 @@ test('round 13: tree -o writes a file, so it is not read-only', () => {
   expect(sh(`cd ~/${D} && tree -o ${CM}/rules.json .`)).toBe(true)
   expect(sh(`cd ~/${D} && tree -L 2`)).toBe(false)
 })
+
+test('round 16: a bare cd, cd -- and a ~user are the home folder', () => {
+  for (const cmd of ['cd && tar xzf /tmp/p.tgz', 'cd; tar xzf /tmp/p.tgz', 'cd -- && tar xzf /tmp/p.tgz', 'cd && cp -r /tmp/s/. .', 'cd && unzip -o /tmp/p.zip', 'cd && rsync -a /tmp/s/ ./', 'cd ~carlo && tar xzf /tmp/p.tgz', 'tar xf /tmp/p.tar -C ~carlo', 'cp -r /tmp/s/. ~carlo/'])
+    expect(sh(cmd)).toBe(true)
+  for (const cmd of ['cd && ls', 'cd && tar czf /tmp/b.tgz .', 'cd /tmp && tar xzf p.tgz', 'tar xf /tmp/p.tar -C /tmp/out']) expect(sh(cmd)).toBe(false)
+})
+
+test('round 16: 64 KB of an unmatched quote or backslash after the name is judged in under 250 ms', () => {
+  const bt = String.fromCharCode(96)
+  const cases: [string, string][] = [['PowerShell', `+'${CM}*<#`], ['Bash', bt + CM + BS], ['Bash', BS + D + ' ' + CM], ['Bash', `${CM}*'`], ['PowerShell', CM + "'"]]
+  for (const [tool, unit] of cases) expect(fast(() => sh(unit.repeat(Math.ceil(65536 / unit.length)), tool))).toBeLessThan(250)
+  // A command no shell can run (over 128 KiB) is not read: denied at once, whatever it holds.
+  for (const [tool, unit] of cases) {
+    const big = unit.repeat(Math.ceil(300000 / unit.length))
+    expect(fast(() => sh(big, tool))).toBeLessThan(50)
+    expect(sh(big, tool)).toBe(true)
+  }
+  expect(sh('x '.repeat(70000))).toBe(true)
+  expect(sh('x '.repeat(60000))).toBe(false)
+})

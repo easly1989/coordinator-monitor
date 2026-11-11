@@ -81,28 +81,39 @@ const aliasDefinesMerge = (rest: string): boolean => {
 }
 // `gh` or `gh.exe`, after a path and quotes or not.
 const GH_CMD = String.raw`\bgh(?:\.exe)?['"]?\s+`
+// The repository flag, which `gh` takes before or after `pr`: `-R o/r`, `-Ro/r`, `-R=o/r`, `--repo o/r`, `--repo=o/r`, each
+// followed by a blank. The separators start differently, so a text has one reading.
+const GH_REPO = String.raw`(?:--repo(?:=|\s+)${V}\s+|-R(?:\s+|=|(?=[^\s=]))${V}\s+)`
 // A `gh api` call that merges (the merge endpoints), or writes the main branch (a method other than GET, or a field,
 // which makes it a POST).
 const API_WRITE = /(?:-X|--method)[ =]\s*['"]?(?:PATCH|POST|PUT|DELETE)|\s(?:-[fF]|--(?:raw-)?field|--input)/i
 const apiTail = (rest: string): boolean =>
   /\bpulls\/[^/\s]+\/merge\b|\/merges(?![\w-])/i.test(rest) || (/\bgit\/refs\/heads\/(?:main|master)(?![\w/-])/i.test(rest) && API_WRITE.test(rest))
-// More than 8 words between `git -x` and a merge or a push: read as one.
-const overflow = (rest: string): boolean => rest.trim().split(/\s+/).some((w, i) => i >= 8 && /^(?:merge|push)(?![-\w])/i.test(w))
+// After 8 options and any number more, a merge or a push as the subcommand: read as one. Only the options are
+// walked (a word of a commit message is no subcommand), each read as the rule above reads it.
+const MORE_OPT = new RegExp(String.raw`\s+${OPT}`, 'y')
+const SUB = /\s+(?:merge|push)(?![-\w])/iy
+const overflow = (rest: string): boolean => {
+  let p = 0
+  for (MORE_OPT.lastIndex = 0; MORE_OPT.test(rest); ) p = MORE_OPT.lastIndex
+  SUB.lastIndex = p
+  return SUB.test(rest)
+}
 // A push to main (or of every branch), a forced one, or an alias set to run a merge or a push.
 // A refspec with a wildcard, a brace list or a bare `:` may name main without saying so; `-f` may sit in a bundle
 // of short flags (`-uf`).
-const PUSH = new RegExp(String.raw`${MAIN}|\s--(?:al(?:l)?|b(?:r(?:a(?:n(?:c(?:h(?:e(?:s)?)?)?)?)?)?)?|m(?:i(?:r(?:r(?:o(?:r)?)?)?)?)?)(?![\w-])|--force\b|\s-[a-z]*f[a-z]*(?![\w-])|(?<!refs\/tags\/)\*|(?<!\$)\{|(?:^|\s)['"]?\+?:['"]?(?=\s|$)`, 'i')
+const PUSH = new RegExp(String.raw`${MAIN}|\s--(?:al(?:l)?|b(?:r(?:a(?:n(?:c(?:h(?:e(?:s)?)?)?)?)?)?)?|m(?:i(?:r(?:r(?:o(?:r)?)?)?)?)?)(?![\w-])|--force\b|\s-[a-z]*f[a-z]*(?![\w-])|(?<!refs\/tags\/)\*|(?<!\$)\{|(?:^|\s)['"]?\+?:['"]?(?=\s|$)|(?:^|\s)['"]?\+(?=[^\s'"])`, 'i')
 const gitTail = (rest: string, m: RegExpExecArray): boolean => !m[2] || (/^(?:push|send-pack)$/i.test(m[2]) ? PUSH.test(rest) : aliasDefinesMerge(rest))
 
 export const DEFAULT_RULES: readonly Rule[] = [
   // merges and pushes to the main line
-  D('merge', String.raw`${GH_CMD}pr\s+merge\b`),
+  D('merge', String.raw`${GH_CMD}${GH_REPO}{0,4}pr\s+${GH_REPO}{0,4}merge\b`),
   // An alias set to run a merge: what it runs is not read.
   afterRule('merge', String.raw`${GH_CMD}alias\s+set\b`, /merge/i),
   afterRule('merge', String.raw`${GIT}(?:(merge)(?![-\w])|(push|send-pack|config)\b)`, gitTail),
   // More than 8 options before the subcommand: it is not read, so a merge or a push after them is taken as one.
   // An alias defined on the command line (`-c alias.mm=merge`): what it runs is not read.
-  afterRule('merge', String.raw`\bgit(?:\.exe)?['"]?\s+-\S*`, overflow),
+  afterRule('merge', String.raw`\bgit(?:\.exe)?['"]?(?:\s+${OPT}){8}(?=\s|$)`, overflow),
   afterRule('merge', String.raw`\bgit\b`, new RegExp(String.raw`\s(?:-c|--config-env)[ =]?\s*['"]?(?:alias\.|${PUSH_KEY})`, 'i')),
   afterRule('merge', String.raw`${GH_CMD}api\b`, apiTail),
   // deploys and releases

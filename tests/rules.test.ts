@@ -336,10 +336,13 @@ test('a merge hidden behind a git option, an alias, a quoted pipe or a ref spell
 test('a long run of git options is matched in linear time and fails toward a match', () => {
   const t = performance.now()
   const bounded = label('git' + ' --git-dir'.repeat(32) + ' x')
-  const merged = label('git' + ' --git-dir'.repeat(32) + ' x merge')
+  const merged = label('git' + ' --git-dir'.repeat(32) + ' merge')
+  const word = label('git' + ' --git-dir'.repeat(32) + ' x merge')
   expect(performance.now() - t).toBeLessThan(200)
   expect(bounded).toBe(undefined)
   expect(merged).toBe('merge')
+  // Only options are walked: a word after them is the subcommand, and `merge` after it a word of its message.
+  expect(word).toBe(undefined)
 })
 
 const BS = String.fromCharCode(92)
@@ -483,4 +486,22 @@ test('round 12: a line break inside an open substitution or group does not end t
   expect(ps('git push origin (\necho feat\n)')).toBeUndefined()
   expect(label('git push origin $(\necho feat\n)')).toBeUndefined()
   expect(label('echo $(date)\ngit push origin feat')).toBeUndefined()
+})
+
+test('round 16: a repo flag before merge, a + refspec, and a -C or -c commit message are judged right', () => {
+  const cases = ['gh pr -R o/r merge 5', 'gh pr --repo o/r merge 5', 'gh pr --repo=o/r merge 5 --squash', 'gh -R o/r pr merge 5', 'gh.exe pr -R o/r merge 5', 'gh pr -Ro/r merge 5']
+  for (const c of cases) {
+    expect(label(c)).toBe('merge')
+    expect(ps(c)).toBe('merge')
+  }
+  expect(label('gh pr -R o/r view 5')).toBe(undefined)
+  for (const c of ['git push origin +feature', 'git push origin +HEAD:refs/heads/feature', "git push origin '+refs/heads/x:refs/heads/x'", 'git push origin "+feat"']) {
+    expect(label(c)).toBe('merge')
+    expect(ps(c)).toBe('merge')
+  }
+  expect(label('git push origin feature')).toBe(undefined)
+  for (const c of ['git -C ../wt commit -m "docs: explain why the hook asks before a merge"', 'git -c user.name=a commit -m "docs: ask after each merge"', 'git -C C:/repos/x log --oneline -- src merge']) expect(label(c)).toBe(undefined)
+  expect(label('git -C ../wt merge x')).toBe('merge')
+  expect(label('git' + ' -p'.repeat(9) + ' merge x')).toBe('merge')
+  expect(label('git' + ' -p'.repeat(9) + ' push origin main')).toBe('merge')
 })
