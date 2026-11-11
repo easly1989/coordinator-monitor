@@ -482,3 +482,63 @@ test('round 12: a long word after a cd into the .claude folder is judged in line
   for (const cmd of [`cd ~/${D} && rm -rf [c]oordinator-monitor`, `cd ~/${D} && rm -rf "c"*`, `cd ~/${D} && rm -rf {c,x}*`, `cd ~/${D} && rm -rf c${BS}o*`]) expect(sh(cmd)).toBe(true)
   expect(sh(`cd ~/${D}; ri c${String.fromCharCode(96)}oord*`, 'PowerShell')).toBe(true)
 })
+
+test('round 13: a hostile 64 KB input is judged in under 250 ms, and never allowed under a cd into the folder', () => {
+  const soup = `*[${'b'.repeat(185)}]{${','.repeat(60)}}`
+  const words = (suffix: string) => {
+    let s = ''
+    while (s.length < 65536) s += `${soup}${suffix} `
+    return s
+  }
+  const pre = 'rm a' + BS + 'b "q" @(x) c d/.. ; '
+  const cases: [string, boolean][] = [
+    [`cd ~/${D} && rm ` + words(''), true],
+    [`cd ~/${D} && ` + pre + words(''), true],
+    [pre + words('/x').replace(/\*\[/g, '.*['), false],
+  ]
+  for (const [cmd, under] of cases) {
+    expect(fast(() => sh(cmd))).toBeLessThan(250)
+    if (under) expect(sh(cmd)).toBe(true)
+  }
+})
+
+test('round 13: a path built with Join-Path, -join or Combine that could name the folder is a hit', () => {
+  const p = (cmd: string) => sh(cmd, 'PowerShell')
+  const dir = `$HOME,'${D}','${CM}','rules.json'`
+  for (const cmd of [
+    `Set-Content (Join-Path ~/${D} 'coordi*/rules.json') x`,
+    `Set-Content ((${dir}) -join '/') x`,
+    `Set-Content ('~/${D}', 'coordi*/rules.json' -join '/') x`,
+    `[IO.Path]::Combine($HOME,'${D}','c*','rules.json')`,
+    `Set-Content ('~/${D}', 'coord' -join '/') x`,
+  ])
+    expect(p(cmd)).toBe(true)
+  expect(p(`Set-Content (Join-Path ~/docs 'notes.txt') x`)).toBe(false)
+  expect(p(`$a = ('x','y') -join ','; Write-Output $a`)).toBe(false)
+})
+
+test('round 13: an abbreviated PowerShell destination parameter is read as the destination', () => {
+  const p = (cmd: string) => sh(cmd, 'PowerShell')
+  expect(p(`Copy-Item -Destin ~/${D} -Recurse -Force -Path C:/tmp/x/${CM}`)).toBe(true)
+  expect(p(`Expand-Archive -DestinationPa ~/${D} -Path C:/tmp/x.zip -Force`)).toBe(true)
+  expect(p(`Copy-Item -Destin C:/tmp/y -Recurse -Path C:/tmp/x`)).toBe(false)
+})
+
+test('round 13: a cd into the folder followed by an archive or a copy out of it is not a hit; one into it still is', () => {
+  for (const cmd of [`cd ~/${D} && tar -czf /tmp/b.tgz .`, `cd ~/${D} && 7z a /tmp/b.7z .`, `cd ~/${D} && cp -r . /tmp/backup`, `cd ~/${D} && rsync -a ./ /tmp/backup/`]) expect(sh(cmd)).toBe(false)
+  expect(sh(`Set-Location ~/${D}; Compress-Archive -Path * -DestinationPath C:/tmp/b.zip`, 'PowerShell')).toBe(false)
+  for (const cmd of [`cd ~/${D} && tar -xzf x.tgz`, `cd ~/${D} && cp -r /tmp/x .`, `cd ~/${D} && tar -czf ${CM}/x.tgz .`]) expect(sh(cmd)).toBe(true)
+})
+
+test('round 13: python zipfile and tarfile extracts and ExtractToDirectory write their destination', () => {
+  expect(sh(`python -m zipfile -e /tmp/x.zip ~/${D}`)).toBe(true)
+  expect(sh(`python3 -m tarfile -e /tmp/x.tar ~/${D}`)).toBe(true)
+  expect(sh(`python -m zipfile -e /tmp/x.zip /tmp/out`)).toBe(false)
+  expect(sh(`[IO.Compression.ZipFile]::ExtractToDirectory('C:/tmp/x.zip', '~/${D}')`, 'PowerShell')).toBe(true)
+  expect(sh(`[IO.Compression.ZipFile]::ExtractToDirectory('C:/tmp/x.zip', 'C:/tmp/out')`, 'PowerShell')).toBe(false)
+})
+
+test('round 13: tree -o writes a file, so it is not read-only', () => {
+  expect(sh(`cd ~/${D} && tree -o ${CM}/rules.json .`)).toBe(true)
+  expect(sh(`cd ~/${D} && tree -L 2`)).toBe(false)
+})

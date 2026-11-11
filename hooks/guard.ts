@@ -115,13 +115,23 @@ const COPY = new Set(['cp', 'mv', 'install', 'rsync', 'ln', 'ditto', 'scp', 'tar
 const EVERY_WORD = new Set(['copy', 'xcopy', 'robocopy', 'move'])
 const DEST_FLAG = /^--?(?:directory|target-directory|destination(?:path)?|dest|dp|[cdto])$/
 const DEST_GLUED = /^-[cdto]([^-].*)$/
+// A PowerShell parameter may be cut to any prefix that no other one shares (`-Destin`, `-DestinationPa`): any prefix
+// of `-DestinationPath` names the destination here, `-d` included.
+const PS_COPY = new Set(['copy-item', 'move-item', 'cpi', 'mi', 'expand-archive'])
+const destFlag = (cmd: string, w: string): boolean => DEST_FLAG.test(w) || (PS_COPY.has(cmd) && /^-[a-z]+$/.test(w) && 'destinationpath'.startsWith(w.slice(1)))
+const EXTRACT_DIR = /extracttodirectory$/
 // An extended glob (`@(a|b)`, `*(x)`, `+(x)`, `?(x)`, `!(x)`) may match anything.
 const EXTGLOB = /[@*+?!]\([^\s)]*\)?/g
 const WORDS = /[\s;&|('")=]+/
 const base = (w: string): string => w.slice(w.lastIndexOf('/') + 1).replace(/\.exe$/, '')
 // A step that only prints or tests: it writes nothing unless it redirects or runs a substitution.
 const READ = new Set(['ls', 'dir', 'cat', 'type', 'head', 'tail', 'less', 'more', 'stat', 'wc', 'grep', 'rg', 'tree', 'du', 'pwd', 'echo', 'printf', 'test', '[', '[[', 'get-childitem', 'gci', 'get-content', 'gc', 'get-item', 'gi', 'test-path', 'select-string', 'sls'])
-const readOnly = (step: string): boolean => !/[>`]|\$\(|<\(/.test(step) && READ.has(base(step.split(WORDS).find(Boolean) ?? ''))
+// `tree -o file` writes the file.
+const readOnly = (step: string): boolean => {
+  const words = step.split(WORDS).filter(Boolean)
+  const cmd = base(words[0] ?? '')
+  return !/[>`]|\$\(|<\(/.test(step) && READ.has(cmd) && !(cmd === 'tree' && words.some(w => /^-[a-z]*o/.test(w) || w.startsWith('--output')))
+}
 // After a `cd` into the `.claude` folder: a word whose first part, through a glob, a class or a brace, could be the bus folder.
 const globbed = (step: string): boolean =>
   step.split(WORDS).some(w => {
@@ -146,7 +156,8 @@ const tokens = (p: string): string[] => {
         out.push('*')
         break
       }
-      out.push(p.slice(n, e + 1))
+      // A long class is read as `?` (any one character): it may match more than it says, never less.
+      out.push(e - n > 32 ? '?' : p.slice(n, e + 1))
       n = e
     } else out.push(p[n] ?? '')
   }
@@ -228,9 +239,12 @@ const SUB = '\u0001'
 const D_NAMES = ['.claude', 'claude~1']
 const CM_NAMES = ['coordinator-monitor', 'coordi~1']
 /** A segment with a glob, a class or a brace that could spell one of `names`. */
+// The work one call may spend reading globs, in characters read; past it every glob is a hit (denied, never allowed).
+let work = 0
+const BUDGET = 400_000
 const globs = (seg: string, names: string[]): boolean => {
   // A long word is not read (the brace regex below backtracks on one): it is a hit.
-  if (seg.length > 256) return true
+  if (seg.length > 256 || (work += seg.length) > BUDGET) return true
   // A brace sequence (`{a..z}`) and a PowerShell format slot (`{0}`) stand for any text.
   const left = { n: 64 }
   const words = expand(seg.replace(/\{[^{},]*\.\.[^{},]*\}|\{\d+\}/g, '*'), left)
@@ -239,7 +253,8 @@ const globs = (seg: string, names: string[]): boolean => {
   if (!words) return left.n < 0 || /claud|coord|\{\./.test(seg)
   return words.some(w => {
     const t = tokens(w)
-    return names.some(n => wild(t, n))
+    // A match costs up to a name's length for each token.
+    return (work += t.length * 20) > BUDGET || names.some(n => wild(t, n))
   })
 }
 const couldBeD = (seg: string): boolean => {
@@ -353,8 +368,21 @@ const copySteps = (s: string, home: string): Step[] => {
   const out: Step[] = []
   for (const step of s.split(/[;&|\n]+/)) {
     const words = step.split(WORDS)
-    const at = words.findIndex(w => COPY.has(base(w)))
+    // `python -m zipfile -e <zip> <dest>`, and `-m tarfile -e <tar> [<dest>]` (the current folder when none).
+    const py = words.findIndex((w, k) => (w === 'zipfile' || w === 'tarfile') && words[k - 1] === '-m')
+    if (py > 0 && /^(?:-e|--extract)$/.test(words[py + 1] ?? '')) {
+      const dest = words[py + 3]
+      out.push({ cmd: 'pyextract', args: words.slice(py + 1).filter(Boolean), dests: [dest || '.'], flagged: !!dest })
+      continue
+    }
+    const at = words.findIndex(w => COPY.has(base(w)) || EXTRACT_DIR.test(w))
     if (at < 0) continue
+    // `[IO.Compression.ZipFile]::ExtractToDirectory(src, dest)`: every argument after the first.
+    if (EXTRACT_DIR.test(words[at] ?? '')) {
+      const args = words.slice(at + 1).flatMap(w => w.split(',')).filter(Boolean)
+      out.push({ cmd: 'extracttodirectory', args, dests: args.slice(1), flagged: true })
+      continue
+    }
     const cmd = base(words[at] ?? '')
     const args = words.slice(at + 1).filter(Boolean)
     const dests = EVERY_WORD.has(cmd) ? [...args] : [args.filter(w => !w.startsWith('-')).pop() ?? '']
@@ -362,7 +390,7 @@ const copySteps = (s: string, home: string): Step[] => {
     args.forEach((w, k) => {
       // `unzip -o` is "overwrite": only `-d` names its folder.
       if (cmd === 'unzip' && !w.startsWith('-d')) return
-      if (DEST_FLAG.test(w)) {
+      if (destFlag(cmd, w)) {
         dests.push(args[k + 1] ?? '')
         flagged = true
       }
@@ -378,13 +406,32 @@ const copySteps = (s: string, home: string): Step[] => {
 }
 
 // An extract puts a tree in its destination folder: the current one when none is named.
-const EXTRACT = new Set(['tar', 'bsdtar', 'unzip', '7z', '7za', '7zr', 'expand-archive'])
+const EXTRACT = new Set(['tar', 'bsdtar', 'unzip', '7z', '7za', '7zr', 'expand-archive', 'pyextract', 'extracttodirectory'])
 const bulk = (cmd: string, args: string[]): boolean => {
+  if (cmd === 'pyextract' || cmd === 'extracttodirectory') return true
   if (cmd === 'tar' || cmd === 'bsdtar') return args.some(w => /^-[a-z]*x[a-z]*$/.test(w) || w === '--extract' || w === '--get') || /^[a-z]*x[a-z]*$/.test(args[0] ?? '')
   if (/^7z[ar]?$/.test(cmd)) return /^[xe]$/.test(args[0] ?? '')
   if (cmd === 'cp' || cmd === 'copy-item' || cmd === 'cpi') return args.some(w => (/^-[a-z]{1,3}$/.test(w) && /[ra]/.test(w)) || w === '--recursive' || w === '--archive' || w.startsWith('-rec'))
   return cmd === 'unzip' || cmd === 'rsync' || cmd === 'ditto' || cmd === 'expand-archive'
 }
+
+// A step that only reads the current folder into an archive: its `.` and `*` are sources. Its output file is still
+// judged like any word.
+const makes = (cmd: string, args: string[]): boolean => {
+  if (cmd === 'zip' || cmd === 'compress-archive') return true
+  if (cmd === 'tar' || cmd === 'bsdtar') return !bulk(cmd, args) && (args.includes('--create') || args.some(w => /^-[a-z]*c[a-z]*$/.test(w)) || /^[a-z]*c[a-z]*$/.test(args[0] ?? ''))
+  return /^7z[ar]?$/.test(cmd) && /^[au]$/.test(args[0] ?? '')
+}
+const MAKERS = /^(?:tar|bsdtar|zip|compress-archive|7z[ar]?)$/
+const made = (step: string): boolean => {
+  const words = step.split(WORDS).filter(Boolean)
+  const at = words.findIndex(w => MAKERS.test(base(w)))
+  return at >= 0 && makes(base(words[at] ?? ''), words.slice(at + 1))
+}
+// The current folder as a destination: `.`, `..`, or a word that names the working folder at run time.
+const here = (d: string): boolean => /^\.{1,2}\/?$/.test(d) || /[$`]|^pwd$|^~[+-]$/.test(d)
+// A step puts files in the current folder: an extract with no folder of its own, or any copy whose destination is it.
+const lands = ({ cmd, dests, flagged }: Step): boolean => dests.some(here) || (EXTRACT.has(cmd) && !flagged)
 
 /**
  * A `cd` into the folder followed by a word that starts like the bus folder's name or by a copy, move, extract or
@@ -402,7 +449,7 @@ const cdThen = (s: string, home: string, own: string[]): boolean => {
     const target = CD_TARGET.exec(s)?.[0] ?? ''
     if (isD(target, home)) {
       const rest = s.slice(at + target.length)
-      return rest.split(/[;&|\n]+/).some(st => !readOnly(st) && (AFTER_CD.test(st) || globbed(st))) || copySteps(rest, home).some(st => bulk(st.cmd, st.args) || st.dests.some(d => /^\.{1,2}\/?$/.test(d)))
+      return rest.split(/[;&|\n]+/).some(st => !readOnly(st) && (v => AFTER_CD.test(v) || globbed(v))(made(st) ? st.split(WORDS).filter(w => !/^(?:\.\/?|\*|\.\/\*)$/.test(w)).join(' ') : st)) || copySteps(rest, home).some(st => !makes(st.cmd, st.args) && lands(st))
     }
     if (seen || !above(target, own, home)) continue
     seen = true
@@ -457,12 +504,29 @@ export const touchesBus = (e: BusCall, base: string, home: string): boolean => {
   const raw = ps ? i.command.replace(/(['"])\s*\+\s*['"]/g, '') : i.command
   // The text, its words with the quotes and escapes gone, and the same where a backslash was a path separator.
   const own = segments(base, h)
+  work = 0
+  // A path built from pieces (`Join-Path`, `-join`, `+`, `Combine`): the pieces name the folder, or are joined at run
+  // time and could. A step that holds the folder's name and a word that could be the bus folder's name is a hit.
+  const pieced = (s: string): boolean =>
+    ps &&
+    (JOINED.test(s) || DYNAMIC.test(s)) &&
+    ((JOINED.test(s) && s.includes('.claude') && s.includes('coordinator')) ||
+      s.split(/[;\n]/).some(
+        st =>
+          (JOINED.test(st) && DYNAMIC.test(st)) ||
+          ((JOINED.test(st) || DYNAMIC.test(st)) &&
+            /\.claude|claude~\d/.test(st) &&
+            st.split(/[\s;&|('")=,]+/).some(w => w.split('/').some(seg => seg !== '' && (CM_NAMES.some(n => n.startsWith(seg)) || (/[*?[{]/.test(seg) && globs(seg, CM_NAMES)))))),
+      ))
+  // Each distinct text is judged once.
+  const judged = new Set<string>()
   const judge = (s: string): boolean => {
+    if (judged.has(s)) return false
+    judged.add(s)
     const x = s.replace(EXTGLOB, '*')
     return (
       names(s) ||
-      // A path built from pieces: the pieces name the folder, or are joined at run time and could.
-      (ps && JOINED.test(s) && ((s.includes('.claude') && s.includes('coordinator')) || s.split(/[;\n]/).some(st => JOINED.test(st) && DYNAMIC.test(st)))) ||
+      pieced(s) ||
       (x === s ? [s] : [s, x]).some(v => globHits(v) || cdThen(v, h, own) || (isLink(v) && (DSEG.test(v) || anyD(v))) || destHit(v, h, own))
     )
   }

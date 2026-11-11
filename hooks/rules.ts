@@ -91,7 +91,7 @@ const overflow = (rest: string): boolean => rest.trim().split(/\s+/).some((w, i)
 // A push to main (or of every branch), a forced one, or an alias set to run a merge or a push.
 // A refspec with a wildcard, a brace list or a bare `:` may name main without saying so; `-f` may sit in a bundle
 // of short flags (`-uf`).
-const PUSH = new RegExp(String.raw`${MAIN}|\s--(?:all|mirror)(?![\w-])|--force\b|\s-[a-z]*f[a-z]*(?![\w-])|(?<!refs\/tags\/)\*|(?<!\$)\{|(?:^|\s)['"]?\+?:['"]?(?=\s|$)`, 'i')
+const PUSH = new RegExp(String.raw`${MAIN}|\s--(?:al(?:l)?|mi(?:r(?:r(?:o(?:r)?)?)?)?)(?![\w-])|--force\b|\s-[a-z]*f[a-z]*(?![\w-])|(?<!refs\/tags\/)\*|(?<!\$)\{|(?:^|\s)['"]?\+?:['"]?(?=\s|$)`, 'i')
 const gitTail = (rest: string, m: RegExpExecArray): boolean => !m[2] || (/^(?:push|send-pack)$/i.test(m[2]) ? PUSH.test(rest) : aliasDefinesMerge(rest))
 
 export const DEFAULT_RULES: readonly Rule[] = [
