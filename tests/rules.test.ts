@@ -194,6 +194,41 @@ test('PowerShell text is never masked', () => {
   expect(matchRule(DEFAULT_RULES, "echo 'gh pr merge 7'")?.label).toBe(undefined)
 })
 
+test('inside a substitution, a body line that starts with the end word and runs code ends the body', () => {
+  for (const cmd of [
+    `git commit -m "$(cat <<'EOF'\nmsg\nEOF_=1 ${M})"\nEOF\n)"`,
+    `git commit -m "$(cat <<'EOF'\nmsg\nEOFx || ${M})"\nEOF\n)"`,
+    `git commit -m "$(cat <<'EOF'\nmsg\nEOFZ=1 ${M})"\nEOF\n)"`,
+    `git commit -m "$(cat <<-'EOF'\nmsg\n\tEOF_=1 ${M})"\n\tEOF\n)"`,
+  ]) {
+    expect(label(cmd)).toBe('merge')
+    expect(dataMask(cmd)).toBe(null)
+  }
+})
+
+test('a quoted word after a value flag that is itself a value stays a flag', () => {
+  for (const cmd of [`git commit -m -m '--x ${M}'`, `grep -e -e '--x ${M}' f`, `gh pr create -t -t '--x ${M}'`])
+    expect(label(cmd)).toBe('merge')
+})
+
+test('echo prints a quoted word as it is, unless the word is an echo option', () => {
+  for (const cmd of [`echo -n '-e ${M}'`, `echo '--flag mentions ${M}'`, `echo '- item ${M}'`])
+    expect(label(cmd)).toBe(undefined)
+  for (const cmd of [`echo '-e' '${M}'`, `echo -'e' '${M}'`])
+    expect(label(cmd)).toBe('merge')
+})
+
+test('quotes and escapes inside a command word do not hide a protected command', () => {
+  for (const cmd of [`gh pr 'merge' 5`, `gh "pr" merge 5`, `g''h pr merge 5`, `gh pr me""rge 5`, `gh pr mer\\ge 5`, `gh pr mer\\\nge 5`])
+    expect(label(cmd)).toBe('merge')
+  expect(matchRule(DEFAULT_RULES, 'gh pr m`erge 5', true)?.label).toBe('merge')
+  expect(matchRule(DEFAULT_RULES, "gh 'pr' merge 5", true)?.label).toBe('merge')
+  expect(matchRule(DEFAULT_RULES, 'gh "pr" mer""ge 5', true)?.label).toBe('merge')
+  // Masked data, and a PowerShell command that is not protected, stay quiet.
+  expect(label(`git commit -m '${M}'`)).toBe(undefined)
+  expect(matchRule(DEFAULT_RULES, 'echo hi', true)?.label).toBe(undefined)
+})
+
 test('the text is read raw whenever it cannot be split with certainty', () => {
   for (const cmd of [
     // Code strings given to a shell or an interpreter.

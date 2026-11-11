@@ -21,6 +21,7 @@ import { CRAB_H, TIER_COLOR, TIER_MODEL, crabSvg, hatFor, tierOf } from './crab'
 import { NO_QUESTIONS, QUESTIONS_HEADING, asksGoAhead, pickStrings, type Strings } from './i18n'
 import { lineCount, segmentsOf, viewOf, visible } from './request'
 import { rowsOf, type Piece } from './scroll'
+import { SHELL_TOOLS, touchesBus } from './guard'
 import { compileRules, criticalIn, matchRule, type Rule, type RulesFile } from './rules'
 
 const PANE = 'coordinator-monitor'
@@ -35,7 +36,6 @@ const ENDED_KEEP_MS = 60 * 60 * 1000
 const ENDED_GRACE_MS = 5 * 60 * 1000
 /** Published in every status, so the pane can flag a session still running an older copy. Keep in step with plugin.json. */
 const MOD_VERSION = '0.7.1'
-const SHELL_TOOLS = new Set(['Bash', 'PowerShell'])
 const STEP_TOOL = 'mcp__savvy-progress__step'
 const FLOW_TOOL = 'mcp__savvy-progress__progress'
 // The desktop app's task list, and the CLI's.
@@ -1296,14 +1296,8 @@ export const register: Register = (on, options) => {
 
   // Protected commands wait for the person's approval from the pane.
   on('tool.check', async ($, e, next) => {
-    // Only the mod writes the bus: answers would let a session grant itself anything, rules.json or a
-    // status file loosen the rules or pose as another session. Reading it is harmless; a file tool is
-    // judged by its target, so the mod's own source and docs stay editable.
-    if (!e.isReadOnly) {
-      const i = (e.input ?? {}) as Record<string, unknown>
-      const target = JSON.stringify(i.file_path ?? i.notebook_path ?? i).replace(/\\\\/g, '/').toLowerCase()
-      if (target.includes('.claude/coordinator-monitor') || (base && target.includes(base.toLowerCase()))) return { decision: 'deny', reason: S.answersGuard }
-    }
+    // Only the mod writes the bus (see guard.ts).
+    if (touchesBus(e, base, home)) return { decision: 'deny', reason: S.answersGuard }
     if (!SHELL_TOOLS.has(e.tool) || !e.tool_use_id) return next(e)
     const command = String((e.input as { command?: unknown } | null)?.command ?? '')
     // PowerShell text is never masked: `echo` there is Write-Output, `iex` runs what it printed.

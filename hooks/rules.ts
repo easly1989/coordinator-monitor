@@ -213,20 +213,23 @@ const withoutDocs = (cmd: string): string | null => {
     const m = opens === 1 && !q ? DOC.exec(line) : null
     if (!m) return null
     const word = m[3] ?? ''
-    // Inside `$( )` bash also ends the body at a line that starts with the word and goes on with `)`, `;`, `|`,
-    // `&` or a blank (`EOF)`, `EOF ;`): such a line that is not exactly the word is not read. A line that
-    // goes on with a word character (`EOFs are fine`) is plain body.
+    // A top-level body ends at a line that is exactly the word; one that starts with the word and goes on
+    // with `)`, `;`, `|`, `&` or a blank (`EOF)`, `EOF ;`) is not read, and one that goes on with a word
+    // character (`EOFs are fine`) is plain body. Inside `$( )` bash also ends the body at a line that starts
+    // with the word and has a `)` anywhere later (`EOF_=1 gh pr merge 5)`) and runs the rest as code: there
+    // any line that starts with the word and is not exactly it is not read.
     const strip = (l: string) => (m[1] ? l.replace(/^\t+/, '') : l)
     const ends = (l: string) => strip(l).startsWith(word) && /^(?:[);|&\s]|$)/.test(strip(l).slice(word.length))
+    const head = line.slice(0, m.index)
+    const sub = /^(.*?)\$\([ \t]*cat[ \t]*$/.exec(head)
     const end = lines.findIndex((l, j) => j > i && ends(l))
     if (end < 0 || strip(lines[end] ?? '') !== word) return null
+    if (sub && lines.slice(i + 1, end).some(l => strip(l).startsWith(word))) return null
     // An unquoted word: the shell drops each backslash-newline, then runs each `$( )` in the body as it reads
     // it, and a joined line can be the end word (`EO\<nl>F`) that ends the body early.
     const joined = lines.slice(i + 1, end).join('\n').replace(/\\\n/g, '')
     if (!m[2] && (/\$[({]|`/.test(joined) || joined.split('\n').some(ends))) return null
-    const head = line.slice(0, m.index)
     const after = line.slice((m.index ?? 0) + m[0].length)
-    const sub = /^(.*?)\$\([ \t]*cat[ \t]*$/.exec(head)
     if (sub) {
       // `git commit -m "$(cat <<'EOF'`: the body is the text of a string given to a message command.
       const pre = scan(sub[1] ?? '', q)
@@ -271,10 +274,27 @@ const VALUE_FLAGS: [RegExp, RegExp][] = (
     [String.raw`gh[ \t]+(?:pr|issue)[ \t]+(?:comment|review)`, GH],
     [String.raw`(?:grep|egrep|fgrep)`, '-[nivwxcHhrIE]*[ef]'],
   ] as const
-).map(([head, flags]) => [new RegExp(`^${head}(?![\\w-])`), new RegExp(String.raw`(?:^|[ \t])(?:${flags})[ \t]+$`)])
+).map(([head, flags]) => [new RegExp(`^${head}(?![\\w-])`), new RegExp(`^(?:${flags})$`)])
+// A word is a value when the word before it is a value flag that is not itself the value of one (`-m -m '--x'`:
+// the second -m is the first one's value, so '--x' is a flag-shaped word of its own). The words are the shaped
+// text before the quote; a quote glued to the word before it (`-m'--x'`) is not a word of its own.
+const isValue = (text: string, s: Step, a: number, flags: RegExp): boolean => {
+  if (!/\s/.test(text[a - 2] ?? '')) return false
+  const before = shape(text, { ...s, end: a - 1, quotes: s.quotes.filter(([, y]) => y < a - 1) })
+  let want = false
+  for (const w of before.split(/\s+/)) want = !want && flags.test(w)
+  return want
+}
+// `echo` prints a word that is not an option of its own as it is: a quoted `-e gh pr merge 5` is text. Only
+// a word that is itself an option (`'-e'`) is read as a flag, as everywhere else.
 const hasQuotedFlag = (text: string, s: Step, shaped: string): boolean => {
-  const value = VALUE_FLAGS.find(([head]) => head.test(shaped))?.[1]
-  return s.quotes.some(([a, b]) => FLAG_SHAPE.test(text.slice(a, b)) && !value?.test(text.slice(s.start, a - 1)))
+  const echo = /^echo(?![\w-])/.test(shaped)
+  const flags = VALUE_FLAGS.find(([head]) => head.test(shaped))?.[1]
+  return s.quotes.some(([a, b]) => {
+    const word = text.slice(a, b)
+    if (echo) return /^-[neE]+$/.test(word)
+    return FLAG_SHAPE.test(word) && !(flags && isValue(text, s, a, flags))
+  })
 }
 
 /** The text the rules match: the command with what a program only stores or prints blanked; null unless every step is certain and inert. */
@@ -292,9 +312,49 @@ export const dataMask = (cmd: string): string | null => {
   return view
 }
 
+/**
+ * `text` as the shell reads its words: quotes, backslash escapes (a backslash-newline is dropped) and empty
+ * `''` / `""` count for nothing, so `gh pr 'merge' 5`, `g''h`, `mer\ge` and `"gh" pr merge` are the plain
+ * words; in PowerShell the escape is the backtick and `''` / `""` inside a string is a quote. The text of a
+ * quoted string stays; text already blanked by `dataMask` is a lone `''` word and goes. `$'` / `$"` lose the `$`.
+ */
+export const unquote = (text: string, isPowerShell = false): string => {
+  const esc = isPowerShell ? '`' : '\\'
+  let out = ''
+  let q = ''
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i] ?? ''
+    const next = text[i + 1] ?? ''
+    if (q === "'") {
+      if (c !== "'") out += c
+      else if (isPowerShell && next === "'") {
+        out += c
+        i++
+      } else q = ''
+    } else if (q === '"') {
+      if (c === '"') {
+        if (isPowerShell && next === '"') {
+          out += c
+          i++
+        } else q = ''
+      } else if (c === esc && (isPowerShell || /[$`"\\\n]/.test(next))) {
+        if (next !== '\n') out += next
+        i++
+      } else out += c
+    } else if (c === "'" || c === '"') q = c
+    else if (c === esc) {
+      if (next !== '\n') out += next
+      i++
+    } else if (c === '$' && !isPowerShell && (next === "'" || next === '"')) continue
+    else out += c
+  }
+  return out
+}
+
 export const matchRule = (rules: readonly Rule[], command: string, isPowerShell = false): Rule | undefined => {
   const text = (isPowerShell ? null : dataMask(command)) ?? command
-  return rules.find(r => r.re.test(text))
+  const words = unquote(text, isPowerShell)
+  return rules.find(r => r.re.test(text) || r.re.test(words))
 }
 
 export const criticalIn = (critical: readonly string[], command: string): string | undefined => {
