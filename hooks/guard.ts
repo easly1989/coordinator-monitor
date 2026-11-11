@@ -25,7 +25,7 @@ const collapse = (s: string, spaces: boolean): string => {
   const out: string[] = []
   for (const piece of s.split('/')) {
     const top = out[out.length - 1]
-    if (top === undefined || !/^\.\.(?=$|[\s'";&|)])/.test(piece)) {
+    if (top === undefined || piece !== '..') {
       out.push(piece)
       continue
     }
@@ -58,7 +58,10 @@ const clean = (text: string, home: string, spaces = false): string => {
   // (`.claude::$INDEX_ALLOCATION/x` is `.claude/x`); `$(:)` is no stream.
   // A blank at the end of a segment is dropped too, but only in the view that reads names with blanks in them.
   if (spaces) s = s.replace(/(?<=claude(?:~\d)?) +(?=\/)/g, '')
-  s = s.replace(/(?<=[^/\s.])\.+(?=\/|$)/g, '').replace(/(?<=[^/\s:($'"\]]{2})(?::[^/\s:()'",\]]*)+(?=\/|$)/g, '')
+  // A drive (`>>D:/bus`, `--target-directory=D:/bus`) is a letter that starts a word, then a bare colon: it stays.
+  s = s
+    .replace(/(?<=[^/\s.])\.+(?=\/|$)/g, '')
+    .replace(/(?<=[^/\s:($'"\]]{2})(?::[^/\s:()'",\]]*)+(?=\/|$)/g, (m, at: number, all: string) => (m === ':' && /[a-z]/.test(all[at - 1] ?? '') && !/[\w.~-]/.test(all[at - 2] ?? '') ? m : ''))
   return collapse(s, spaces)
 }
 
@@ -369,7 +372,10 @@ export const touchesBus = (e: BusCall, base: string, home: string): boolean => {
   const h = home.toLowerCase()
   const b = clean(base, h)
   const names = (s: string) => NAMES.test(s) || (!!b && s.includes(b))
-  const i = (e.input ?? {}) as Record<string, unknown>
+  // The floor: the text as written, with one separator and one case, no other reading. Whatever the file system makes
+  // of `..`, a dot, a colon or a name with odd characters in it, a text that holds the folder's path stays a hit.
+  const flat = (s: string) => names(s.toLowerCase().replace(/[\\/]+/g, '/'))
+  const i =(e.input ?? {}) as Record<string, unknown>
   if (!SHELL_TOOLS.has(e.tool) || typeof i.command !== 'string') {
     const target = i.file_path ?? i.notebook_path ?? i
     if (typeof target === 'string' && (target.length > 1024 || target.split(/[\\/]/).length > 64)) return true
@@ -377,7 +383,7 @@ export const touchesBus = (e: BusCall, base: string, home: string): boolean => {
     const c = clean(text, h)
     // The bus folder's own entries under a folder of that name, whatever the path before it: a junction to `.claude`
     // makes the same folder appear elsewhere, and a host with no way to resolve a path still sees the entry.
-    if (names(c) || BUS_ENTRY.test(c)) return true
+    if (names(c) || BUS_ENTRY.test(c) || flat(text)) return true
     if (typeof target !== 'string') return false
     // The path as the file system reads it: aliases (`COORDI~1`, `a b/..`, `.claude./`, a stream, a junction) resolved.
     const own = segments(base, h)
@@ -406,6 +412,7 @@ export const touchesBus = (e: BusCall, base: string, home: string): boolean => {
   }
   const check = (text: string): boolean =>
     [...new Set([text, unquote(text, ps), unquote(text.replace(/\\/g, '/'), ps)])].some(t => {
+      if (flat(t)) return true
       const s = clean(t, h)
       const sp = clean(t, h, true)
       return judge(s) || (sp !== s && judge(sp))

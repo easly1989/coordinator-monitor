@@ -418,6 +418,37 @@ test('a path too long or with too many parts is denied before the file system is
   expect(file(`C:/Users/carlo/projects/${'a/'.repeat(30)}x`)).toBe(false)
   for (const unit of ['a/', '$HOME/', '~/', 'a b/../', `${D}/`, '../', '$(', '$(echo)', 'cp -r a ~/ ; ', 'cd ~ && tar -xf a ; ', 'cd /d ', 'chdir ', '-path:', 'tar -xf a -C ~/ ; ', 'tar -C ', 'cp -t ', 'cp git -c "']) {
     const s = long(unit)
-    for (const run of [() => file(s), () => sh(s), () => sh(s, 'PowerShell')]) expect(Math.min(took(run), took(run), took(run))).toBeLessThan(200)
+    // Best of three, stopping at the first run under the bound: the sum of 153 runs is otherwise near the runner's 5 s limit.
+    for (const run of [() => file(s), () => sh(s), () => sh(s, 'PowerShell')]) expect([run, run, run].some(r => took(r) < 200)).toBe(true)
   }
+})
+
+test('round 10: a text that holds the bus path as written is a hit, whatever follows it', () => {
+  // `..)x` is an ordinary name on Windows, not a `..`: the path is the bus folder's own.
+  for (const cmd of [
+    `echo pwned > ~/${D}/${CM}/..${BS})x/../answers/a.json`,
+    `echo pwned > ~/${D}/${CM}/..${BS} x/../answers/a.json`,
+    `echo pwned > "$HOME/${D}/${CM}/..)x/../answers/a.json"`,
+    `echo pwned > "$HOME/${D}/${CM}/..;x/../answers/a.json"`,
+  ])
+    expect(sh(cmd)).toBe(true)
+  expect(sh(`Set-Content -Path "$HOME${BS}${D}${BS}${CM}${BS}..)x${BS}..${BS}answers${BS}a.json" -Value x`, 'PowerShell')).toBe(true)
+  expect(file(`C:${BS}Users${BS}carlo${BS}${D}${BS}${CM}${BS}..)x${BS}..${BS}answers${BS}a.json`)).toBe(true)
+  // A `..` that is a whole segment still collapses.
+  expect(sh('echo ok > ~/projects/a/../c/x')).toBe(false)
+  expect(sh(`cd ~/${D}/skills/.. && cp x ${CM}/rules.json`)).toBe(true)
+})
+
+test('round 10: a drive colon is not an alternate data stream, in a custom bus folder', () => {
+  const own = (command: string, tool = 'Bash') => touchesBus({ tool, input: { command }, isReadOnly: false }, 'D:/bus', HOME)
+  for (const cmd of ['echo {} >>D:/bus/rules.json', 'cp evil.json --target-directory=D:/bus', 'echo {} > D:/bus/rules.json', 'echo {} >D:/x/../bus/rules.json', 'echo {} >D:/bus/sub/../rules.json'])
+    expect(own(cmd)).toBe(true)
+  expect(own(`Set-Content D:${BS}bus${BS}rules.json x`, 'PowerShell')).toBe(true)
+  for (const cmd of ['echo {} >>D:/other/rules.json', 'cp a.json --target-directory=D:/work']) expect(own(cmd)).toBe(false)
+})
+
+test('round 10: a quoted word after a value flag is read in linear time', () => {
+  const fill = (unit: string, head: string) => head + unit.repeat(Math.floor((65536 - head.length) / unit.length))
+  for (const s of [fill(" -m '-x'", 'git commit'), fill(" -b '-x'", 'gh pr create'), fill(" -e '-x'", 'grep'), fill(" -m '-x' -m '-y'", 'git commit')])
+    for (const run of [() => sh(s), () => sh(s, 'PowerShell')]) expect(Math.min(took(run), took(run), took(run))).toBeLessThan(200)
 })

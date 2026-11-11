@@ -372,23 +372,34 @@ const VALUE_FLAGS: [RegExp, RegExp][] = (
 ).map(([head, flags]) => [new RegExp(`^${head}(?![\\w-])`), new RegExp(`^(?:${flags})$`)])
 // A word is a value when the word before it is a value flag that is not itself the value of one (`-m -m '--x'`:
 // the second -m is the first one's value, so '--x' is a flag-shaped word of its own). The words are the shaped
-// text before the quote; a quote glued to the word before it (`-m'--x'`) is not a word of its own.
-const isValue = (text: string, s: Step, a: number, flags: RegExp): boolean => {
-  if (!/\s/.test(text[a - 2] ?? '')) return false
-  const before = shape(text, { ...s, end: a - 1, quotes: s.quotes.filter(([, y]) => y < a - 1) })
-  let want = false
-  for (const w of before.split(/\s+/)) want = !want && flags.test(w)
-  return want
-}
+// text before the quote; a quote glued to the word before it (`-m'--x'`) is not a word of its own. The words
+// are read once, left to right, across all the quotes of the step: the state is carried from one quote to the next.
 // `echo` prints a word that is not an option of its own as it is: a quoted `-e gh pr merge 5` is text. Only
 // a word that is itself an option (`'-e'`) is read as a flag, as everywhere else.
 const hasQuotedFlag = (text: string, s: Step, shaped: string): boolean => {
   const echo = /^echo(?![\w-])/.test(shaped)
   const flags = VALUE_FLAGS.find(([head]) => head.test(shaped))?.[1]
+  // `want`: the last complete word is a value flag that is not itself a value. `cur`: the word being read.
+  let want = false
+  let cur = ''
+  let at = s.start
   return s.quotes.some(([a, b]) => {
     const word = text.slice(a, b)
     if (echo) return /^-[neE]+$/.test(word)
-    return FLAG_SHAPE.test(word) && !(flags && isValue(text, s, a, flags))
+    if (flags) {
+      const parts = text.slice(at, a - 1).split(/\s+/)
+      cur += parts[0]
+      for (const part of parts.slice(1)) {
+        want = !want && flags.test(cur)
+        cur = part
+      }
+      // The quote is a word of its own only when a blank comes before it: then `cur` is empty.
+      const value = want && /\s/.test(text[a - 2] ?? '')
+      cur += "''"
+      at = b + 1
+      return FLAG_SHAPE.test(word) && !value
+    }
+    return FLAG_SHAPE.test(word)
   })
 }
 

@@ -422,3 +422,26 @@ test('round 9: a push with a forced flag, a pathspec, a refspec colon or a send-
 test('round 9: a push of a feature branch and a read of a pull request stay quiet', () => {
   for (const cmd of ['git push origin feat', 'git push -u origin feat', 'gh pr view 5', 'gh api repos/o/r/pulls/5', 'gh pr list --state open']) expect(label(cmd)).toBeUndefined()
 })
+
+test('round 10: a quoted word after a value flag is read in linear time, and the flag state is kept', () => {
+  const fill = (unit: string, head: string) => head + unit.repeat(Math.floor((65536 - head.length) / unit.length))
+  const best = (f: () => unknown) => {
+    let min = Infinity
+    for (let k = 0; k < 3; k++) {
+      const t = performance.now()
+      f()
+      min = Math.min(min, performance.now() - t)
+    }
+    return min
+  }
+  for (const s of [fill(" -m '-x'", 'git commit'), fill(" -b '-x'", 'gh pr create'), fill(" -e '-x'", 'grep'), fill(" -m '-x' -m '-y'", 'git commit'), fill(" -m '-x' --amend", 'git commit')]) {
+    expect(best(() => dataMask(s))).toBeLessThan(200)
+    expect(best(() => label(s))).toBeLessThan(200)
+  }
+  // The state is carried from one quote to the next: a value, a flag that is a value, a glued quote.
+  expect(dataMask("git commit -m '-x' -m '-y'")).not.toBe(null)
+  expect(dataMask("git commit -m -m '--x'")).toBe(null)
+  expect(dataMask("git commit -m '-x' '--out=a'")).toBe(null)
+  expect(dataMask("git commit -m'--x'")).toBe(null)
+  expect(dataMask("grep -e '-v' file")).not.toBe(null)
+})
