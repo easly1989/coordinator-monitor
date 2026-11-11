@@ -317,3 +317,107 @@ test('every regex family of the guard reads a 64 KB input in under 200 ms', () =
     for (const tool of ['Bash', 'PowerShell']) expect(Math.min(took(() => sh(s, tool)), took(() => sh(s, tool)), took(() => sh(s, tool)))).toBeLessThan(200)
   }
 })
+
+// Round 9. The folder's names are spelt in pieces: this file is not a place to write them out.
+const D = '.' + 'claude'
+
+test('extracting or copying a tree over the base or one of its ancestors is denied', () => {
+  for (const cmd of [
+    'tar -xf /tmp/evil.tar -C ~',
+    'cd ~ && tar -xf /tmp/evil.tar',
+    `cp -r /tmp/e/${D} ~/`,
+    'cp -R /tmp/e ~/',
+    'cp -a /tmp/e ~',
+    'rsync -a /tmp/e/ ~/',
+    'unzip -o /tmp/e.zip -d ~',
+    'cd ~ && unzip -o /tmp/e.zip',
+    'cd ~ && rsync -a /tmp/e/ .',
+    'cd ~ && cp -r /tmp/e .',
+    'cd ~ && 7z x /tmp/e.7z',
+    `cd C:/Users && tar -xf /tmp/evil.tar -C carlo`,
+    'tar -xf /tmp/evil.tar -C C:/Users/carlo',
+    'tar xf /tmp/evil.tar -C /c/Users/carlo',
+  ])
+    expect(sh(cmd)).toBe(true)
+  for (const cmd of [
+    `Expand-Archive /tmp/evil.zip -DestinationPath $HOME -Force`,
+    `Expand-Archive /tmp/evil.zip -DestinationPath:$HOME -Force`,
+    `Copy-Item -Recurse /tmp/e $HOME -Force`,
+    `Set-Location ~; Expand-Archive /tmp/evil.zip -Force`,
+  ])
+    expect(sh(cmd, 'PowerShell')).toBe(true)
+  for (const cmd of [
+    'git push origin feat',
+    'cp x ~/projects/foo',
+    'cp x ~/',
+    'tar -xf a.tar -C /tmp/x',
+    'tar -cf a.tar ~/projects',
+    'cd ~ && ls',
+    'cd ~/projects && tar -xf /tmp/a.tar',
+    'cd ~ && tar -xf /tmp/a.tar -C /tmp/y',
+    'unzip -o /tmp/e.zip -d /tmp/q',
+    'rsync -a /tmp/e/ ~/projects/e/',
+    'cd /tmp && cp -r a b',
+  ])
+    expect(sh(cmd)).toBe(false)
+  expect(sh('Expand-Archive a.zip -DestinationPath C:/tmp/q', 'PowerShell')).toBe(false)
+})
+
+test('chdir, cd /d and a colon-bound parameter move the shell like cd', () => {
+  for (const cmd of [`cmd //c "cd /d %USERPROFILE%${BS}${D} && echo pwn > ${CM}${BS}answers${BS}x"`, `cmd //c "chdir /d %USERPROFILE%${BS}${D} && echo pwn > ${CM}${BS}answers${BS}x"`, `chdir ~/${D} && rm -rf ${CM}`]) expect(sh(cmd)).toBe(true)
+  for (const cmd of [
+    `cmd /c "cd /d %USERPROFILE%${BS}${D} && echo pwn > ${CM}${BS}answers${BS}x"`,
+    `cmd /c "chdir /d %USERPROFILE%${BS}${D} && echo pwn > ${CM}${BS}answers${BS}x"`,
+    `chdir $HOME${BS}${D}; Remove-Item -Recurse -Force ${CM}`,
+    `Set-Location -Path:$HOME${BS}${D}; Remove-Item -Recurse -Force ${CM}`,
+    `Set-Location -Path $HOME${BS}${D}; Remove-Item -Recurse -Force ${CM}`,
+  ])
+    expect(sh(cmd, 'PowerShell')).toBe(true)
+  expect(sh('cd /d C:/tmp && echo a > b')).toBe(false)
+  expect(sh(`chdir $HOME${BS}projects; Remove-Item -Recurse -Force build`, 'PowerShell')).toBe(false)
+})
+
+test('a substitution inside a word stands for any text', () => {
+  for (const cmd of [`echo pwn > "$HOME/.cla$(echo)ude/${CM}/answers/x"`, `echo pwn > ~/.cla$(:)ude/${CM}/answers/x`, `echo pwn > ~/$(echo .cl)aude/${CM}/answers/x`, `echo pwn > ~/$(printf .claude)/${CM}/answers/x`])
+    expect(sh(cmd)).toBe(true)
+  for (const cmd of [`Set-Content "$HOME${BS}.cla$()ude${BS}${CM}${BS}rules.json" '{}'`, `Set-Content "$HOME${BS}$('.cla')ude${BS}${CM}${BS}rules.json" "{}"`])
+    expect(sh(cmd, 'PowerShell')).toBe(true)
+  for (const cmd of ['echo "$(date)/notes" > ~/log.txt', 'cp x "$(pwd)/y"', 'echo $(git rev-parse HEAD)/x > out.txt']) expect(sh(cmd)).toBe(false)
+})
+
+test('.. is collapsed at any depth, whatever the names before it hold', () => {
+  for (const cmd of [
+    `echo pwn > "$HOME/${D}/a b/../${CM}/answers/x"`,
+    `echo pwn > ~/${D}/a/a/a/a/a/a/a/a/a/../../../../../../../../../${CM}/rules.json`,
+    `echo pwn > "$HOME/${D}/a b/c d/../../${CM}/answers/x"`,
+  ])
+    expect(sh(cmd)).toBe(true)
+  expect(sh(`Set-Content "$HOME${BS}${D}${BS}q r${BS}..${BS}${CM}${BS}rules.json" '{}'`, 'PowerShell')).toBe(true)
+  expect(file(`C:/Users/carlo/${D}/a b/../${CM}/answers/x`)).toBe(true)
+  expect(file(`C:/Users/carlo/${D}/a b/../../${D}/${CM}/rules.json`)).toBe(true)
+  expect(sh(`echo ok > "$HOME/projects/a b/../c/x"`)).toBe(false)
+  expect(file('C:/Users/carlo/projects/a b/../c/x')).toBe(false)
+})
+
+test('a PowerShell path built with .NET or joined at run time is denied', () => {
+  for (const cmd of [
+    `Set-Content ([System.IO.Path]::Combine($HOME,"${D}","${CM}","rules.json")) "{}"`,
+    `Set-Content ([IO.Path]::Join($HOME,"${D}","${CM}","rules.json")) "{}"`,
+    `Set-Content (Join-Path $HOME ('.cla','ude' -join '')) x`,
+    `Set-Content (Join-Path (Join-Path $HOME $a) ($b + 'x')) x`,
+  ])
+    expect(sh(cmd, 'PowerShell')).toBe(true)
+  for (const cmd of [`Set-Content ([IO.Path]::Combine($HOME,"projects","a.txt")) "{}"`, `Join-Path $HOME 'projects'`, '$n = 1 + 2; Get-Date']) expect(sh(cmd, 'PowerShell')).toBe(false)
+})
+
+test('a path too long or with too many parts is denied before the file system is asked, and no input is slow', () => {
+  const long = (unit: string) => unit.repeat(Math.ceil(65536 / unit.length))
+  expect(file(long('a/'))).toBe(true)
+  expect(file(long('$HOME/'))).toBe(true)
+  expect(file('$HOME/'.repeat(70))).toBe(true)
+  expect(file(`C:/Users/carlo/projects/${'a/'.repeat(30)}x`)).toBe(false)
+  for (const unit of ['a/', '$HOME/', '~/', 'a b/../', `${D}/`, '../', '$(', '$(echo)', 'cp -r a ~/ ; ', 'cd ~ && tar -xf a ; ', 'cd /d ', 'chdir ', '-path:', 'tar -xf a -C ~/ ; ', 'tar -C ', 'cp -t ', 'cp git -c "']) {
+    const s = long(unit)
+    for (const run of [() => file(s), () => sh(s), () => sh(s, 'PowerShell')]) expect(Math.min(took(run), took(run), took(run))).toBeLessThan(200)
+  }
+})

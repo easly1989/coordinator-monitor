@@ -71,25 +71,40 @@ export const afterRule = (label: string, source: string, tail: RegExp | ((rest: 
 // What may follow a branch name on a push line: a blank, a quote, a separator, a bracket, a redirect.
 const MAIN = String.raw`(?:[\s:+]|(?:refs/)?heads/)(?:main|master)(?=$|[\s;&|"'(){}<>\x60])`
 // An alias whose value runs merge or push, defined by `git config alias.x …`.
+// `remote.<name>.push` is a refspec every plain `git push` then uses (set on the line or in the config).
+const PUSH_KEY = String.raw`remote\.(?:[^\s.=]+\.){1,3}push(?![\w-])`
+const PUSH_KEY_SET = new RegExp(PUSH_KEY, 'i')
 const aliasDefinesMerge = (rest: string): boolean => {
   const m = /\balias\.[^\s=]*/i.exec(rest)
-  return !!m && /merge|push/i.test(rest.slice(m.index + m[0].length))
+  if (m && /merge|push/i.test(rest.slice(m.index + m[0].length))) return true
+  return PUSH_KEY_SET.test(rest) && !/\s--(?:get|list|unset)|\s-l\b/i.test(rest)
 }
+// `gh` or `gh.exe`, after a path and quotes or not.
+const GH_CMD = String.raw`\bgh(?:\.exe)?['"]?\s+`
+// A `gh api` call that merges (the merge endpoints), or writes the main branch (a method other than GET, or a field,
+// which makes it a POST).
+const API_WRITE = /(?:-X|--method)[ =]\s*['"]?(?:PATCH|POST|PUT|DELETE)|\s(?:-[fF]|--(?:raw-)?field|--input)/i
+const apiTail = (rest: string): boolean =>
+  /\bpulls\/[^/\s]+\/merge\b|\/merges(?![\w-])/i.test(rest) || (/\bgit\/refs\/heads\/(?:main|master)(?![\w/-])/i.test(rest) && API_WRITE.test(rest))
 // More than 8 words between `git -x` and a merge or a push: read as one.
 const overflow = (rest: string): boolean => rest.trim().split(/\s+/).some((w, i) => i >= 8 && /^(?:merge|push)(?![-\w])/i.test(w))
 // A push to main (or of every branch), a forced one, or an alias set to run a merge or a push.
-const PUSH = new RegExp(String.raw`${MAIN}|\s--(?:all|mirror)(?![\w-])|--force\b|\s-f\b`, 'i')
-const gitTail = (rest: string, m: RegExpExecArray): boolean => !m[2] || (/^push$/i.test(m[2]) ? PUSH.test(rest) : aliasDefinesMerge(rest))
+// A refspec with a wildcard, a brace list or a bare `:` may name main without saying so; `-f` may sit in a bundle
+// of short flags (`-uf`).
+const PUSH = new RegExp(String.raw`${MAIN}|\s--(?:all|mirror)(?![\w-])|--force\b|\s-[a-z]*f[a-z]*(?![\w-])|\*|(?<!\$)\{|(?:^|\s)['"]?\+?:['"]?(?=\s|$)`, 'i')
+const gitTail = (rest: string, m: RegExpExecArray): boolean => !m[2] || (/^(?:push|send-pack)$/i.test(m[2]) ? PUSH.test(rest) : aliasDefinesMerge(rest))
 
 export const DEFAULT_RULES: readonly Rule[] = [
   // merges and pushes to the main line
-  D('merge', String.raw`\bgh\s+pr\s+merge\b`),
-  afterRule('merge', String.raw`${GIT}(?:(merge)(?![-\w])|(push|config)\b)`, gitTail),
+  D('merge', String.raw`${GH_CMD}pr\s+merge\b`),
+  // An alias set to run a merge: what it runs is not read.
+  afterRule('merge', String.raw`${GH_CMD}alias\s+set\b`, /merge/i),
+  afterRule('merge', String.raw`${GIT}(?:(merge)(?![-\w])|(push|send-pack|config)\b)`, gitTail),
   // More than 8 options before the subcommand: it is not read, so a merge or a push after them is taken as one.
   // An alias defined on the command line (`-c alias.mm=merge`): what it runs is not read.
   afterRule('merge', String.raw`\bgit(?:\.exe)?['"]?\s+-\S*`, overflow),
-  afterRule('merge', String.raw`\bgit\b`, /\s(?:-c|--config-env)[ =]?\s*['"]?alias\./i),
-  afterRule('merge', String.raw`\bgh\s+api\b`, /\bpulls\/[^/\s]+\/merge\b/i),
+  afterRule('merge', String.raw`\bgit\b`, new RegExp(String.raw`\s(?:-c|--config-env)[ =]?\s*['"]?(?:alias\.|${PUSH_KEY})`, 'i')),
+  afterRule('merge', String.raw`${GH_CMD}api\b`, apiTail),
   // deploys and releases
   afterRule('deploy', String.raw`\b(?:vercel|netlify)\b`, /--prod\b/i),
   D('deploy', String.raw`\bfly(ctl)?\s+deploy\b`),
@@ -461,7 +476,9 @@ const flatten = (text: string, isPowerShell: boolean): string => {
 }
 
 export const matchRule = (rules: readonly Rule[], command: string, isPowerShell = false): Rule | undefined => {
-  const text = (isPowerShell ? null : dataMask(command)) ?? command
+  // PowerShell's `--%` only stops its own parsing: git sees the words after it.
+  if (isPowerShell) command = command.replace(/(?<=\s)--%(?=\s)/g, '')
+  const text =(isPowerShell ? null : dataMask(command)) ?? command
   const flat = flatten(text, isPowerShell)
   // A backslash (a backtick in PowerShell) before a line break joins the lines, in either line ending.
   const joined = /[\\`]\r\n/.test(text) ? text.replace(/[\\`]\r\n/g, ' ') : text

@@ -10,35 +10,70 @@ export const SHELL_TOOLS = new Set(['Bash', 'PowerShell'])
 export type BusCall = { tool: string; input?: unknown; isReadOnly?: boolean }
 
 // Every way to say the home folder, then one separator and one case.
-const HOME = /\$\{home\}|\$home(?![\w])|\$env:(?:userprofile|home)(?![\w])|\$\{env:(?:userprofile|home)\}|%userprofile%|(?<=^|[\s;&|('"=:])~(?=$|[\s/'"])/g
+const HOME = /\$\{home\}|\$home(?![\w])|\$env:(?:userprofile|home)(?![\w])|\$\{env:(?:userprofile|home)\}|%userprofile%|(?<=^|[\s;&|('"=:])~(?=$|[\s/'";&|)])/g
 // A device prefix (`\.\C:\`, `\?\C:\`, `\?\UNC\host\`) and an administrative share (`\localhost\C$\`) name the same
 // drive: they are dropped at the start of a word, in `/` spelling.
 const DEVICE = /(?<=^|[\s;&|('"=])\/\/[.?]\/(?:unc\/[^/\s]+\/)?/g
 const ADMIN = /(?<=^|[\s;&|('"=])(?:\/\/[^/\s]+\/)?([a-z])\$\//g
 const drive = (s: string): string => s.replace(DEVICE, '').replace(ADMIN, '$1:/')
 
-const clean = (text: string, home: string): string => {
-  let s = drive(text.toLowerCase().replace(/\\/g, '/').replace(HOME, () => home))
+// `a/b/../c` is `a/c`, at any depth. A name may hold spaces, and the text does not say where a name starts, so it is
+// read twice: a name ends at a quote, a separator or an operator (`spaces`), or also at a space.
+const collapse = (s: string, spaces: boolean): string => {
+  if (!s.includes('..')) return s
+  const edge = (c: string): boolean => /['";&|<>=()]/.test(c) || (!spaces && /\s/.test(c))
+  const out: string[] = []
+  for (const piece of s.split('/')) {
+    const top = out[out.length - 1]
+    if (top === undefined || !/^\.\.(?=$|[\s'";&|)])/.test(piece)) {
+      out.push(piece)
+      continue
+    }
+    let k = top.length
+    while (k > 0 && !edge(top[k - 1] ?? '')) k--
+    const name = top.slice(k)
+    if (!name || name === '..') {
+      out.push(piece)
+      continue
+    }
+    out.pop()
+    const keep = top.slice(0, k) + piece.slice(2)
+    if (keep) out.push(keep)
+  }
+  return out.join('/')
+}
+
+const clean = (text: string, home: string, spaces = false): string => {
+  let s = drive(
+    text
+      .toLowerCase()
+      // `-Path:value` is `-Path value`.
+      .replace(/(?<=^|[\s;&|(])(-[a-z]+):(?=\S)/g, '$1 ')
+      .replace(/\\/g, '/')
+      .replace(HOME, () => home),
+  )
     .replace(/\/+/g, '/')
     .replace(/\/\.(?=\/|[\s'";&|)]|$)/g, '')
   // Windows drops the dots at the end of a segment (`.claude./x` is `.claude/x`) and an alternate data stream
-  // (`.claude::$INDEX_ALLOCATION/x` is `.claude/x`).
-  s = s.replace(/(?<=[^/\s.])\.+(?=\/|$)/g, '').replace(/(?<=[^/\s:]{2})(?::[^/\s:]*)+(?=\/|$)/g, '')
-  // `a/b/../c` is `a/c`.
-  for (let n = 0; n < 8 && s.includes('/..'); n++) s = s.replace(/\/(?!\.\.(?:\/|$))[^/\s]+\/\.\.(?=\/|$)/g, '')
-  return s
+  // (`.claude::$INDEX_ALLOCATION/x` is `.claude/x`); `$(:)` is no stream.
+  // A blank at the end of a segment is dropped too, but only in the view that reads names with blanks in them.
+  if (spaces) s = s.replace(/(?<=claude(?:~\d)?) +(?=\/)/g, '')
+  s = s.replace(/(?<=[^/\s.])\.+(?=\/|$)/g, '').replace(/(?<=[^/\s:($'"\]]{2})(?::[^/\s:()'",\]]*)+(?=\/|$)/g, '')
+  return collapse(s, spaces)
 }
 
 // The folder `.claude` by name, or by its 8.3 name `CLAUDE~1`, as a whole path segment.
 const DSEG = /(?<![\w.-])(?:\.claude|claude~\d+)(?![\w.-])/
 const D_EXACT = /^(?:\.claude|claude~\d+)$/
 const NAMES = /(?:\.claude|claude~\d+)\/(?:coordinator-monitor|coordi~\d)/
-const CD_HEAD = /(?:^|[\s;&|(])(?:cd|pushd|sl|set-location|push-location)\s+/g
-const CD_OPT = /-\S*\s+/y
+const CD_HEAD = /(?:^|[\s;&|(])(?:cd|chdir|pushd|sl|set-location|push-location)\s+/g
+const CD_OPT = /(?:-[\w-]*(?=\s)|\/d(?=\s))\s+/y
 const CD_TARGET = /[^\s;&|]*/y
-const CD_STEP = /^\s*(?:cd|pushd|sl|set-location|push-location)(?:\s|$)/i
+const CD_STEP = /^\s*(?:cd|chdir|pushd|sl|set-location|push-location)(?:\s|$)/i
 const BUS_ENTRY = /\/coordinator-monitor\/(?:answers|sessions|rules\.json|queues\.json)(?=\/|$)/
-const JOINED = /join-path|\[io\.path\]::combine/
+const JOINED = /join-path|path\]::(?:combine|join)/
+// A path built from pieces at run time: `-join`, or `+` between two terms.
+const DYNAMIC = /\s-join\s|\s\+\s/
 // A link that can make the folder reachable under another name: a junction, a symlink or a hard link.
 const LINK = /\bmklink\b|\bfsutil\s+hardlink\b|createsymboliclink|(?:^|[\s;&|(])ln(?:\.exe)?\s/
 const LINK_ITEM = afterRule('link', String.raw`(?:\bnew-item\b|(?:^|[\s;&|(])ni(?=\s))`, /-(?:item)?type\s+['"]?(?:junction|symboliclink|hardlink)/)
@@ -145,7 +180,10 @@ const expand = (s: string, left = { n: 64 }): string[] | null => {
  * variable in a segment that starts with a dot, holds `claud`, or opens with `[` or `{`. A segment is read one
  * piece at a time: nothing here backtracks.
  */
+const SUB = '\u0001'
 const couldBeD = (seg: string): boolean => {
+  // A substitution stands for any text: in a segment of its own it is judged by the one after it.
+  if (seg.includes(SUB)) return seg.length > 1 && (/^[.\u0001]/.test(seg) || seg.includes('claud'))
   if (!/[*?[{$`]/.test(seg) || !(seg.startsWith('.') || seg.includes('claud') || /^[[{]/.test(seg))) return false
   if (/[$`]/.test(seg) || seg.length > 256) return true
   // A brace sequence (`{a..z}`) and a PowerShell format slot (`{0}`) stand for any text.
@@ -158,14 +196,32 @@ const couldBeD = (seg: string): boolean => {
 
 // A word that names the folder through a glob, a class, a brace, a variable or a substitution: `.cl[^x]ude/`,
 // `{.,}claude/`, `.claude/c*`. The segment must be followed by another one, so `ls .*/` and a URL stay quiet.
+const subs = (s: string): string => {
+  let out = ''
+  let at = 0
+  for (let k = s.indexOf('$('); k >= 0; k = s.indexOf('$(', at)) {
+    let depth = 0
+    let end = -1
+    for (let n = k + 1; n < s.length && end < 0; n++) {
+      if (s[n] === '(') depth++
+      else if (s[n] === ')' && --depth === 0) end = n
+    }
+    if (end < 0) break
+    out += s.slice(at, k) + SUB
+    at = end + 1
+  }
+  return out + s.slice(at)
+}
+
 const globHits = (s: string): boolean => {
-  for (const word of s.split(/[\s;&|('"=]+/)) {
+  for (const word of subs(s).split(/[\s;&|'")=]+|(?<!\$)\(/)) {
     const parts = word.split('/')
     for (let k = 0; k < parts.length - 1; k++) {
       const seg = parts[k] ?? ''
       const next = parts[k + 1] ?? ''
       if (!next) continue
-      if (D_EXACT.test(seg) && /[*?[{$`]/.test(next)) return true
+      if (D_EXACT.test(seg) && /[*?[{$`\u0001]/.test(next)) return true
+      if (seg === SUB && next.startsWith('coordi')) return true
       if (couldBeD(seg)) return true
     }
   }
@@ -218,12 +274,68 @@ const isD = (word: string, home: string): boolean => {
   return D_EXACT.test(last) || couldBeD(last)
 }
 
+const under = (x: string[], y: string[]): boolean => y.length > 0 && y.every((s, n) => x[n] === s)
+
+/**
+ * A path that is the bus folder's base or one of its ancestors (the home folder, a drive, `/`): a tree extracted or
+ * copied there overwrites the folder. A relative path is read from `cwd`, when there is one.
+ */
+const above = (word: string, own: string[], home: string, cwd = ''): boolean => {
+  const w = word.replace(/['"]/g, '')
+  if (!w || w.length > 1024) return false
+  const abs = /^(?:[a-z]:|\/)/.test(w)
+  if (!abs && !cwd) return false
+  const segs = segments(abs ? w : `${cwd}/${w}`, home)
+  return segs.length === 0 ? abs : under(own, segs)
+}
+
+type Step = { cmd: string; args: string[]; dests: string[]; flagged: boolean }
+
+/** The copy, move, extract or link steps of a text, each with the words that could be its destination. */
+const copySteps = (s: string, home: string): Step[] => {
+  const out: Step[] = []
+  for (const step of s.split(/[;&|\n]+/)) {
+    const words = step.split(WORDS)
+    const at = words.findIndex(w => COPY.has(base(w)))
+    if (at < 0) continue
+    const cmd = base(words[at] ?? '')
+    const args = words.slice(at + 1).filter(Boolean)
+    const dests = EVERY_WORD.has(cmd) ? [...args] : [args.filter(w => !w.startsWith('-')).pop() ?? '']
+    let flagged = false
+    args.forEach((w, k) => {
+      // `unzip -o` is "overwrite": only `-d` names its folder.
+      if (cmd === 'unzip' && !w.startsWith('-d')) return
+      if (DEST_FLAG.test(w)) {
+        dests.push(args[k + 1] ?? '')
+        flagged = true
+      }
+      const glued = DEST_GLUED.exec(w)?.[1]
+      if (glued) {
+        dests.push(glued.replace(/^~(?=\/|$)/, home))
+        flagged = true
+      }
+    })
+    out.push({ cmd, args, dests, flagged })
+  }
+  return out
+}
+
+// An extract puts a tree in its destination folder: the current one when none is named.
+const EXTRACT = new Set(['tar', 'bsdtar', 'unzip', '7z', '7za', '7zr', 'expand-archive'])
+const bulk = (cmd: string, args: string[]): boolean => {
+  if (cmd === 'tar' || cmd === 'bsdtar') return args.some(w => /^-[a-z]*x[a-z]*$/.test(w) || w === '--extract' || w === '--get') || /^[a-z]*x[a-z]*$/.test(args[0] ?? '')
+  if (/^7z[ar]?$/.test(cmd)) return /^[xe]$/.test(args[0] ?? '')
+  if (cmd === 'cp' || cmd === 'copy-item' || cmd === 'cpi') return args.some(w => (/^-[a-z]{1,3}$/.test(w) && /[ra]/.test(w)) || w === '--recursive' || w === '--archive' || w.startsWith('-rec'))
+  return cmd === 'unzip' || cmd === 'rsync' || cmd === 'ditto' || cmd === 'expand-archive'
+}
+
 /**
  * A `cd` into the folder followed by a word that starts like the bus folder's name or by a copy, move, extract or
- * link. Only the first such `cd` is read to the end of the text (every later one's rest is part of it), so the
- * time is linear.
+ * link; a `cd` into the base or one of its ancestors followed by a tree copied or extracted into the current folder.
+ * Only the first `cd` of the second kind is read to the end of the text, so the time is linear.
  */
-const cdThen = (s: string, home: string): boolean => {
+const cdThen = (s: string, home: string, own: string[]): boolean => {
+  let seen = false
   CD_HEAD.lastIndex = 0
   for (let m = CD_HEAD.exec(s); m; m = CD_HEAD.exec(s)) {
     let at = m.index + m[0].length
@@ -231,30 +343,25 @@ const cdThen = (s: string, home: string): boolean => {
     while (CD_OPT.test(s)) at = CD_OPT.lastIndex
     CD_TARGET.lastIndex = at
     const target = CD_TARGET.exec(s)?.[0] ?? ''
-    if (!isD(target, home)) continue
-    const rest = s.slice(at + target.length)
-    return AFTER_CD.test(rest) || hasCopy(rest)
+    if (isD(target, home)) {
+      const rest = s.slice(at + target.length)
+      return AFTER_CD.test(rest) || hasCopy(rest)
+    }
+    if (seen || !above(target, own, home)) continue
+    seen = true
+    const cwd = target.replace(/['"]/g, '')
+    if (copySteps(s.slice(at + target.length), home).some(st => bulk(st.cmd, st.args) && (st.dests.some(d => above(d, own, home, cwd)) || (EXTRACT.has(st.cmd) && !st.flagged)))) return true
   }
   return false
 }
 
-/** A copy, move, extract or link whose destination could be the folder. */
-const destHit = (s: string, home: string): boolean => {
-  for (const step of s.split(/[;&|\n]+/)) {
-    const words = step.split(WORDS)
-    const at = words.findIndex(w => COPY.has(base(w)))
-    if (at < 0) continue
-    const args = words.slice(at + 1).filter(Boolean)
-    const dests = EVERY_WORD.has(base(words[at] ?? '')) ? args : [args.filter(w => !w.startsWith('-')).pop() ?? '']
-    args.forEach((w, k) => {
-      if (DEST_FLAG.test(w)) dests.push(args[k + 1] ?? '')
-      const glued = DEST_GLUED.exec(w)?.[1]
-      if (glued) dests.push(glued.replace(/^~(?=\/|$)/, home))
-    })
-    if (dests.some(d => d && isD(d, home))) return true
-  }
-  return false
-}
+/** A copy, move, extract or link whose destination could be the folder, or a tree copied or extracted over its parent. */
+const destHit = (s: string, home: string, own: string[]): boolean =>
+  copySteps(s, home).some(({ cmd, args, dests }) => {
+    // `bulk` reads every word of the step: once per step, not once per destination.
+    const tree = bulk(cmd, args)
+    return dests.some(d => d && (isD(d, home) || (tree && above(d, own, home))))
+  })
 
 /** True when a call that is not read-only writes the bus folder `base`. `home` is the person's home folder. */
 export const touchesBus = (e: BusCall, base: string, home: string): boolean => {
@@ -265,6 +372,7 @@ export const touchesBus = (e: BusCall, base: string, home: string): boolean => {
   const i = (e.input ?? {}) as Record<string, unknown>
   if (!SHELL_TOOLS.has(e.tool) || typeof i.command !== 'string') {
     const target = i.file_path ?? i.notebook_path ?? i
+    if (typeof target === 'string' && (target.length > 1024 || target.split(/[\\/]/).length > 64)) return true
     const text = typeof target === 'string' ? target : JSON.stringify(target)
     const c = clean(text, h)
     // The bus folder's own entries under a folder of that name, whatever the path before it: a junction to `.claude`
@@ -274,7 +382,8 @@ export const touchesBus = (e: BusCall, base: string, home: string): boolean => {
     // The path as the file system reads it: aliases (`COORDI~1`, `a b/..`, `.claude./`, a stream, a junction) resolved.
     const own = segments(base, h)
     const mine = segments(target, h)
-    const under = (x: string[], y: string[]) => y.length > 0 && y.every((s, n) => x[n] === s)
+    // Too long, or too many parts, to be a real path: refused before the file system is asked about each part.
+    if (mine.length > 64 || mine.join('/').length > 1024) return true
     return under(mine, own) || (() => {
       const real = realOf(mine)
       const root = realOf(own)
@@ -285,15 +394,21 @@ export const touchesBus = (e: BusCall, base: string, home: string): boolean => {
   // PowerShell joins two strings with `+`: 'coord' + 'inator-monitor', in any mix of quotes.
   const raw = ps ? i.command.replace(/(['"])\s*\+\s*['"]/g, '') : i.command
   // The text, its words with the quotes and escapes gone, and the same where a backslash was a path separator.
+  const own = segments(base, h)
+  const judge = (s: string): boolean => {
+    const x = s.replace(EXTGLOB, '*')
+    return (
+      names(s) ||
+      // A path built from pieces: the pieces name the folder, or are joined at run time and could.
+      (ps && JOINED.test(s) && ((s.includes('.claude') && s.includes('coordinator')) || s.split(/[;\n]/).some(st => JOINED.test(st) && DYNAMIC.test(st)))) ||
+      (x === s ? [s] : [s, x]).some(v => globHits(v) || cdThen(v, h, own) || (isLink(v) && (DSEG.test(v) || anyD(v))) || destHit(v, h, own))
+    )
+  }
   const check = (text: string): boolean =>
     [...new Set([text, unquote(text, ps), unquote(text.replace(/\\/g, '/'), ps)])].some(t => {
       const s = clean(t, h)
-      const x = s.replace(EXTGLOB, '*')
-      return (
-        names(s) ||
-        (ps && JOINED.test(s) && s.includes('.claude') && s.includes('coordinator')) ||
-        (x === s ? [s] : [s, x]).some(v => globHits(v) || cdThen(v, h) || (isLink(v) && (DSEG.test(v) || anyD(v))) || destHit(v, h))
-      )
+      const sp = clean(t, h, true)
+      return judge(s) || (sp !== s && judge(sp))
     })
   // Text only mentions the folder when every step prints or stores nothing (`git commit -m "…~/.claude/coordinator-monitor"`):
   // then only a `cd` is judged, for it moves the shell into the folder whatever it is quoted with.

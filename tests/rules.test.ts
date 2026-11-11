@@ -389,3 +389,36 @@ test('every regex family of the rules reads a 64 KB input in under 200 ms', () =
     expect(performance.now() - t).toBeLessThan(400)
   }
 })
+
+test('round 9: a push with a forced flag, a pathspec, a refspec colon or a send-pack, and a -C, --% or alias form, are matches', () => {
+  for (const cmd of [
+    'git push origin {main,feat}',
+    "git push origin 'refs/heads/mai*:refs/heads/mai*'",
+    "git push origin 'refs/heads/*:refs/heads/*'",
+    'git push origin :',
+    'git push -uf origin feat',
+    'git push origin main:main',
+    'git push origin feat:main',
+    'git -C ../wt merge x',
+    'git send-pack origin main',
+    'git push origin main~0:main',
+    "git push origin HEAD:mai''n",
+    `git push origin m${BS}ain`,
+    'git -c alias.p=push p origin main',
+    'git -c remote.origin.push=HEAD:main push',
+    'git -c remote.origin.push=HEAD:refs/heads/main push origin',
+    'git config remote.origin.push HEAD:main && git push',
+    "gh alias set mm 'pr merge' && gh mm 5",
+    'gh api -X POST repos/o/r/merges -f base=main -f head=feature',
+    'gh api -X PATCH repos/o/r/git/refs/heads/main -f sha=abc -F force=true',
+    'gh.exe api -X PUT repos/o/r/pulls/5/merge',
+    'gh.exe pr merge 5 --squash',
+  ])
+    expect(label(cmd)).toBe('merge')
+  for (const cmd of ['git --% push origin main', 'git --% merge feature', `git push origin m${TICK}ain`]) expect(ps(cmd)).toBe('merge')
+  expect(ps(`& 'C:${BS}Program Files${BS}GitHub CLI${BS}gh.exe' pr merge 5`)).toBe('merge')
+})
+
+test('round 9: a push of a feature branch and a read of a pull request stay quiet', () => {
+  for (const cmd of ['git push origin feat', 'git push -u origin feat', 'gh pr view 5', 'gh api repos/o/r/pulls/5', 'gh pr list --state open']) expect(label(cmd)).toBeUndefined()
+})
