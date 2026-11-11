@@ -82,3 +82,100 @@ test('reading the bus, the mod source in the repo and the repo itself stay allow
   expect(sh('git -C C:/repos/coordinator-monitor-wt-071 status', 'PowerShell')).toBe(false)
   expect(sh('Set-Location C:\\repos\\coordinator-monitor-wt-071; Set-Content hooks\\a.ts x', 'PowerShell')).toBe(false)
 })
+
+test('a file tool cannot reach the bus through a Windows alias of its path', () => {
+  for (const p of [
+    'C:\\Users\\carlo\\.claude\\COORDI~1\\rules.json',
+    '~/.claude/a b/../coordinator-monitor/rules.json',
+    '~/.claude::$INDEX_ALLOCATION/coordinator-monitor/rules.json',
+    '~/.claude./coordinator-monitor/rules.json',
+    '~/.claude/coordinator-monitor./rules.json',
+    '~/.claude/coordinator-monitor /rules.json',
+    '~/.claude/coordinator-monitor::$DATA',
+  ])
+    for (const tool of ['Write', 'Edit']) expect(file(p, tool)).toBe(true)
+  // The rest of .claude stays editable.
+  expect(file('~/.claude/settings.json')).toBe(false)
+  expect(file('~/.claude/skills/x/SKILL.md', 'Edit')).toBe(false)
+})
+
+test('a file tool cannot reach the bus through a junction', () => {
+  // Without a way to resolve the path (the host offers none), the bus folder's own entries are known by name.
+  expect(file('C:/tmp/c/coordinator-monitor/answers/x.json')).toBe(true)
+  expect(file('C:\\tmp\\c\\coordinator-monitor\\rules.json', 'Edit')).toBe(true)
+  expect(file('C:/repos/coordinator-monitor/hooks/rules.ts')).toBe(false)
+  // Where the runtime can resolve paths, a junction with any name is followed.
+  const sys = (globalThis as { process?: { getBuiltinModule?: (n: string) => any } }).process
+  const fs = sys?.getBuiltinModule?.('node:fs')
+  const os = sys?.getBuiltinModule?.('node:os')
+  const cp = sys?.getBuiltinModule?.('node:child_process')
+  if (!fs || !os || !cp) return
+  const root = fs.mkdtempSync(`${os.tmpdir()}\\cm-guard-`)
+  try {
+    const home = `${root}\\home`
+    const base = `${home}\\.claude\\coordinator-monitor`
+    fs.mkdirSync(`${base}\\answers`, { recursive: true })
+    cp.execFileSync('cmd', ['/c', 'mklink', '/J', `${root}\\c`, `${home}\\.claude`], { stdio: 'ignore' })
+    const at = (file_path: string) => touchesBus({ tool: 'Write', input: { file_path }, isReadOnly: false }, base.replace(/\\/g, '/'), home.replace(/\\/g, '/'))
+    expect(at(`${root}/c/coordinator-monitor/answers/x.json`)).toBe(true)
+    expect(at(`${root}\\c\\coordinator-monitor\\new\\deeper\\x.json`)).toBe(true)
+    expect(at(`${root}/c/settings.json`)).toBe(false)
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('a shell command cannot create a link that makes the bus reachable under another name', () => {
+  for (const cmd of [
+    'cmd /c mklink /J C:\\tmp\\c C:\\Users\\carlo\\.claude',
+    'cmd //c mklink //J C:\\tmp\\c ~/.claude',
+    'mklink /D C:\\tmp\\c C:\\Users\\carlo\\.claude\\coordinator-monitor',
+    'ln -s ~/.claude /tmp/c',
+    'ln -s $HOME/.claude/coordinator-monitor /tmp/c',
+  ])
+    expect(sh(cmd)).toBe(true)
+  for (const cmd of [
+    'New-Item -ItemType Junction -Path C:\\tmp\\c -Target $HOME\\.claude',
+    'New-Item -ItemType SymbolicLink -Path C:\\tmp\\c -Target ~\\.claude\\coordinator-monitor',
+    'New-Item -Path C:\\tmp\\c -ItemType HardLink -Value $env:USERPROFILE\\.claude\\x',
+    'cmd /c mklink /J C:\\tmp\\c C:\\Users\\carlo\\.claude',
+  ])
+    expect(sh(cmd, 'PowerShell')).toBe(true)
+  // Links that name nothing of the folder are not our business.
+  expect(sh('ln -s /usr/bin/node ~/bin/node')).toBe(false)
+  expect(sh('New-Item -ItemType Junction -Path C:\\tmp\\c -Target C:\\repos\\x', 'PowerShell')).toBe(false)
+})
+
+test('braces, tilde short names, joined strings and a glob that spells the folder are denied', () => {
+  for (const cmd of [
+    'echo x | tee ~/{.,}claude/coordinator-monitor/rules.json',
+    'cd ~ && echo x | tee .claud[e]/coordinator-monitor/rules.json',
+    'echo x | tee ~/.claud?/coordinator-monitor/rules.json',
+    'echo x > ~/.claude/COORDI~1/rules.json',
+    'cd ~/.claude && echo x > COORDI~1/rules.json',
+  ])
+    expect(sh(cmd)).toBe(true)
+  for (const cmd of [
+    `Set-Content ('~\\.claude\\coord'+"inator-monitor\\rules.json") x`,
+    `Set-Content ("~\\.claude\\coord"+'inator-monitor\\rules.json') x`,
+    'Set-Content ~\\.claude\\COORDI~1\\rules.json x',
+  ])
+    expect(sh(cmd, 'PowerShell')).toBe(true)
+})
+
+test('a message that only mentions the folder, and cd into .claude for something else, stay quiet', () => {
+  for (const cmd of [
+    'git commit -m "docs: bus lives in ~/.claude/coordinator-monitor"',
+    "git commit -m 'docs: bus lives in ~/.claude/coordinator-monitor'",
+    'echo "see ~/.claude/coordinator-monitor"',
+    'cd .claude && git add settings.json && git commit -m "coordinator: tweak"',
+    'cd ~/.claude && git add settings.json && git commit -m "coordinator: tweak"',
+    'cd ~/.claude; git commit -m "coordinator-monitor update"',
+    'cd ~/.claude && cat coordinator-notes.md',
+  ])
+    expect(sh(cmd)).toBe(false)
+  // Still denied: the command, not the text, names the folder.
+  expect(sh('git commit -m "x"; echo y > ~/.claude/coordinator-monitor/a')).toBe(true)
+  expect(sh('git commit -m "$(echo y > ~/.claude/coordinator-monitor/a)"')).toBe(true)
+  expect(sh('cat <<EOF > ~/.claude/coordinator-monitor/a\nx\nEOF')).toBe(true)
+})

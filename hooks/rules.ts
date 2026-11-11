@@ -13,12 +13,17 @@ export type Rule = { label: string; re: RegExp }
 
 const D = (label: string, pattern: string): Rule => ({ label, re: new RegExp(pattern, 'i') })
 
+// `git` and the options that may come before its subcommand (`git -C ../wt merge x`, `git -c k=v push …`).
+const V = String.raw`(?:"[^"]*"|'[^']*'|\S+)`
+const GIT = String.raw`\bgit(?:\s+(?:-[Cc]\s+${V}|--(?:git-dir|work-tree|namespace)(?:=|\s+)${V}|--[\w-]+(?:=${V})?|-[pP]))*\s+`
+
 export const DEFAULT_RULES: readonly Rule[] = [
   // merges and pushes to the main line
   D('merge', String.raw`\bgh\s+pr\s+merge\b`),
-  D('merge', String.raw`\bgit\s+merge(?![-\w])`),
-  D('merge', String.raw`\bgit\s+push\b[^|;&]*[\s:+](main|master)(?=$|[\s;&|"'])`),
-  D('merge', String.raw`\bgit\s+push\b[^|;&]*(--force\b|\s-f\b)`),
+  D('merge', String.raw`${GIT}merge(?![-\w])`),
+  D('merge', String.raw`\bgh\s+api\b[^|;&]*\bpulls/\d+/merge\b`),
+  D('merge', String.raw`${GIT}push\b[^|;&]*(?:[\s:+]|refs/heads/)(main|master)(?=$|[\s;&|"'])`),
+  D('merge', String.raw`${GIT}push\b[^|;&]*(--force\b|\s-f\b)`),
   // deploys and releases
   D('deploy', String.raw`\b(vercel|netlify)\b[^|;&]*--prod\b`),
   D('deploy', String.raw`\bfly(ctl)?\s+deploy\b`),
@@ -76,7 +81,7 @@ export const compileRules = (file: RulesFile | null): { rules: Rule[]; critical:
 //   starts like a flag, `-v` or `--output=a b`, leaves the whole text unmasked unless it is the value of a flag
 //   of that tool, `-m`, `--body`, `grep -e`…), or a backslash-newline inside double quotes;
 // - a step that writes a file with `>`; a here-doc body that goes anywhere but a .md or .txt file or stdout;
-// - the text has a hidden character, a curly quote, a CR, a backtick, `$'`, `$(` or `${` (but for the
+// - the text has a hidden character, a curly quote, a CR, a backtick, `$'`, `$(`, `${` or `$[` (but for the
 //   one `git commit -m "$(cat <<'EOF'` form), a here-string, process substitution, a line continuation,
 //   a backslash before a quote or a metacharacter, a comment, a subshell or a brace, `eval`, a shell or
 //   interpreter given a code string (`bash -c`, `python -c`, `node -e`, `pwsh -Command`), a descriptor
@@ -94,6 +99,11 @@ const OPAQUE: RegExp[] = [
   /(?:^|[;&|(\n])[ \t]*(?:exec[ \t]+\d*[<>]|mkfifo\b|mknod\b|coproc\b)/,
   /\/(?:dev|proc)\/(?!null\b)/,
 ]
+
+// What may follow a `$` inside double quotes or an unquoted here-doc body: a name, a digit, a special parameter,
+// whitespace, a closing quote or the end. Everything else (`$(`, `${`, `$[`, which evaluates the command in an
+// array subscript, `$'`, `$"`) can run code, so it is not data.
+const EXPANDS = /^[^\w$?#!@*\s"-]/
 
 type Step = { start: number; end: number; quotes: [number, number][]; hasWrite: boolean }
 
@@ -125,7 +135,7 @@ const scan = (text: string, q0 = ''): { steps: Step[]; q: string } | null => {
       } else if (c === q) {
         quotes.push([qs, i])
         q = ''
-      } else if (q === '"' && c === '$' && (next === '(' || next === '{')) return null
+      } else if (q === '"' && c === '$' && EXPANDS.test(next)) return null
       continue
     }
     if (c === '\\') {
@@ -228,7 +238,7 @@ const withoutDocs = (cmd: string): string | null => {
     // An unquoted word: the shell drops each backslash-newline, then runs each `$( )` in the body as it reads
     // it, and a joined line can be the end word (`EO\<nl>F`) that ends the body early.
     const joined = lines.slice(i + 1, end).join('\n').replace(/\\\n/g, '')
-    if (!m[2] && (/\$[({]|`/.test(joined) || joined.split('\n').some(ends))) return null
+    if (!m[2] && (/\$(?![\w$?#!@*\s"-]|$)|`/.test(joined) || joined.split('\n').some(ends))) return null
     const after = line.slice((m.index ?? 0) + m[0].length)
     if (sub) {
       // `git commit -m "$(cat <<'EOF'`: the body is the text of a string given to a message command.

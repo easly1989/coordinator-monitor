@@ -229,6 +229,55 @@ test('quotes and escapes inside a command word do not hide a protected command',
   expect(matchRule(DEFAULT_RULES, 'echo hi', true)?.label).toBe(undefined)
 })
 
+test('a $[ ] in double quotes or an unquoted body runs code, so the text is read raw', () => {
+  for (const cmd of [
+    `echo 'a[$(${M})]'; echo "$[_]"`,
+    `echo 'a[$(${M})]'\ngit commit -m "$[_]"`,
+    `echo 'a[$(${M})]'\ncat <<EOF\n$[_]\nEOF`,
+    `echo 'a[$(${M})]'\ngit commit -m "$(cat <<EOF\n$[_]\nEOF\n)"`,
+    `grep -e 'a[$(${M})]' x; echo "$[_]"`,
+  ]) {
+    expect(label(cmd)).toBe('merge')
+    expect(dataMask(cmd)).toBe(null)
+  }
+  // A variable, a positional, `$$`, a trailing `$` and a `$` before a quote are text.
+  for (const cmd of [
+    `git commit -m "fix $USER $1 $$ cost $ and $"`,
+    `cat <<EOF\n$HOME $1 $$ $?\n${M}\nEOF`,
+    `echo "${M} $x"`,
+  ])
+    expect(label(cmd)).toBe(undefined)
+})
+
+test('a git option before the subcommand, a full refspec and gh api do not hide a merge or a push to main', () => {
+  for (const cmd of [
+    'git -C ../wt merge feature',
+    'git -C ../wt push origin main',
+    'git -c user.name=x merge feature',
+    'git --git-dir=../wt/.git merge feature',
+    'git --work-tree=../wt --git-dir ../wt/.git push origin master',
+    'git -C "../my wt" push origin main',
+    'git push origin HEAD:refs/heads/main',
+    'git push origin +HEAD:main',
+    'git push origin HEAD:main',
+    'git push -C x --force origin topic',
+    'gh api -X PUT repos/o/r/pulls/5/merge',
+    'gh api --method PUT repos/o/r/pulls/5/merge',
+    'gh api -x put repos/o/r/pulls/5/merge -f merge_method=squash',
+    'gh api repos/o/r/pulls/5/merge --method=PUT',
+  ])
+    expect(label(cmd)).toBe('merge')
+  for (const cmd of [
+    'git -C ../wt status',
+    'git -C ../wt push origin feature/main-menu',
+    'git -c core.pager=cat log --oneline',
+    'git push origin HEAD:refs/heads/topic',
+    'gh api repos/o/r/pulls/5/comments',
+    'gh api repos/o/r/pulls/5',
+  ])
+    expect(label(cmd)).toBe(undefined)
+})
+
 test('the text is read raw whenever it cannot be split with certainty', () => {
   for (const cmd of [
     // Code strings given to a shell or an interpreter.
