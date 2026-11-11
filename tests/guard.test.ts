@@ -179,3 +179,84 @@ test('a message that only mentions the folder, and cd into .claude for something
   expect(sh('git commit -m "$(echo y > ~/.claude/coordinator-monitor/a)"')).toBe(true)
   expect(sh('cat <<EOF > ~/.claude/coordinator-monitor/a\nx\nEOF')).toBe(true)
 })
+
+const BS = String.fromCharCode(92)
+const took = (f: () => unknown): number => {
+  const t = performance.now()
+  f()
+  return performance.now() - t
+}
+
+test('a glob in a command is read in linear time', () => {
+  expect(took(() => sh('ls ' + '*'.repeat(2000)))).toBeLessThan(200)
+  expect(took(() => sh('ls .' + '*'.repeat(2000) + '/x'))).toBeLessThan(200)
+  expect(took(() => sh('ls ' + '{a,b}'.repeat(2000) + '/x'))).toBeLessThan(200)
+  expect(took(() => sh('ls ' + '{'.repeat(2000) + '/x'))).toBeLessThan(200)
+  expect(took(() => sh('ls ' + '[a'.repeat(2000) + '/x'))).toBeLessThan(200)
+})
+
+test('a class, a negated class and a brace that spell the folder are denied, one that does not stay quiet', () => {
+  for (const cmd of [
+    'cp x.txt ~/.cl[^x]ude/coordinator-monitor/rules.json',
+    'cp x.txt ~/.cl[!x]ude/coordinator-monitor/rules.json',
+    'cp x.txt ~/[.]claude/coordinator-monitor/rules.json',
+    'cp x.txt ~/.cl[a-b]ude/coordinator-monitor/rules.json',
+    'cp x.txt ~/.cl[a/coordinator-monitor/rules.json',
+    'cp x.txt ~/.{cl,x}aude/coordinator-monitor/rules.json',
+    'cp x.txt ~/{.claude/coord,x}inator-monitor/rules.json',
+  ])
+    expect(sh(cmd)).toBe(true)
+  for (const cmd of ['cp x.txt ~/.cl[x]ude/other/a', 'mkdir -p {src,test}/foo', 'cp [d-f]*/x.txt .', 'ls .git*/hooks'])
+    expect(sh(cmd)).toBe(false)
+})
+
+test('an 8.3 short name of the folder is the folder, in a shell command and in PowerShell', () => {
+  expect(sh('echo P > ~/CLAUDE~1/COORDI~1/rules.json')).toBe(true)
+  expect(sh('echo P > C:/Users/carlo/CLAUDE~2/COORDI~1/rules.json')).toBe(true)
+  expect(sh(`Set-Content ~${BS}CLAUDE~1${BS}COORDI~1${BS}rules.json P`, 'PowerShell')).toBe(true)
+  expect(sh('cd ~/CLAUDE~1 && echo P > COORDI~1/rules.json')).toBe(true)
+  expect(sh('echo P > ~/CLAUDE~1/settings.json')).toBe(false)
+})
+
+test('a `.` at the end of a cd target is the same folder', () => {
+  expect(sh('cd ~/.claude/. && echo P > coordinator-monitor/rules.json')).toBe(true)
+  expect(sh('cd ~/.claude/./. && echo P > coordinator-monitor/rules.json')).toBe(true)
+  expect(sh(`cd ~${BS}.claude${BS}. && echo P > coordinator-monitor${BS}rules.json`)).toBe(true)
+  expect(sh('cd ~/.claude/. && echo P > settings.json')).toBe(false)
+})
+
+test('a device or a share prefix on a file tool path is the same path', () => {
+  const p = `C:${BS}Users${BS}carlo${BS}CLAUDE~1${BS}COORDI~1${BS}rules.json`
+  for (const prefix of [`${BS}${BS}.${BS}`, `${BS}${BS}?${BS}`, `${BS}${BS}localhost${BS}`]) {
+    const path = prefix.endsWith('localhost' + BS) ? p.replace('C:', 'C$') : p
+    for (const tool of ['Write', 'Edit']) expect(file(prefix + path, tool)).toBe(true)
+  }
+  expect(file(`${BS}${BS}.${BS}C:${BS}Users${BS}carlo${BS}.claude${BS}coordinator-monitor${BS}rules.json`)).toBe(true)
+  expect(file(`${BS}${BS}?${BS}C:${BS}Users${BS}carlo${BS}.claude${BS}settings.json`)).toBe(false)
+  // A bus folder outside .claude, behind an administrative share.
+  const at = (file_path: string) => touchesBus({ tool: 'Write', input: { file_path }, isReadOnly: false }, 'D:/bus', HOME)
+  expect(at(`${BS}${BS}localhost${BS}D$${BS}bus${BS}answers.json`)).toBe(true)
+  expect(at(`${BS}${BS}?${BS}D:${BS}bus${BS}answers.json`)).toBe(true)
+  expect(at(`${BS}${BS}?${BS}D:${BS}other${BS}a.json`)).toBe(false)
+})
+
+test('a path that only starts like the folder, a link inside a repo and a URL stay quiet', () => {
+  for (const cmd of [
+    'ls C:/repos/claude-*/README.md',
+    'ln -s ../shared C:/repos/claude-environment/x',
+    'curl "https://example.com/search?q=claude/code"',
+    'du -sh .*/',
+    'cp x C:/repos/claude-environment/docs/a.md',
+  ])
+    expect(sh(cmd)).toBe(false)
+  expect(sh('ln -s ../shared C:/repos/x', 'Bash')).toBe(false)
+})
+
+test('a bare cd into the folder is denied, a cd elsewhere and a quoted mention are not', () => {
+  expect(sh('cd ~/.claude/coordinator-monitor')).toBe(true)
+  expect(sh('cd "~/.claude/coordinator-monitor"')).toBe(true)
+  expect(sh("pushd '~/.claude/coordinator-monitor' && ls")).toBe(true)
+  expect(sh('cd ~/.claude && cd coordinator-monitor')).toBe(true)
+  expect(sh('cd ~/.claude && cat coordinator-notes.md')).toBe(false)
+  expect(sh('cd ~/repos && echo "~/.claude/coordinator-monitor"')).toBe(false)
+})

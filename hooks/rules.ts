@@ -14,15 +14,24 @@ export type Rule = { label: string; re: RegExp }
 const D = (label: string, pattern: string): Rule => ({ label, re: new RegExp(pattern, 'i') })
 
 // `git` and the options that may come before its subcommand (`git -C ../wt merge x`, `git -c k=v push …`).
-const V = String.raw`(?:"[^"]*"|'[^']*'|\S+)`
-const GIT = String.raw`\bgit(?:\s+(?:-[Cc]\s+${V}|--(?:git-dir|work-tree|namespace)(?:=|\s+)${V}|--[\w-]+(?:=${V})?|-[pP]))*\s+`
+// A value is a quoted string, an escaped character or a plain character, each starting differently, and the
+// options that take a value are not also matched by the generic `--name`: every text has one reading, so the
+// match cannot blow up. At most 8 options are read; a longer run is the second rule below.
+const V = String.raw`(?:"[^"]*"|'[^']*'|\\.|[^\s\\"'])+`
+const VALUE_OPT = 'git-dir|work-tree|namespace|config-env|attr-source|super-prefix'
+const OPT = String.raw`(?:-[Cc]\s+${V}|--(?:${VALUE_OPT})(?:=${V}|\s+${V})|--(?!(?:${VALUE_OPT})(?![\w-]))[\w-]+(?:=${V})?|-[pP])`
+const GIT = String.raw`\bgit(?:\s+${OPT}){0,8}\s+`
 
 export const DEFAULT_RULES: readonly Rule[] = [
   // merges and pushes to the main line
   D('merge', String.raw`\bgh\s+pr\s+merge\b`),
   D('merge', String.raw`${GIT}merge(?![-\w])`),
-  D('merge', String.raw`\bgh\s+api\b[^|;&]*\bpulls/\d+/merge\b`),
-  D('merge', String.raw`${GIT}push\b[^|;&]*(?:[\s:+]|refs/heads/)(main|master)(?=$|[\s;&|"'])`),
+  // More than 8 options before the subcommand, or an alias defined on the command line (`-c alias.mm=merge`):
+  // the subcommand is not read, so a merge or a push after them is taken as one.
+  D('merge', String.raw`\bgit\s+-\S*(?:\s+\S+){8,}?\s+(?:merge|push)(?![-\w])`),
+  D('merge', String.raw`\bgit\b[^|;&]*\s-c\s+['"]?alias\.`),
+  D('merge', String.raw`\bgh\s+api\b[^|;&]*\bpulls/[^/\s]+/merge\b`),
+  D('merge', String.raw`${GIT}push\b[^|;&]*(?:[\s:+]|(?:refs/)?heads/)(main|master)(?=$|[\s;&|"'])`),
   D('merge', String.raw`${GIT}push\b[^|;&]*(--force\b|\s-f\b)`),
   // deploys and releases
   D('deploy', String.raw`\b(vercel|netlify)\b[^|;&]*--prod\b`),
@@ -361,10 +370,36 @@ export const unquote = (text: string, isPowerShell = false): string => {
   return out
 }
 
+/** `text` with the `|`, `;` and `&` inside quotes, and an escaped blank, made plain, so a rule's `[^|;&]*` does not stop at a quoted one. */
+const flatten = (text: string, isPowerShell: boolean): string => {
+  const esc = isPowerShell ? '`' : '\\'
+  let out = ''
+  let q = ''
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i] ?? ''
+    if (q) {
+      if (c === q) q = ''
+      else if (q === '"' && c === esc) {
+        out += c + (text[++i] ?? '')
+        continue
+      }
+      out += '|;&'.includes(c) ? '_' : c
+    } else if (c === "'" || c === '"') {
+      q = c
+      out += c
+    } else if (c === esc && text[i + 1] === ' ') {
+      out += '__'
+      i++
+    } else out += c
+  }
+  return out
+}
+
 export const matchRule = (rules: readonly Rule[], command: string, isPowerShell = false): Rule | undefined => {
   const text = (isPowerShell ? null : dataMask(command)) ?? command
-  const words = unquote(text, isPowerShell)
-  return rules.find(r => r.re.test(text) || r.re.test(words))
+  const flat = flatten(text, isPowerShell)
+  const views = [text, unquote(text, isPowerShell), flat, unquote(flat, isPowerShell)]
+  return rules.find(r => views.some(v => r.re.test(v)))
 }
 
 export const criticalIn = (critical: readonly string[], command: string): string | undefined => {

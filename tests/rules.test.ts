@@ -307,3 +307,37 @@ test('the text is read raw whenever it cannot be split with certainty', () => {
   ])
     expect(label(cmd)).toBeTruthy()
 })
+
+test('a merge hidden behind a git option, an alias, a quoted pipe or a ref spelling is still a merge', () => {
+  for (const cmd of [
+    'git -c alias.mm=merge mm f1',
+    'git --config-env user.name=HOME merge f2',
+    'git --attr-source HEAD merge f3',
+    'git --git-dir a --work-tree b merge x',
+    'git push origin HEAD:heads/main',
+    'git push origin HEAD:refs/heads/main',
+    "git push -o 'a|b' origin HEAD:main",
+    'gh api -X PUT repos/o/r/pulls/$N/merge',
+    "gh api -f 'commit_title=a|b' -X PUT repos/o/r/pulls/5/merge",
+    'git -C my\\ repo merge feature',
+  ])
+    expect(label(cmd)).toBe('merge')
+  for (const cmd of [
+    'git push origin feature',
+    'git push origin feature:heads/main2',
+    'git log --merges',
+    'git -c user.name=x commit -m merge',
+    'gh api repos/o/r/pulls/5',
+    'gh api repos/o/r/pulls/5/comments',
+  ])
+    expect(label(cmd)).toBe(undefined)
+})
+
+test('a long run of git options is matched in linear time and fails toward a match', () => {
+  const t = performance.now()
+  const bounded = label('git' + ' --git-dir'.repeat(32) + ' x')
+  const merged = label('git' + ' --git-dir'.repeat(32) + ' x merge')
+  expect(performance.now() - t).toBeLessThan(200)
+  expect(bounded).toBe(undefined)
+  expect(merged).toBe('merge')
+})
