@@ -131,12 +131,21 @@ const globbed = (step: string): boolean =>
 
 // Matching a glob needs no regex (a regex built from the text can be made to take seconds): `*` any run, `?` one
 // character, `[a-c]` / `[!x]` a class. A class with a POSIX name inside matches anything.
-const tokens = (p: string): string[] | null => {
+const tokens = (p: string): string[] => {
   const out: string[] = []
   for (let n = 0; n < p.length; n++) {
     if (p[n] === '[') {
       const e = p.indexOf(']', n + 2)
-      if (e < 0) return null
+      if (e < 0) {
+        // An empty `[]` (jq `.a[]`) is two plain characters; a class left open stands for any text after it
+        // (`d["m"]` is cut at its quotes into `d[`: no name starts with `d`; `.cl[a` is `.cl*`).
+        if (p[n + 1] === ']') {
+          out.push('[')
+          continue
+        }
+        out.push('*')
+        break
+      }
       out.push(p.slice(n, e + 1))
       n = e
     } else out.push(p[n] ?? '')
@@ -220,11 +229,17 @@ const D_NAMES = ['.claude', 'claude~1']
 const CM_NAMES = ['coordinator-monitor', 'coordi~1']
 /** A segment with a glob, a class or a brace that could spell one of `names`. */
 const globs = (seg: string, names: string[]): boolean => {
+  // A long word is not read (the brace regex below backtracks on one): it is a hit.
+  if (seg.length > 256) return true
   // A brace sequence (`{a..z}`) and a PowerShell format slot (`{0}`) stand for any text.
-  const words = expand(seg.replace(/\{[^{},]*\.\.[^{},]*\}|\{\d+\}/g, '*'))
-  return !words || words.some(w => {
+  const left = { n: 64 }
+  const words = expand(seg.replace(/\{[^{},]*\.\.[^{},]*\}|\{\d+\}/g, '*'), left)
+  // A brace left open is plain text (`awk '{print'`) unless it holds a piece of a name (`{.claude/coord,x}`
+  // cut at its slash); more than 64 words is a hit.
+  if (!words) return left.n < 0 || /claud|coord|\{\./.test(seg)
+  return words.some(w => {
     const t = tokens(w)
-    return !t || names.some(n => wild(t, n))
+    return names.some(n => wild(t, n))
   })
 }
 const couldBeD = (seg: string): boolean => {

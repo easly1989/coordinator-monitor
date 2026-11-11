@@ -466,6 +466,10 @@ const flatten = (text: string, isPowerShell: boolean): string => {
   const esc = isPowerShell ? '`' : '\\'
   let out = ''
   let q = ''
+  // Open `$(`, `(`, `${` and (in a POSIX shell) backticks: a line break inside them does not end the command.
+  let depth = 0
+  let braces = 0
+  let tick = false
   for (let i = 0; i < text.length; i++) {
     const c = text[i] ?? ''
     if (q) {
@@ -481,9 +485,57 @@ const flatten = (text: string, isPowerShell: boolean): string => {
     } else if (c === esc && text[i + 1] === ' ') {
       out += '__'
       i++
-    } else out += c
+    } else if (c === esc && text[i + 1] === '(' || c === esc && text[i + 1] === ')') {
+      out += c + text[++i]
+    } else {
+      if (c === '(') depth++
+      else if (c === ')' && depth > 0) depth--
+      else if (c === '{' && text[i - 1] === '$') braces++
+      else if (c === '}' && braces > 0) braces--
+      else if (c === '`' && !isPowerShell) tick = !tick
+      out += c === '\n' && (depth > 0 || braces > 0 || tick) ? ' ' : c
+    }
   }
   return out
+}
+
+/**
+ * A comma, then blanks, comments (`# c`, `<# c #>`) and line breaks, up to the next word, as one blank: PowerShell
+ * reads an argument list on across them (a POSIX shell does not, but a rule that matched across them stays a match).
+ * One pass over the text, each comment found once.
+ */
+const commaJoin = (text: string): string => {
+  let out = ''
+  let last = 0
+  let from = 0
+  let open = true // a `<#` with no `#>` after it is only looked for once
+  for (let c = text.indexOf(','); c >= 0; c = text.indexOf(',', from)) {
+    let p = c + 1
+    let lines = false
+    for (;;) {
+      const ch = text[p]
+      if (ch === ' ' || ch === '\t' || ch === '\r') p++
+      else if (ch === '\n') {
+        lines = true
+        p++
+      } else if (ch === '#') {
+        const e = text.indexOf('\n', p)
+        p = e < 0 ? text.length : e
+      } else if (ch === '<' && text[p + 1] === '#' && open) {
+        const e = text.indexOf('#>', p + 2)
+        if (e < 0) {
+          open = false
+          break
+        }
+        p = e + 2
+      } else break
+    }
+    from = Math.max(p, c + 1)
+    if (!lines) continue
+    out += text.slice(last, c) + ' '
+    last = p
+  }
+  return out + text.slice(last)
 }
 
 export const matchRule = (rules: readonly Rule[], command: string, isPowerShell = false): Rule | undefined => {
@@ -494,7 +546,7 @@ export const matchRule = (rules: readonly Rule[], command: string, isPowerShell 
   // A backslash, a backtick or a trailing comma before a line break joins the lines, in either line ending (the comma
   // only continues a PowerShell line, but main matched across it in both shells, so the floor keeps it); a line break
   // in quotes is flattened to a blank.
-  const joined = text.replace(/[\\`,][ \t]*\r?\n/g, ' ')
+  const joined = commaJoin(text).replace(/[\\`][ \t]*\r?\n/g, ' ')
   const lines = joined === text ? [] : [joined, flatten(joined, isPowerShell)]
   const views = [...new Set([text, flat, ...lines].flatMap(v => [v, unquote(v, isPowerShell)]))]
   return rules.find(r => views.some(v => r.re.test(v)))

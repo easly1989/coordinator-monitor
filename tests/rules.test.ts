@@ -459,3 +459,20 @@ test('round 11: a trailing comma, a backtick or a quoted line break does not spl
   expect(label('git push origin refs/tags/*')).toBeUndefined()
   expect(label('git push origin refs/heads/*')).toBe('merge')
 })
+
+test('round 12: a line break inside an open substitution or group does not end the step; a comma joins across comments and blank lines', () => {
+  const ps = (cmd: string) => matchRule(DEFAULT_RULES, cmd, true)?.label
+  const BT = String.fromCharCode(96)
+  for (const cmd of ['git push origin $(\necho main\n)', 'git push origin ${u:-\nmain\n}', `git push origin ${BT}true\necho main\n${BT}`, 'git push origin $(cat <<E\nmain\nE\n)', 'git push origin feat $(\necho --force\n)'])
+    expect(label(cmd)).toBe('merge')
+  expect(label('vercel $(\necho --prod\n)')).toBe('deploy')
+  expect(label('docker compose $(\necho down\n)')).toBe('restart')
+  for (const cmd of ['git push origin (\necho main\n)', 'git push origin @(\necho main\n)', 'git push origin feat, # c\nmain', 'git push origin feat,\n\nmain', 'git push origin feat,\n  \nmain', 'git push origin feat, <# x #>\nmain'])
+    expect(ps(cmd)).toBe('merge')
+  expect(ps('docker compose ps, # c\ndown')).toBe('restart')
+  // A backtick followed by a blank line ends the command; a closed group ends at its line break.
+  expect(ps(`git push origin feat${BT}\n\nmain`)).toBeUndefined()
+  expect(ps('git push origin (\necho feat\n)')).toBeUndefined()
+  expect(label('git push origin $(\necho feat\n)')).toBeUndefined()
+  expect(label('echo $(date)\ngit push origin feat')).toBeUndefined()
+})

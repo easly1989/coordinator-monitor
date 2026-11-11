@@ -186,6 +186,12 @@ const took = (f: () => unknown): number => {
   f()
   return performance.now() - t
 }
+/** The best of up to three runs, stopping at the first fast one: the suite runs files side by side. */
+const fast = (f: () => unknown): number => {
+  let best = took(f)
+  for (let k = 0; k < 2 && best >= 200; k++) best = Math.min(best, took(f))
+  return best
+}
 
 test('a glob in a command is read in linear time', () => {
   expect(took(() => sh('ls ' + '*'.repeat(2000)))).toBeLessThan(200)
@@ -314,7 +320,7 @@ test('every regex family of the guard reads a 64 KB input in under 200 ms', () =
   for (const unit of ['cd ~/.claude ', 'cd -a ', 'cp ', 'cp x ~/.claude/y ', 'tar -xf a -C ', 'ln -s ', 'New-Item -ItemType Junction ', '~/.cl*/', '{a,b}', '{u..u}', '{0}', '@(a|b)', '.cl{1} ', '7z x a -o', 'xcopy ', 'copy ', 'cd ~/.claude/skills/.. ', 'mklink ']) {
     const s = big(unit)
     // The best of three runs: the suite runs files side by side, and one slow slice is not a slow regex.
-    for (const tool of ['Bash', 'PowerShell']) expect(Math.min(took(() => sh(s, tool)), took(() => sh(s, tool)), took(() => sh(s, tool)))).toBeLessThan(200)
+    for (const tool of ['Bash', 'PowerShell']) expect(fast(() => sh(s, tool))).toBeLessThan(200)
   }
 })
 
@@ -464,4 +470,15 @@ test('round 11: an alternate-data-stream strip is linear, and a glob, a custom b
   expect(at('cd /d/bus && echo x > rules.json', 'D:/bus')).toBe(true)
   expect(at('echo x >~/bus/rules.json', 'C:/Users/carlo/bus')).toBe(true)
   expect(at('echo x > /d/other/rules.json', 'D:/bus')).toBe(false)
+})
+
+test('round 12: a long word after a cd into the .claude folder is judged in linear time, and an awk, jq, python or script-block word is not a glob', () => {
+  const dots = '.'.repeat(65000)
+  const long = [['Bash', `cd ~/${D} && x {${dots}a`], ['Bash', `cd ~/${D} && x {a${'..'.repeat(32500)}b`], ['Bash', `cd ~/.cl* && x {${dots}a`], ['PowerShell', `cd ~/${D}; x {${dots}a`], ['Bash', `cd ~/${D} && x ${'{a}'.repeat(21000)}`]]
+  for (const [tool, cmd] of long) expect(fast(() => sh(cmd, tool))).toBeLessThan(200)
+  for (const cmd of [`cd ~/${D} && ls -la | awk '{print $9}'`, `cd ~/${D} && jq '.permissions.allow[]' settings.json`, `cd ~/${D} && jq '{model: .model}' settings.json`, `cd ~/${D} && cat settings.json | jq '.hooks[]'`, `cd ~/${D} && python3 -c 'import json; d=json.load(open("settings.json")); print(d["model"])'`])
+    expect(sh(cmd)).toBe(false)
+  for (const cmd of [`cd ~/${D}; Get-ChildItem | ForEach-Object { $_.Name }`, `cd ~/${D}; dir | % { $_.FullName }`, `cd ~/${D}; Get-ChildItem | Where-Object { $_.Length -gt 1MB }`]) expect(sh(cmd, 'PowerShell')).toBe(false)
+  for (const cmd of [`cd ~/${D} && rm -rf [c]oordinator-monitor`, `cd ~/${D} && rm -rf "c"*`, `cd ~/${D} && rm -rf {c,x}*`, `cd ~/${D} && rm -rf c${BS}o*`]) expect(sh(cmd)).toBe(true)
+  expect(sh(`cd ~/${D}; ri c${String.fromCharCode(96)}oord*`, 'PowerShell')).toBe(true)
 })
