@@ -260,3 +260,60 @@ test('a bare cd into the folder is denied, a cd elsewhere and a quoted mention a
   expect(sh('cd ~/.claude && cat coordinator-notes.md')).toBe(false)
   expect(sh('cd ~/repos && echo "~/.claude/coordinator-monitor"')).toBe(false)
 })
+
+const CM = 'coordinator-monitor'
+
+test('a link or a junction whose target is a glob is a link to the folder', () => {
+  expect(sh(`ln -s ~/.claud? /tmp/x && echo P > /tmp/x/${CM}/rules.json`)).toBe(true)
+  expect(
+    sh(`New-Item -ItemType Junction -Path C:${BS}tmp${BS}j -Target (Resolve-Path ~${BS}.claud?); Set-Content C:${BS}tmp${BS}j${BS}${CM}${BS}rules.json x`, 'PowerShell'),
+  ).toBe(true)
+  expect(sh('ln -s a b')).toBe(false)
+})
+
+test('a brace sequence, a -f placeholder and an extglob are wildcards', () => {
+  expect(sh(`echo P > ~/.cla{u..u}de/${CM}/rules.json`)).toBe(true)
+  expect(sh(`Set-Content ("{0}${BS}.cl{1}${BS}${CM}${BS}rules.json" -f $HOME,'aude') x`, 'PowerShell')).toBe(true)
+  expect(sh(`echo P > ~/.claude/@(coord*)/rules.json`)).toBe(true)
+  expect(sh(`echo P > ~/.claude/+(coordinator)-monitor/rules.json`)).toBe(true)
+  expect(sh('mkdir -p src/{a..c}')).toBe(false)
+})
+
+test('a copy, an extract or a cd into the .claude folder reaches the bus, a copy elsewhere does not', () => {
+  for (const cmd of [
+    `cp -r /tmp/t/${CM} ~/.claude/`,
+    'tar -xf x.tar -C ~/.claude',
+    `cd ~/.cl* && echo P > ${CM}/rules.json`,
+    `cd ~/.claude && echo P>${CM}/rules.json`,
+    `cd ~/.claude/skills/.. && echo P > ${CM}/rules.json`,
+    'cd ~/.claude && cp x .',
+    'unzip x.zip -d ~/.claude',
+    '7z x a.7z -o~/.claude',
+    'mv /tmp/t ~/.claude/',
+    'cp -t ~/.claude /tmp/x',
+  ])
+    expect(sh(cmd)).toBe(true)
+  for (const cmd of [`Copy-Item x -Destination ~${BS}.claude`, `robocopy C:${BS}tmp${BS}t C:${BS}Users${BS}carlo${BS}.claude /E`, `Expand-Archive x.zip -DestinationPath ~${BS}.claude`])
+    expect(sh(cmd, 'PowerShell')).toBe(true)
+  for (const cmd of [
+    'ls ~/.claude',
+    'cp x ~/.claude/skills/foo',
+    'cp ~/.claude/settings.json /tmp/',
+    'tar -xf x.tar -C /tmp/y',
+    'unzip x.zip -d /tmp/q',
+    'cd /tmp && echo P > a',
+    'cd ~/.claude/skills && ls',
+    'cd ~ && ls .*/',
+  ])
+    expect(sh(cmd)).toBe(false)
+  expect(sh('Copy-Item a b', 'PowerShell')).toBe(false)
+})
+
+test('every regex family of the guard reads a 64 KB input in under 200 ms', () => {
+  const big = (unit: string) => unit.repeat(Math.ceil(65536 / unit.length))
+  for (const unit of ['cd ~/.claude ', 'cd -a ', 'cp ', 'cp x ~/.claude/y ', 'tar -xf a -C ', 'ln -s ', 'New-Item -ItemType Junction ', '~/.cl*/', '{a,b}', '{u..u}', '{0}', '@(a|b)', '.cl{1} ', '7z x a -o', 'xcopy ', 'copy ', 'cd ~/.claude/skills/.. ', 'mklink ']) {
+    const s = big(unit)
+    // The best of three runs: the suite runs files side by side, and one slow slice is not a slow regex.
+    for (const tool of ['Bash', 'PowerShell']) expect(Math.min(took(() => sh(s, tool)), took(() => sh(s, tool)), took(() => sh(s, tool)))).toBeLessThan(200)
+  }
+})

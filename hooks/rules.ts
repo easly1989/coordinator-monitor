@@ -9,32 +9,89 @@
 
 import { HIDDEN } from './request'
 
-export type Rule = { label: string; re: RegExp }
+type Matcher = { test: (text: string) => boolean }
+export type Rule = { label: string; re: Matcher }
 
 const D = (label: string, pattern: string): Rule => ({ label, re: new RegExp(pattern, 'i') })
 
 // `git` and the options that may come before its subcommand (`git -C ../wt merge x`, `git -c k=v push …`).
-// A value is a quoted string, an escaped character or a plain character, each starting differently, and the
-// options that take a value are not also matched by the generic `--name`: every text has one reading, so the
-// match cannot blow up. At most 8 options are read; a longer run is the second rule below.
-const V = String.raw`(?:"[^"]*"|'[^']*'|\\.|[^\s\\"'])+`
+// A value is a quoted string, an escaped character or a plain character, each starting differently (the escape
+// is a backslash, or a backtick in PowerShell), and the options that take a value are not also matched by the
+// generic `--name`: every text has one reading, so the match cannot blow up. At most 8 options are read; a
+// longer run is the overflow rule below.
+const V = String.raw`(?:"(?:[^"\\\x60]|[\\\x60].)*"|'[^']*'|[\\\x60].|[^\s\\\x60"'])+`
 const VALUE_OPT = 'git-dir|work-tree|namespace|config-env|attr-source|super-prefix'
 const OPT = String.raw`(?:-[Cc]\s+${V}|--(?:${VALUE_OPT})(?:=${V}|\s+${V})|--(?!(?:${VALUE_OPT})(?![\w-]))[\w-]+(?:=${V})?|-[pP])`
-const GIT = String.raw`\bgit(?:\s+${OPT}){0,8}\s+`
+const GIT = String.raw`\bgit(?:\.exe)?['"]?(?:\s+${OPT}){0,8}\s+`
+
+// Where each command step ends, for the text last asked about (a `|`, `;`, `&` or newline).
+let sepsOf = ''
+let seps: number[] = []
+const stepEnds = (text: string): number[] => {
+  if (text !== sepsOf) {
+    sepsOf = text
+    seps = []
+    for (const m of text.matchAll(/[|;&\n]/g)) seps.push(m.index)
+  }
+  return seps
+}
+
+/**
+ * A command: `head` found, and the rest of that step (up to a `|`, `;`, `&` or newline) passing `tail`. A step
+ * is read once however many times `head` occurs in it (the first one's rest holds all the later ones'), so the
+ * time is linear in the text, where a regex scanning on from every occurrence (`head[^|;&]*tail`) is quadratic.
+ */
+export const afterRule = (label: string, source: string, tail: RegExp | ((rest: string, m: RegExpExecArray) => boolean)): Rule => {
+  const head = new RegExp(source, 'gi')
+  const ok = typeof tail === 'function' ? tail : (rest: string) => tail.test(rest)
+  return {
+    label,
+    re: {
+      test: text => {
+        const ends = stepEnds(text)
+        let p = 0
+        const done = new Map<string, [number, number]>() // by the head's second group: step end and where its rest began
+        head.lastIndex = 0
+        for (let m = head.exec(text); m; m = head.exec(text)) {
+          head.lastIndex = m.index + 1
+          const from = m.index + m[0].length
+          while (p < ends.length && (ends[p] ?? 0) < from) p++
+          const end = ends[p] ?? text.length
+          const seen = done.get(m[2] ?? '')
+          if (seen && seen[0] === end && from >= seen[1]) continue
+          if (ok(text.slice(from, end), m)) return true
+          done.set(m[2] ?? '', [end, from])
+        }
+        return false
+      },
+    },
+  }
+}
+
+// What may follow a branch name on a push line: a blank, a quote, a separator, a bracket, a redirect.
+const MAIN = String.raw`(?:[\s:+]|(?:refs/)?heads/)(?:main|master)(?=$|[\s;&|"'(){}<>\x60])`
+// An alias whose value runs merge or push, defined by `git config alias.x …`.
+const aliasDefinesMerge = (rest: string): boolean => {
+  const m = /\balias\.[^\s=]*/i.exec(rest)
+  return !!m && /merge|push/i.test(rest.slice(m.index + m[0].length))
+}
+// More than 8 words between `git -x` and a merge or a push: read as one.
+const overflow = (rest: string): boolean => rest.trim().split(/\s+/).some((w, i) => i >= 8 && /^(?:merge|push)(?![-\w])/i.test(w))
+// A push to main (or of every branch), a forced one, or an alias set to run a merge or a push.
+const PUSH = new RegExp(String.raw`${MAIN}|\s--(?:all|mirror)(?![\w-])|--force\b|\s-f\b`, 'i')
+const gitTail = (rest: string, m: RegExpExecArray): boolean => !m[2] || (/^push$/i.test(m[2]) ? PUSH.test(rest) : aliasDefinesMerge(rest))
 
 export const DEFAULT_RULES: readonly Rule[] = [
   // merges and pushes to the main line
   D('merge', String.raw`\bgh\s+pr\s+merge\b`),
-  D('merge', String.raw`${GIT}merge(?![-\w])`),
-  // More than 8 options before the subcommand, or an alias defined on the command line (`-c alias.mm=merge`):
-  // the subcommand is not read, so a merge or a push after them is taken as one.
-  D('merge', String.raw`\bgit\s+-\S*(?:\s+\S+){8,}?\s+(?:merge|push)(?![-\w])`),
-  D('merge', String.raw`\bgit\b[^|;&]*\s-c\s+['"]?alias\.`),
-  D('merge', String.raw`\bgh\s+api\b[^|;&]*\bpulls/[^/\s]+/merge\b`),
-  D('merge', String.raw`${GIT}push\b[^|;&]*(?:[\s:+]|(?:refs/)?heads/)(main|master)(?=$|[\s;&|"'])`),
-  D('merge', String.raw`${GIT}push\b[^|;&]*(--force\b|\s-f\b)`),
+  afterRule('merge', String.raw`${GIT}(?:(merge)(?![-\w])|(push|config)\b)`, gitTail),
+  // More than 8 options before the subcommand: it is not read, so a merge or a push after them is taken as one.
+  // An alias defined on the command line (`-c alias.mm=merge`): what it runs is not read.
+  afterRule('merge', String.raw`\bgit(?:\.exe)?['"]?\s+-\S*`, overflow),
+  afterRule('merge', String.raw`\bgit\b`, /\s(?:-c|--config-env)[ =]?\s*['"]?alias\./i),
+  afterRule('merge', String.raw`\bgh\s+api\b`, /\bpulls\/[^/\s]+\/merge\b/i),
   // deploys and releases
-  D('deploy', String.raw`\b(vercel|netlify)\b[^|;&]*--prod\b`),
+  afterRule('deploy', String.raw`\b(?:vercel|netlify)\b`, /--prod\b/i),
   D('deploy', String.raw`\bfly(ctl)?\s+deploy\b`),
   D('deploy', String.raw`\b(npm|pnpm|yarn|bun)\s+(run\s+)?(deploy|release|publish)\b`),
   D('deploy', String.raw`\bnpm\s+publish\b`),
@@ -45,7 +102,7 @@ export const DEFAULT_RULES: readonly Rule[] = [
   D('deploy', String.raw`\bdocker\s+push\b`),
   // restarts and stops of running services
   D('restart', String.raw`\bdocker\s+(container\s+)?(restart|stop|kill|rm)\b`),
-  D('restart', String.raw`\bdocker[\s-]compose\b[^|;&]*\b(restart|stop|down|up|kill|rm)\b`),
+  afterRule('restart', String.raw`\bdocker[\s-]compose\b`, /\b(?:restart|stop|down|up|kill|rm)\b/i),
   D('restart', String.raw`\bsystemctl\s+(restart|stop|reload|reboot|poweroff)\b`),
   D('restart', String.raw`\bservice\s+\S+\s+(restart|stop|reload)\b`),
   D('restart', String.raw`\b(reboot|shutdown|poweroff)\b`),
@@ -190,9 +247,13 @@ const INERT: RegExp[] = [
 
 /** The step's text with each quoted string (quotes included) shaped to ''. */
 const shape = (text: string, s: Step): string => {
-  let t = text.slice(s.start, s.end)
-  for (const [a, b] of [...s.quotes].reverse()) t = t.slice(0, a - 1 - s.start) + "''" + t.slice(b + 1 - s.start)
-  return t.trim()
+  let t = ''
+  let at = s.start
+  for (const [a, b] of s.quotes) {
+    t += text.slice(at, a - 1) + "''"
+    at = b + 1
+  }
+  return (t + text.slice(at, s.end)).trim()
 }
 
 const DOC = /<<(-?)[ \t]*(['"]?)([A-Za-z_]\w*)\2(?=[ \t;&|<>)]|$)/
@@ -326,9 +387,13 @@ export const dataMask = (cmd: string): string | null => {
     const t = shape(text, s)
     if (t && (s.hasWrite || hasQuotedFlag(text, s, t) || !INERT.some(re => re.test(t)))) return null
   }
-  let view = text
-  for (const [a, b] of sc.steps.flatMap(s => s.quotes).sort((x, y) => y[0] - x[0])) view = view.slice(0, a - 1) + "''" + view.slice(b + 1)
-  return view
+  let view = ''
+  let at = 0
+  for (const [a, b] of sc.steps.flatMap(s => s.quotes).sort((x, y) => x[0] - y[0])) {
+    view += text.slice(at, a - 1) + "''"
+    at = b + 1
+  }
+  return view + text.slice(at)
 }
 
 /**
@@ -398,7 +463,9 @@ const flatten = (text: string, isPowerShell: boolean): string => {
 export const matchRule = (rules: readonly Rule[], command: string, isPowerShell = false): Rule | undefined => {
   const text = (isPowerShell ? null : dataMask(command)) ?? command
   const flat = flatten(text, isPowerShell)
-  const views = [text, unquote(text, isPowerShell), flat, unquote(flat, isPowerShell)]
+  // A backslash (a backtick in PowerShell) before a line break joins the lines, in either line ending.
+  const joined = /[\\`]\r\n/.test(text) ? text.replace(/[\\`]\r\n/g, ' ') : text
+  const views = [...new Set([text, unquote(text, isPowerShell), flat, unquote(flat, isPowerShell), ...(joined === text ? [] : [joined, unquote(joined, isPowerShell)])])]
   return rules.find(r => views.some(v => r.re.test(v)))
 }
 

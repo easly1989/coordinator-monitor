@@ -3,7 +3,7 @@
 // session. Reading it is harmless. A file tool is judged by its target path, so the mod's own source and docs
 // stay editable; a shell command is judged by the words the shell reads from it, not by how it is written.
 
-import { dataMask, unquote } from './rules'
+import { afterRule, dataMask, unquote } from './rules'
 
 export const SHELL_TOOLS = new Set(['Bash', 'PowerShell'])
 
@@ -33,13 +33,31 @@ const clean = (text: string, home: string): string => {
 const DSEG = /(?<![\w.-])(?:\.claude|claude~\d+)(?![\w.-])/
 const D_EXACT = /^(?:\.claude|claude~\d+)$/
 const NAMES = /(?:\.claude|claude~\d+)\/(?:coordinator-monitor|coordi~\d)/
-// `cd` into `.claude`, then a word in command position or an argument that starts like the folder's name.
-const CD_THEN = /(?:^|[\s;&|(])(?:cd|pushd|sl|set-location|push-location)\s+(?:-\S+\s+)*[^\s;&|]*(?:\.claude|claude~\d+)\/?(?=[\s;&|)]|$)[\s\S]*(?:^|[\s;&|('"=])(?:\.{1,2}\/)?coordi(?:nator(?:-(?:monitor|[^\s/]*[*?[{$`])?)?(?=[\s/'";&|)*?[{$`]|$)|~\d)/
+const CD_HEAD = /(?:^|[\s;&|(])(?:cd|pushd|sl|set-location|push-location)\s+/g
+const CD_OPT = /-\S*\s+/y
+const CD_TARGET = /[^\s;&|]*/y
 const CD_STEP = /^\s*(?:cd|pushd|sl|set-location|push-location)(?:\s|$)/i
 const BUS_ENTRY = /\/coordinator-monitor\/(?:answers|sessions|rules\.json|queues\.json)(?=\/|$)/
 const JOINED = /join-path|\[io\.path\]::combine/
 // A link that can make the folder reachable under another name: a junction, a symlink or a hard link.
-const LINK = /\bmklink\b|\bfsutil\s+hardlink\b|createsymboliclink|new-item\b[^;&|]*-(?:item)?type\s+['"]?(?:junction|symboliclink|hardlink)|(?:^|[\s;&|(])ln(?:\.exe)?\s/
+const LINK = /\bmklink\b|\bfsutil\s+hardlink\b|createsymboliclink|(?:^|[\s;&|(])ln(?:\.exe)?\s/
+const LINK_ITEM = afterRule('link', String.raw`(?:\bnew-item\b|(?:^|[\s;&|(])ni(?=\s))`, /-(?:item)?type\s+['"]?(?:junction|symboliclink|hardlink)/)
+const isLink = (s: string): boolean => LINK.test(s) || LINK_ITEM.re.test(s)
+// What a `cd` into the folder may be followed by: a word that starts like the folder's name (`CM/rules.json`,
+// `>CM/x`, `./CM*`).
+const AFTER_CD = /(?:^|[\s;&|('"=<>])(?:\.{1,2}\/)?coordi(?:nator(?:-(?:monitor|[^\s/]*[*?[{$`])?)?(?=[\s/'";&|)*?[{$`]|$)|~\d)/
+// A command that puts files in a folder: copy, move, extract, link. Its destination is its last word, the word a
+// destination flag takes (`-C dir`, `-d dir`, `-t dir`, `-o dir`, `--directory`, `-Destination`), and for the
+// Windows ones every word (their switches look like paths).
+const COPY = new Set(['cp', 'mv', 'install', 'rsync', 'ln', 'ditto', 'scp', 'tar', 'bsdtar', 'unzip', '7z', '7za', '7zr', 'copy', 'xcopy', 'robocopy', 'move', 'copy-item', 'move-item', 'cpi', 'mi', 'expand-archive'])
+const EVERY_WORD = new Set(['copy', 'xcopy', 'robocopy', 'move'])
+const DEST_FLAG = /^--?(?:directory|target-directory|destination(?:path)?|dest|dp|[cdto])$/
+const DEST_GLUED = /^-[cdto]([^-].*)$/
+// An extended glob (`@(a|b)`, `*(x)`, `+(x)`, `?(x)`, `!(x)`) may match anything.
+const EXTGLOB = /[@*+?!]\([^\s)]*\)?/g
+const WORDS = /[\s;&|('")=]+/
+const base = (w: string): string => w.slice(w.lastIndexOf('/') + 1).replace(/\.exe$/, '')
+const hasCopy = (s: string): boolean => s.split(WORDS).some(w => COPY.has(base(w)))
 
 // Matching a glob needs no regex (a regex built from the text can be made to take seconds): `*` any run, `?` one
 // character, `[a-c]` / `[!x]` a class. A class with a POSIX name inside matches anything.
@@ -129,8 +147,9 @@ const expand = (s: string, left = { n: 64 }): string[] | null => {
  */
 const couldBeD = (seg: string): boolean => {
   if (!/[*?[{$`]/.test(seg) || !(seg.startsWith('.') || seg.includes('claud') || /^[[{]/.test(seg))) return false
-  if (/[$`]/.test(seg)) return true
-  const words = expand(seg)
+  if (/[$`]/.test(seg) || seg.length > 256) return true
+  // A brace sequence (`{a..z}`) and a PowerShell format slot (`{0}`) stand for any text.
+  const words = expand(seg.replace(/\{[^{},]*\.\.[^{},]*\}|\{\d+\}/g, '*'))
   return !words || words.some(w => {
     const t = tokens(w)
     return !t || wild(t, '.claude') || wild(t, 'claude~1')
@@ -152,6 +171,9 @@ const globHits = (s: string): boolean => {
   }
   return false
 }
+
+// Any path segment of any word, the last one too, that could be the folder: where a link points.
+const anyD = (s: string): boolean => s.split(WORDS).some(word => word.split('/').some(couldBeD))
 
 /** The real folder behind a path: the deepest part that exists is resolved (8.3 names, junctions, symlinks), the rest is kept. */
 const realOf = (segs: string[]): string => {
@@ -186,6 +208,54 @@ const segments = (path: string, home: string): string[] => {
   return segs
 }
 
+/** A word that names the folder itself or, through a glob, a brace or a variable, could (`..` collapsed). */
+const isD = (word: string, home: string): boolean => {
+  if (word.length > 1024) return true
+  // The folder's name has a dot, or is spelt with a `~`, a glob, a brace, a variable or a substitution.
+  if (!/[.~*?[{$%`(@!+]/.test(word)) return false
+  const segs = segments(word.replace(/['"]/g, ''), home)
+  const last = segs[segs.length - 1] ?? ''
+  return D_EXACT.test(last) || couldBeD(last)
+}
+
+/**
+ * A `cd` into the folder followed by a word that starts like the bus folder's name or by a copy, move, extract or
+ * link. Only the first such `cd` is read to the end of the text (every later one's rest is part of it), so the
+ * time is linear.
+ */
+const cdThen = (s: string, home: string): boolean => {
+  CD_HEAD.lastIndex = 0
+  for (let m = CD_HEAD.exec(s); m; m = CD_HEAD.exec(s)) {
+    let at = m.index + m[0].length
+    CD_OPT.lastIndex = at
+    while (CD_OPT.test(s)) at = CD_OPT.lastIndex
+    CD_TARGET.lastIndex = at
+    const target = CD_TARGET.exec(s)?.[0] ?? ''
+    if (!isD(target, home)) continue
+    const rest = s.slice(at + target.length)
+    return AFTER_CD.test(rest) || hasCopy(rest)
+  }
+  return false
+}
+
+/** A copy, move, extract or link whose destination could be the folder. */
+const destHit = (s: string, home: string): boolean => {
+  for (const step of s.split(/[;&|\n]+/)) {
+    const words = step.split(WORDS)
+    const at = words.findIndex(w => COPY.has(base(w)))
+    if (at < 0) continue
+    const args = words.slice(at + 1).filter(Boolean)
+    const dests = EVERY_WORD.has(base(words[at] ?? '')) ? args : [args.filter(w => !w.startsWith('-')).pop() ?? '']
+    args.forEach((w, k) => {
+      if (DEST_FLAG.test(w)) dests.push(args[k + 1] ?? '')
+      const glued = DEST_GLUED.exec(w)?.[1]
+      if (glued) dests.push(glued.replace(/^~(?=\/|$)/, home))
+    })
+    if (dests.some(d => d && isD(d, home))) return true
+  }
+  return false
+}
+
 /** True when a call that is not read-only writes the bus folder `base`. `home` is the person's home folder. */
 export const touchesBus = (e: BusCall, base: string, home: string): boolean => {
   if (e.isReadOnly) return false
@@ -216,14 +286,13 @@ export const touchesBus = (e: BusCall, base: string, home: string): boolean => {
   const raw = ps ? i.command.replace(/(['"])\s*\+\s*['"]/g, '') : i.command
   // The text, its words with the quotes and escapes gone, and the same where a backslash was a path separator.
   const check = (text: string): boolean =>
-    [text, unquote(text, ps), unquote(text.replace(/\\/g, '/'), ps)].some(t => {
+    [...new Set([text, unquote(text, ps), unquote(text.replace(/\\/g, '/'), ps)])].some(t => {
       const s = clean(t, h)
+      const x = s.replace(EXTGLOB, '*')
       return (
         names(s) ||
-        globHits(s) ||
-        CD_THEN.test(s) ||
-        (LINK.test(s) && DSEG.test(s)) ||
-        (ps && JOINED.test(s) && s.includes('.claude') && s.includes('coordinator'))
+        (ps && JOINED.test(s) && s.includes('.claude') && s.includes('coordinator')) ||
+        (x === s ? [s] : [s, x]).some(v => globHits(v) || cdThen(v, h) || (isLink(v) && (DSEG.test(v) || anyD(v))) || destHit(v, h))
       )
     })
   // Text only mentions the folder when every step prints or stores nothing (`git commit -m "…~/.claude/coordinator-monitor"`):

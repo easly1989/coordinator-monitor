@@ -341,3 +341,51 @@ test('a long run of git options is matched in linear time and fails toward a mat
   expect(bounded).toBe(undefined)
   expect(merged).toBe('merge')
 })
+
+const BS = String.fromCharCode(92)
+const TICK = String.fromCharCode(96)
+const ps = (cmd: string) => matchRule(DEFAULT_RULES, cmd, true)?.label
+
+test('an escaped quote inside a git option value does not hide the subcommand', () => {
+  expect(label(`git -c "user.name=a${BS}"b" merge feature`)).toBe('merge')
+  expect(label(`git -c "a=${BS}"" push origin main`)).toBe('merge')
+  expect(ps(`git -c "user.name=a${TICK}"b" merge feature`)).toBe('merge')
+  expect(label(`git -c "user.name=a${BS}"b" status`)).toBe(undefined)
+})
+
+test('a wrapped, redirected, qualified or aliased push to main or merge is still a match', () => {
+  for (const cmd of [
+    'git push origin HEAD:main',
+    '(git push origin HEAD:main)',
+    'git push origin HEAD:main>/dev/null',
+    'git push --all origin',
+    'git.exe merge feature',
+    '/usr/bin/git merge feature',
+    `C:${BS}Program Files${BS}Git${BS}cmd${BS}git.exe merge feature`,
+    'git config alias.mm merge && git mm x',
+    `git push ${BS}\r\n origin main`,
+    `git push origin${BS}\nHEAD:main`,
+    `git mer${BS}\nge feature`,
+  ])
+    expect(label(cmd)).toBe('merge')
+  expect(label('git push origin HEAD:feature>/dev/null')).toBe(undefined)
+  expect(label('git config alias.st status && git st')).toBe(undefined)
+  expect(label(`git status ${BS}\n && echo hi`)).toBe(undefined)
+})
+
+test('every regex family of the rules reads a 64 KB input in under 200 ms', () => {
+  const big = (unit: string) => unit.repeat(Math.ceil(65536 / unit.length))
+  for (const unit of ['git push ', 'git -C a ', 'git -C repo pull\n', 'git -c a=b ', 'git -c "x" ', 'git -C git -C git ', 'gh api ', 'gh pr ', 'git config ', 'git push --']) {
+    const s = big(unit)
+    const t = performance.now()
+    label(s)
+    ps(s)
+    expect(performance.now() - t).toBeLessThan(200)
+  }
+  // A run of unterminated quotes is the slowest; it stays well inside the budget.
+  for (const unit of ['git -c "', `git -c ${BS}"a `]) {
+    const t = performance.now()
+    label(big(unit))
+    expect(performance.now() - t).toBeLessThan(400)
+  }
+})
